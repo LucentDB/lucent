@@ -1,0 +1,57 @@
+[package]
+name = "lucent"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "lucent_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+default = []
+evals = []
+integration-tests = ["testcontainers", "testcontainers-modules"]
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { workspace = true }
+serde_json = "1"
+lucent-protocol = { path = "../crates/lucent-protocol" }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+uuid = { workspace = true }
+tempfile = "3"
+dashmap = { workspace = true }
+sqlparser = "0.62"
+futures = { workspace = true }
+keyring = { workspace = true }
+rig-core = { workspace = true }
+
+# Embedding model for semantic schema search
+fastembed = "4"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Integration test deps (behind `integration-tests` feature to avoid resolution conflicts)
+tokio-postgres = "0.7"
+testcontainers = { version = "0.27", optional = true }
+testcontainers-modules = { version = "0.15", features = ["postgres"], optional = true }
+
+# Re-use workspace dependencies for common crates
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+
+# New dependencies for MVP v2
+chrono = { version = "0.4", features = ["serde"] }
+ssh2 = "0.9"
+fs2 = "0.4"
+dirs = "6"
+
+# Tauri plugins
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"

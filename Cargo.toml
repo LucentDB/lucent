@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lucent-protocol",
+    "crates/lucent-worker-host",
+    "crates/lucent-driver-postgres",
+    "src-tauri",
+]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive", "rc"] }
+bincode = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "1"
+async-trait = "0.1"
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+dashmap = { version = "6" }
+sqlparser = { version = "0.55", features = ["visitor"] }
+keyring = { version = "3", features = ["apple-native"] }
+rig-core = { version = "=0.39.0" }

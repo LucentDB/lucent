@@ -1,0 +1,22 @@
+# Editor
+.idea/
+
+# Claude
+.claude/
+
+# Dependencies
+node_modules/
+
+# Build output
+target/
+dist/
+.fastembed_cache/
+
+# OS files
+.DS_Store
+
+# Worktrees
+.worktrees/
+
+# Git
+.gitignore

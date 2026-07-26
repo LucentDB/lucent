@@ -1,0 +1,13 @@
+[package]
+name = "lucent-worker-host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lucent-protocol = { path = "../lucent-protocol" }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+uuid = { workspace = true }
