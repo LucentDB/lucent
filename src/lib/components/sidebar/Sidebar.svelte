@@ -25,6 +25,7 @@
   let activeObject = $state(null);
 
   let searchQuery = $state('');
+  let searchQueryLower = $derived(searchQuery.toLowerCase());
   let objectLabels = {
     table: 'Tables',
     view: 'Views',
@@ -283,7 +284,7 @@
     {:else if databases.length === 0}
       <div class="empty-root">Connect to a database to explore</div>
     {:else}
-      {#each databases.filter( (d) => dbMatches(d.name, schemasByDb[d.name], objectsBySchema, searchQuery) ) as db}
+      {#each databases.filter( (d) => dbMatches(d.name, schemasByDb[d.name], objectsBySchema, searchQueryLower) ) as db}
         <div class="tree-node">
           <button class="node-row db-row" onclick={() => toggleDb(db.name)}>
             <svg
@@ -331,7 +332,7 @@
               {#if loadingSchemas.has(db.name)}
                 <div class="loading-line">Loading…</div>
               {:else if schemasByDb[db.name]}
-                {#each schemasByDb[db.name].filter( (s) => schemaMatches(s, objectsBySchema[s.name], searchQuery) ) as schema}
+                {#each schemasByDb[db.name].filter( (s) => schemaMatches(s, objectsBySchema[s.name], searchQueryLower) ) as schema}
                   <div class="schema-node">
                     <button
                       class="node-row schema-row"
@@ -375,7 +376,7 @@
                         {@const matchCount = objectsBySchema[
                           schema.name
                         ].filter((o) =>
-                          objectMatches(o.name, searchQuery),
+                          objectMatches(o.name, searchQueryLower),
                         ).length}
                         <span class="count-badge" class:match={matchCount > 0}
                           >{matchCount}</span
@@ -389,7 +390,7 @@
                           <div class="loading-line">Loading…</div>
                         {:else if objectsBySchema[schema.name]}
                           {#each groupObjects(objectsBySchema[schema.name])
-                            .map( (g) => ({ ...g, items: g.items.filter( (o) => objectMatches(o.name, searchQuery) ) }) )
+                            .map( (g) => ({ ...g, items: g.items.filter( (o) => objectMatches(o.name, searchQueryLower) ) }) )
                             .filter((g) => g.items.length > 0) as group}
                             <div class="group-node">
                               <button
