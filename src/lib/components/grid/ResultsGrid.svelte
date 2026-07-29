@@ -373,15 +373,21 @@
     return '';
   }
 
+  // ⚡ Bolt: Cache Intl.NumberFormat instances for massive performance boost in loops.
+  // Calling Number.toLocaleString() internally instantiates a new Intl.NumberFormat
+  // on every call, which is extremely expensive when formatting hundreds of cells.
+  const intFormatter = new Intl.NumberFormat(undefined);
+  const floatFormatter = new Intl.NumberFormat(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 6,
+  });
+
   function formatCell(value) {
     if (value === null || value === undefined) return 'NULL';
     if (typeof value === 'boolean') return String(value);
     if (typeof value === 'number') {
-      if (Number.isInteger(value)) return value.toLocaleString();
-      return value.toLocaleString(undefined, {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 6,
-      });
+      if (Number.isInteger(value)) return intFormatter.format(value);
+      return floatFormatter.format(value);
     }
     return String(value);
   }
