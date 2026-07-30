@@ -3,15 +3,18 @@
 
   let { commands = [], onSelect, onClose } = $props();
   let query = $state('');
+  let queryLower = $derived(query.toLowerCase());
   let selectedIndex = $state(0);
   let inputEl;
 
+  // ⚡ Bolt Performance Optimization: Compute toLowerCase() outside the filter loop
+  // This prevents repeated string allocations for the query when filtering large arrays.
   let filtered = $derived(
     commands.filter(
       (c) =>
         !query ||
-        c.label.toLowerCase().includes(query.toLowerCase()) ||
-        (c.searchText || '').toLowerCase().includes(query.toLowerCase()),
+        c.label.toLowerCase().includes(queryLower) ||
+        (c.searchText || '').toLowerCase().includes(queryLower),
     ),
   );
 

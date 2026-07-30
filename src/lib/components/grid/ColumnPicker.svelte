@@ -4,10 +4,12 @@
   let query = $state('');
   let inputEl = $state(null);
 
+  let queryLower = $derived(query.trim().toLowerCase());
+
+  // ⚡ Bolt Performance Optimization: Compute toLowerCase() outside the filter loop
+  // This prevents repeated string allocations for the query when filtering large arrays.
   let matches = $derived(
-    columns.filter((c) =>
-      c.name.toLowerCase().includes(query.trim().toLowerCase()),
-    ),
+    columns.filter((c) => c.name.toLowerCase().includes(queryLower)),
   );
 
   $effect(() => {
