@@ -4,10 +4,11 @@
   let query = $state('');
   let inputEl = $state(null);
 
+  // ⚡ Bolt: Lift repeated query normalization out of the filter loop
+  // to avoid O(N) redundant string allocations when filtering many columns.
+  let queryLower = $derived(query.trim().toLowerCase());
   let matches = $derived(
-    columns.filter((c) =>
-      c.name.toLowerCase().includes(query.trim().toLowerCase()),
-    ),
+    columns.filter((c) => c.name.toLowerCase().includes(queryLower)),
   );
 
   $effect(() => {

@@ -6,12 +6,15 @@
   let selectedIndex = $state(0);
   let inputEl;
 
+  // ⚡ Bolt: Lift repeated query normalization out of the filter loop
+  // to avoid O(N) redundant string allocations when filtering many commands.
+  let queryLower = $derived(query.toLowerCase());
   let filtered = $derived(
     commands.filter(
       (c) =>
         !query ||
-        c.label.toLowerCase().includes(query.toLowerCase()) ||
-        (c.searchText || '').toLowerCase().includes(query.toLowerCase()),
+        c.label.toLowerCase().includes(queryLower) ||
+        (c.searchText || '').toLowerCase().includes(queryLower),
     ),
   );
 
