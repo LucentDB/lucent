@@ -4,11 +4,11 @@
   let query = $state('');
   let inputEl = $state(null);
 
-  let matches = $derived(
-    columns.filter((c) =>
-      c.name.toLowerCase().includes(query.trim().toLowerCase()),
-    ),
-  );
+  let matches = $derived.by(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return columns;
+    return columns.filter((c) => c.name.toLowerCase().includes(q));
+  });
 
   $effect(() => {
     inputEl?.focus();
