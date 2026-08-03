@@ -4,10 +4,11 @@
   let query = $state('');
   let inputEl = $state(null);
 
+  // ⚡ Bolt: Cache lowercase/trimmed query outside loop to prevent repeated string allocations
+  let queryLower = $derived(query.trim().toLowerCase());
+
   let matches = $derived(
-    columns.filter((c) =>
-      c.name.toLowerCase().includes(query.trim().toLowerCase()),
-    ),
+    columns.filter((c) => c.name.toLowerCase().includes(queryLower)),
   );
 
   $effect(() => {

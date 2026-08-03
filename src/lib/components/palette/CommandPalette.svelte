@@ -6,12 +6,15 @@
   let selectedIndex = $state(0);
   let inputEl;
 
+  // ⚡ Bolt: Cache lowercase query outside loop to prevent repeated string allocations
+  let queryLower = $derived(query.toLowerCase());
+
   let filtered = $derived(
     commands.filter(
       (c) =>
         !query ||
-        c.label.toLowerCase().includes(query.toLowerCase()) ||
-        (c.searchText || '').toLowerCase().includes(query.toLowerCase()),
+        c.label.toLowerCase().includes(queryLower) ||
+        (c.searchText || '').toLowerCase().includes(queryLower),
     ),
   );
 
