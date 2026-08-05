@@ -6,12 +6,16 @@
   let selectedIndex = $state(0);
   let inputEl;
 
+  // ⚡ Bolt: Cache lowercased query outside the loop to prevent repeated string allocations
+  // Impact: O(1) allocation instead of O(N) allocations for search queries.
+  let queryLower = $derived(query.toLowerCase());
+
   let filtered = $derived(
     commands.filter(
       (c) =>
         !query ||
-        c.label.toLowerCase().includes(query.toLowerCase()) ||
-        (c.searchText || '').toLowerCase().includes(query.toLowerCase()),
+        c.label.toLowerCase().includes(queryLower) ||
+        (c.searchText || '').toLowerCase().includes(queryLower),
     ),
   );
 
