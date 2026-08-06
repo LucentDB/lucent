@@ -4,11 +4,12 @@
   let query = $state('');
   let inputEl = $state(null);
 
-  let matches = $derived(
-    columns.filter((c) =>
-      c.name.toLowerCase().includes(query.trim().toLowerCase()),
-    ),
-  );
+  // ⚡ Bolt: Cache query string transformation outside the filter loop to prevent
+  // repeated string allocations on every iteration, improving search performance.
+  let matches = $derived.by(() => {
+    const q = query.trim().toLowerCase();
+    return columns.filter((c) => c.name.toLowerCase().includes(q));
+  });
 
   $effect(() => {
     inputEl?.focus();

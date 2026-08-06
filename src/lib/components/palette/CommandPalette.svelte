@@ -6,14 +6,17 @@
   let selectedIndex = $state(0);
   let inputEl;
 
-  let filtered = $derived(
-    commands.filter(
+  // ⚡ Bolt: Cache query string transformation outside the filter loop to prevent
+  // repeated string allocations on every iteration, improving search performance.
+  let filtered = $derived.by(() => {
+    if (!query) return commands;
+    const q = query.toLowerCase();
+    return commands.filter(
       (c) =>
-        !query ||
-        c.label.toLowerCase().includes(query.toLowerCase()) ||
-        (c.searchText || '').toLowerCase().includes(query.toLowerCase()),
-    ),
-  );
+        c.label.toLowerCase().includes(q) ||
+        (c.searchText || '').toLowerCase().includes(q),
+    );
+  });
 
   $effect(() => {
     selectedIndex = 0;
