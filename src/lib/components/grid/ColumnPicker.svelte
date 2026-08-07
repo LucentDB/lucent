@@ -4,10 +4,12 @@
   let query = $state('');
   let inputEl = $state(null);
 
+  // ⚡ Bolt: Cache query.trim().toLowerCase() outside the filter loop to prevent
+  // massive string allocation overhead on tables with many columns.
+  let queryLower = $derived(query.trim().toLowerCase());
+
   let matches = $derived(
-    columns.filter((c) =>
-      c.name.toLowerCase().includes(query.trim().toLowerCase()),
-    ),
+    columns.filter((c) => c.name.toLowerCase().includes(queryLower)),
   );
 
   $effect(() => {

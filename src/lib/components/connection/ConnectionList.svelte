@@ -30,17 +30,19 @@
   let viewMode = $state<'list' | 'grid'>('list');
   let searchInput: HTMLInputElement | undefined = $state();
 
+  // ⚡ Bolt: Cache search query lower case to prevent overhead on large connection lists
+  let qLower = $derived(searchQuery.trim().toLowerCase());
+
   // Filtered profiles based on search query
   let filteredProfiles = $derived.by(() => {
-    if (!searchQuery.trim()) return profiles;
-    const q = searchQuery.toLowerCase();
+    if (!qLower) return profiles;
     return profiles.filter(
       (p) =>
-        p.name.toLowerCase().includes(q) ||
-        p.host.toLowerCase().includes(q) ||
-        p.user.toLowerCase().includes(q) ||
-        p.database.toLowerCase().includes(q) ||
-        (p.group ?? '').toLowerCase().includes(q),
+        p.name.toLowerCase().includes(qLower) ||
+        p.host.toLowerCase().includes(qLower) ||
+        p.user.toLowerCase().includes(qLower) ||
+        p.database.toLowerCase().includes(qLower) ||
+        (p.group ?? '').toLowerCase().includes(qLower),
     );
   });
 
