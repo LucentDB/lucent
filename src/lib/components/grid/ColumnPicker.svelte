@@ -4,9 +4,10 @@
   let query = $state('');
   let inputEl = $state(null);
 
+  let queryLower = $derived(query.trim().toLowerCase());
   let matches = $derived(
     columns.filter((c) =>
-      c.name.toLowerCase().includes(query.trim().toLowerCase()),
+      c.name.toLowerCase().includes(queryLower),
     ),
   );
 
