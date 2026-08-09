@@ -6,12 +6,16 @@
   let selectedIndex = $state(0);
   let inputEl;
 
+  // Normalize the query once per change, not once per filtered command —
+  // toLowerCase() inside the filter loop allocates per item.
+  let queryLower = $derived(query.toLowerCase());
+
   let filtered = $derived(
     commands.filter(
       (c) =>
         !query ||
-        c.label.toLowerCase().includes(query.toLowerCase()) ||
-        (c.searchText || '').toLowerCase().includes(query.toLowerCase()),
+        c.label.toLowerCase().includes(queryLower) ||
+        (c.searchText || '').toLowerCase().includes(queryLower),
     ),
   );
 

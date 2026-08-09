@@ -26,10 +26,12 @@
   let placed = $state(false);
   let optionEls = {};
 
+  // Normalize the query once per change, not once per filtered column —
+  // toLowerCase() inside the filter loop allocates per item.
+  let queryLower = $derived(query.trim().toLowerCase());
+
   let matches = $derived(
-    columns.filter((c) =>
-      c.name.toLowerCase().includes(query.trim().toLowerCase()),
-    ),
+    columns.filter((c) => c.name.toLowerCase().includes(queryLower)),
   );
 
   // A narrowed list can be shorter than the previous active index.
