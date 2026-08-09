@@ -4,10 +4,11 @@
   let query = $state('');
   let inputEl = $state(null);
 
+  // Cache the lowercased query outside the filter loop to prevent unnecessary string allocations
+  let queryLower = $derived(query.trim().toLowerCase());
+
   let matches = $derived(
-    columns.filter((c) =>
-      c.name.toLowerCase().includes(query.trim().toLowerCase()),
-    ),
+    columns.filter((c) => c.name.toLowerCase().includes(queryLower)),
   );
 
   $effect(() => {
