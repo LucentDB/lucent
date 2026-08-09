@@ -10,6 +10,7 @@ import {
   updateToolResult,
   finalizeSession,
   updateLast,
+  type TokenUsage,
 } from '../stores/chat.svelte.ts';
 
 export type ToolOutputPayload =
@@ -51,6 +52,7 @@ export type AiChannelEvent =
         prompt_tokens: number;
         completion_tokens: number;
         estimated_cost_usd: number | null;
+        cached_prompt_tokens: number;
       };
     };
 
@@ -99,9 +101,44 @@ export function handleAiEvent(conversationId: string, e: AiChannelEvent) {
           promptTokens: e.usage.prompt_tokens,
           completionTokens: e.usage.completion_tokens,
           estimatedCostUsd: e.usage.estimated_cost_usd,
+          cachedPromptTokens: e.usage.cached_prompt_tokens,
         },
       });
+      // One fetch per completed message — not continuous polling — to refresh
+      // the header's conversation totals (the backend accumulates on Done).
+      void refreshConversationUsage(conversationId);
       break;
+  }
+}
+
+/** Raw shape the backend returns for `get_ai_usage` (snake_case via serde). */
+export interface BackendTokenUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  estimated_cost_usd: number | null;
+  cached_prompt_tokens: number;
+}
+
+/** Accumulated LLM token usage for a conversation (zeros if none yet). */
+export async function getAiUsage(conversationId: string): Promise<TokenUsage> {
+  const raw = await invoke<BackendTokenUsage>('get_ai_usage', {
+    conversationId,
+  });
+  return {
+    promptTokens: raw.prompt_tokens,
+    completionTokens: raw.completion_tokens,
+    estimatedCostUsd: raw.estimated_cost_usd,
+    cachedPromptTokens: raw.cached_prompt_tokens,
+  };
+}
+
+async function refreshConversationUsage(conversationId: string): Promise<void> {
+  try {
+    const usage = await getAiUsage(conversationId);
+    const conv = chat.conversations.find((c) => c.id === conversationId);
+    if (conv) conv.usage = usage;
+  } catch {
+    // Non-fatal — the header simply keeps its previous value.
   }
 }
 
@@ -174,7 +211,9 @@ export async function cancelRun(conversationId: string) {
   return invoke('ai_cancel', { conversationId });
 }
 
-export async function executeDml(conversationId: string) {
+export async function executeDml(
+  conversationId: string,
+): Promise<{ rows_affected: number; sql: string }> {
   return invoke('execute_dml', { conversationId });
 }
 

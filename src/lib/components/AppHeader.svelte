@@ -6,12 +6,15 @@
     closeTab as closeChatTab,
     switchTab as switchChatTab,
   } from '../stores/chat.svelte.ts';
+  import { connections } from '../stores/connections.svelte';
+  import ReadOnlyBadge from './connection/ReadOnlyBadge.svelte';
 
   let {
     config,
     connected,
     showAiSettings,
     showChatPanel,
+    showLogs = false,
     hasTabs,
     connectionId = '',
     leftWidth = 0,
@@ -19,6 +22,7 @@
     onToggleSidebar,
     onToggleTheme,
     onToggleAi,
+    onToggleLogs,
     onToggleChat,
     onTogglePalette,
     onOpenChat,
@@ -29,6 +33,11 @@
     onSwitchTab,
     onCloseTab,
     onNewQuery,
+    // notebook file actions
+    onNotebookSave,
+    onNotebookSaveAs,
+    onNotebookOpen,
+    isTabDirty = (_id: string) => false,
     // batch close callbacks
     onCloseTabs,
   } = $props();
@@ -39,6 +48,7 @@
     y: number;
     tabId: string;
     isChat: boolean;
+    kind: string | null;
   } | null>(null);
 
   const chatTabsVisible = $derived(connected && chat.conversations.length > 0);
@@ -46,6 +56,7 @@
   function tabIconSvg(tab: any): string {
     if (tab.kind === 'query') return 'query';
     if (tab.kind === 'table') return 'table';
+    if (tab.kind === 'notebook') return 'notebook';
     return 'source';
   }
   function tabLabel(tab: any) {
@@ -87,10 +98,15 @@
     contextMenu = null;
   }
 
-  function handleContextMenu(e: MouseEvent, tabId: string, isChat: boolean) {
+  function handleContextMenu(
+    e: MouseEvent,
+    tabId: string,
+    isChat: boolean,
+    kind: string | null = null,
+  ) {
     e.preventDefault();
     e.stopPropagation();
-    contextMenu = { x: e.clientX, y: e.clientY, tabId, isChat };
+    contextMenu = { x: e.clientX, y: e.clientY, tabId, isChat, kind };
   }
 
   // Close context menu on any click outside
@@ -189,6 +205,7 @@
         {#if !sidebarCollapsed}
           <span class="db-icon">⌬</span>
           <span class="db-name">{config?.database || 'database'}</span>
+          <ReadOnlyBadge capabilities={connections.capabilities} />
         {/if}
         <span class="brand-spacer"></span>
         <button
@@ -227,7 +244,8 @@
                 onSwitchTab?.(tab.id);
                 closeContextMenu();
               }}
-              oncontextmenu={(e) => handleContextMenu(e, tab.id, false)}
+              oncontextmenu={(e) =>
+                handleContextMenu(e, tab.id, false, tab.kind)}
               title={tabLabel(tab)}
             >
               <span class="tab-icon {tabIconSvg(tab)}">
@@ -269,6 +287,8 @@
                       d="M3 9h18"
                     /><path d="M3 15h18" /><path d="M9 3v18" />
                   </svg>
+                {:else if tab.kind === 'notebook'}
+                  <span class="tab-icon-text">📓</span>
                 {:else}
                   <svg
                     width="14"
@@ -292,6 +312,13 @@
                 {/if}
               </span>
               <span class="tab-label">{tabLabel(tab)}</span>
+              {#if isTabDirty(tab.id)}
+                <span
+                  class="dirty-dot"
+                  title="Unsaved changes"
+                  aria-label="Unsaved changes"
+                ></span>
+              {/if}
               <span
                 class="tab-close"
                 onclick={(e) => {
@@ -333,6 +360,31 @@
         >
           <path d="M12 3l1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5z" />
           <path d="M18 14l.6 2.4L21 17l-2.4.6L18 20l-.6-2.4L15 17l2.4-.6z" />
+        </svg>
+      </button>
+
+      <button
+        class="icon-btn logs-toggle"
+        class:active={showLogs}
+        onclick={onToggleLogs}
+        title="Worker logs"
+      >
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <polyline points="4 17 10 11 4 5" /><line
+            x1="12"
+            y1="19"
+            x2="20"
+            y2="19"
+          />
         </svg>
       </button>
 
@@ -427,6 +479,85 @@
       style="left:{cm.x}px; top:{cm.y}px"
       onclick={(e) => e.stopPropagation()}
     >
+      {#if cm.kind === 'notebook'}
+        <button
+          class="menu-item"
+          onclick={() => {
+            onNotebookSave?.(cm.tabId);
+            closeContextMenu();
+          }}
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path
+              d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"
+            />
+            <polyline points="17 21 17 13 7 13 7 21" />
+            <polyline points="7 3 7 8 15 8" />
+          </svg>
+          Save
+          <span class="menu-shortcut">⌘S</span>
+        </button>
+        <button
+          class="menu-item"
+          onclick={() => {
+            onNotebookSaveAs?.(cm.tabId);
+            closeContextMenu();
+          }}
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path
+              d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"
+            />
+            <line x1="12" y1="11" x2="12" y2="17" />
+            <line x1="9" y1="14" x2="15" y2="14" />
+          </svg>
+          Save As…
+          <span class="menu-shortcut">⇧⌘S</span>
+        </button>
+        <button
+          class="menu-item"
+          onclick={() => {
+            onNotebookOpen?.();
+            closeContextMenu();
+          }}
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path
+              d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+            />
+          </svg>
+          Open Notebook…
+          <span class="menu-shortcut">⌘O</span>
+        </button>
+        <div class="menu-separator"></div>
+      {/if}
       <button class="menu-item" onclick={() => closeTab(cm.tabId, cm.isChat)}>
         <svg
           width="14"
@@ -620,14 +751,15 @@
   .tab {
     display: flex;
     align-items: center;
-    gap: 5px;
-    height: 28px;
-    padding: 0 8px;
+    gap: 6px;
+    height: 26px;
+    padding: 0 10px;
     font-size: var(--text-xs);
+    font-weight: var(--weight-medium);
     color: var(--text-secondary);
     background: transparent;
-    border: none;
-    border-radius: var(--radius-md);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
     cursor: pointer;
     white-space: nowrap;
     flex-shrink: 0;
@@ -635,17 +767,17 @@
     max-width: 180px;
     user-select: none;
     -webkit-user-select: none;
-    transition:
-      background var(--transition-fast),
-      color var(--transition-fast);
+    transition: all var(--transition-fast);
   }
   .tab:hover {
     color: var(--text);
     background: var(--bg-hover);
   }
   .tab.active {
-    color: var(--accent);
-    background: var(--accent-soft);
+    color: var(--text);
+    background: var(--bg-elevated);
+    border-color: var(--border);
+    box-shadow: var(--shadow-sm);
   }
   .tab-icon {
     flex-shrink: 0;
@@ -663,6 +795,14 @@
   }
   .tab-icon.chat {
     color: var(--accent);
+  }
+  .tab-icon.notebook {
+    color: var(--accent);
+  }
+  .tab-icon-text {
+    font-size: 13px;
+    line-height: 1;
+    flex-shrink: 0;
   }
   .tab-label {
     overflow: hidden;
@@ -814,6 +954,10 @@
     color: var(--accent);
     background: var(--accent-soft);
   }
+  .icon-btn.logs-toggle.active {
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
   .icon-btn.chat-toggle.active {
     background: var(--accent-soft);
     color: var(--accent);
@@ -835,6 +979,26 @@
   }
   :global(.dark) .context-menu {
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+  .menu-shortcut {
+    margin-left: auto;
+    padding-left: 16px;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .menu-separator {
+    height: 1px;
+    margin: 4px 6px;
+    background: var(--border);
+  }
+  .dirty-dot {
+    width: 6px;
+    height: 6px;
+    margin-left: 4px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
   }
   .menu-item {
     display: flex;

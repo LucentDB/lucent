@@ -120,14 +120,13 @@ fn eval_connection_config(conn_str: &str) -> ConnectionConfig {
             }
         }
     }
-    ConnectionConfig {
-        host,
-        port,
-        user,
-        password,
-        database,
-        ssl_mode: "prefer".to_string(),
-    }
+    ConnectionConfig::new("postgres")
+        .with("host", host)
+        .with("port", port.to_string())
+        .with("user", user)
+        .with("database", database)
+        .with("ssl_mode", "prefer")
+        .with_secret(password)
 }
 
 #[cfg(test)]
@@ -139,30 +138,30 @@ mod grading_tests {
         let cfg = eval_connection_config(
             "host=db.example.com port=5433 user=admin password=s3cret dbname=analytics",
         );
-        assert_eq!(cfg.host, "db.example.com");
-        assert_eq!(cfg.port, 5433);
-        assert_eq!(cfg.user, "admin");
-        assert_eq!(cfg.password, "s3cret");
-        assert_eq!(cfg.database, "analytics");
+        assert_eq!(cfg.get("host"), Some("db.example.com"));
+        assert_eq!(cfg.port(), Some(5433));
+        assert_eq!(cfg.get("user"), Some("admin"));
+        assert_eq!(cfg.secret.as_deref(), Some("s3cret"));
+        assert_eq!(cfg.get("database"), Some("analytics"));
     }
 
     #[test]
     fn eval_connection_config_defaults() {
         let cfg = eval_connection_config("");
-        assert_eq!(cfg.host, "127.0.0.1");
-        assert_eq!(cfg.port, 5432);
-        assert_eq!(cfg.user, "postgres");
-        assert_eq!(cfg.password, "postgres");
-        assert_eq!(cfg.database, "demo");
+        assert_eq!(cfg.get("host"), Some("127.0.0.1"));
+        assert_eq!(cfg.port(), Some(5432));
+        assert_eq!(cfg.get("user"), Some("postgres"));
+        assert_eq!(cfg.secret.as_deref(), Some("postgres"));
+        assert_eq!(cfg.get("database"), Some("demo"));
     }
 
     #[test]
     fn eval_connection_config_partial_override() {
         let cfg = eval_connection_config("host=10.0.0.1 dbname=production");
-        assert_eq!(cfg.host, "10.0.0.1");
-        assert_eq!(cfg.port, 5432); // default
-        assert_eq!(cfg.database, "production");
-        assert_eq!(cfg.user, "postgres"); // default
+        assert_eq!(cfg.get("host"), Some("10.0.0.1"));
+        assert_eq!(cfg.port(), Some(5432)); // default
+        assert_eq!(cfg.get("database"), Some("production"));
+        assert_eq!(cfg.get("user"), Some("postgres")); // default
     }
 
     #[test]
@@ -323,6 +322,7 @@ mod runner {
                 ));
             let tool_ctx = crate::ai::tools::AiToolContext {
                 db: db.clone(),
+                capabilities: None,
                 config: config.clone(),
                 schema_graph: graph.clone(),
                 embedder: embedder.clone(),
@@ -331,7 +331,9 @@ mod runner {
             let system_prompt = {
                 let g = graph.lock().await;
                 let tree = crate::ai::context::tree_from_graph("demo".into(), g.as_ref().unwrap());
-                crate::ai::context::build_system_prompt(&tree, g.as_ref(), true)
+                // Evals run against a fixed in-memory schema with no live
+                // connection, so there are no capabilities to disclose.
+                crate::ai::context::build_system_prompt(&tree, g.as_ref(), true, None)
             };
             let tools = crate::ai::tools::all_tools(tool_ctx.clone());
             let agent = crate::ai::agent::DatabaseAgent::new(provider, tools, tool_ctx);

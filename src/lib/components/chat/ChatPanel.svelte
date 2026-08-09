@@ -1,9 +1,13 @@
 <script lang="ts">
   import ChatMessage from './ChatMessage.svelte';
   import ChatInput from './ChatInput.svelte';
+  import ChatLanding from './ChatLanding.svelte';
   import TypingIndicator from './TypingIndicator.svelte';
-  import Icon from '../icons/Icon.svelte';
-  import { chat, getConversationTitle } from '../../stores/chat.svelte.ts';
+  import {
+    chat,
+    getConversationTitle,
+    formatUsageLine,
+  } from '../../stores/chat.svelte.ts';
 
   let {
     onSend,
@@ -13,6 +17,10 @@
     onNewChat,
     onSwitchConv,
     onCloseConv,
+    connected = false,
+    database = null,
+    connectionName = null,
+    onOpenSettings,
   }: {
     onSend: (m: string) => void;
     onRunDml: () => void;
@@ -21,6 +29,11 @@
     onNewChat?: () => void;
     onSwitchConv?: (id: string) => void;
     onCloseConv?: (id: string) => void;
+    /** Forwarded to ChatLanding for its empty state. */
+    connected?: boolean;
+    database?: string | null;
+    connectionName?: string | null;
+    onOpenSettings?: () => void;
   } = $props();
 
   let msgsEl: HTMLDivElement;
@@ -29,6 +42,12 @@
     chat.conversations.find((c) => c.id === chat.activeConversationId),
   );
   const hasMessages = $derived(Boolean(conv && conv.messages.length > 0));
+
+  const usageTitle = $derived(
+    conv?.usage
+      ? `${conv.usage.promptTokens} prompt tokens (${conv.usage.cachedPromptTokens} cached) · ${conv.usage.completionTokens} completion tokens`
+      : '',
+  );
 
   $effect(() => {
     if (hasMessages && msgsEl && conv) {
@@ -77,6 +96,11 @@
         <span class="live-dot"></span>
       {/if}
     </div>
+    {#if conv && conv.usage && conv.usage.promptTokens + conv.usage.completionTokens > 0}
+      <span class="usage-line" title={usageTitle}>
+        {formatUsageLine(conv.usage)}
+      </span>
+    {/if}
     <div class="panel-actions">
       <button
         class="panel-icon-btn"
@@ -148,54 +172,13 @@
         <ChatInput {onSend} />
       </div>
     {:else}
-      <div class="landing">
-        <div class="hero">
-          <div class="hero-icon"><Icon name="star" size={20} /></div>
-          <h1>AI Copilot</h1>
-          <p>
-            Ask questions, run queries, and manage your database with natural
-            language.
-          </p>
-        </div>
-
-        <div class="input-wrap">
-          <ChatInput {onSend} />
-        </div>
-
-        <div class="suggestions">
-          <span class="suggest-label">Try asking:</span>
-          <div class="chips">
-            <button
-              class="chip"
-              onclick={() => onSend('Show recent orders with user details')}
-            >
-              <span class="chip-icon"><Icon name="chart" size={14} /></span>
-              <span>Show recent orders with user details</span>
-            </button>
-            <button
-              class="chip"
-              onclick={() => onSend('What tables track user activity?')}
-            >
-              <span class="chip-icon"><Icon name="search" size={14} /></span>
-              <span>What tables track user activity?</span>
-            </button>
-            <button
-              class="chip"
-              onclick={() => onSend('Delete old cancelled orders')}
-            >
-              <span class="chip-icon"><Icon name="clean" size={14} /></span>
-              <span>Delete old cancelled orders</span>
-            </button>
-            <button
-              class="chip"
-              onclick={() => onSend('Which tables have the most rows?')}
-            >
-              <span class="chip-icon"><Icon name="trending" size={14} /></span>
-              <span>Which tables have the most rows?</span>
-            </button>
-          </div>
-        </div>
-      </div>
+      <ChatLanding
+        {onSend}
+        {connected}
+        {database}
+        {connectionName}
+        {onOpenSettings}
+      />
     {/if}
   </div>
 </aside>
@@ -338,6 +321,14 @@
     flex-shrink: 0;
     margin: 0 4px;
   }
+  .usage-line {
+    font-size: 10px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+    padding: 0 6px;
+    font-variant-numeric: tabular-nums;
+  }
   @keyframes live-pulse {
     0%,
     100% {
@@ -375,98 +366,6 @@
   }
   .messages:hover::-webkit-scrollbar-thumb {
     background: var(--border);
-  }
-
-  .landing {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    height: 100%;
-    padding: 32px 28px;
-    gap: 20px;
-    overflow-y: auto;
-  }
-  .hero {
-    text-align: center;
-    max-width: 480px;
-  }
-  .hero-icon {
-    width: 40px;
-    height: 40px;
-    border-radius: var(--radius-lg);
-    background: var(--accent-soft);
-    color: var(--accent);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 20px;
-    margin: 0 auto 12px;
-  }
-  .hero h1 {
-    font-size: var(--text-xl);
-    font-weight: var(--weight-bold);
-    margin: 0 0 6px;
-    color: var(--text);
-  }
-  .hero p {
-    color: var(--text-secondary);
-    font-size: var(--text-sm);
-    margin: 0;
-    line-height: 1.5;
-  }
-  .input-wrap {
-    width: 100%;
-    max-width: 600px;
-  }
-
-  .suggestions {
-    width: 100%;
-    max-width: 600px;
-  }
-  .suggest-label {
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    font-weight: var(--weight-semibold);
-    display: block;
-    margin-bottom: 8px;
-  }
-  .chips {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .chip {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 8px 12px;
-    border-radius: var(--radius-md);
-    border: 1px solid var(--border);
-    background: var(--bg-surface);
-    cursor: pointer;
-    font-size: var(--text-sm);
-    color: var(--text-secondary);
-    text-align: left;
-    transition: all var(--transition-fast);
-  }
-  .chip:hover {
-    border-color: var(--accent);
-    color: var(--text);
-    background: var(--accent-soft);
-  }
-  .chip-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 20px;
-    height: 20px;
-    flex-shrink: 0;
-    color: var(--accent);
-    opacity: 0.7;
   }
 
   .input-area {

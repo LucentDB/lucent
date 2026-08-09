@@ -135,9 +135,19 @@ impl SearchSchema {
 
         // Keyword mode
         if mode == "keyword" || mode == "hybrid" {
-            let mut db = self.ctx.db.lock().await;
-            let client = db.as_mut().ok_or(ToolError::NotConnected)?;
-            match super::objects::keyword_search_objects(client, query, None, None).await {
+            let conn_id = match self.ctx.connection_id {
+                Some(c) => c,
+                None => return Err(ToolError::NotConnected),
+            };
+            let client = self
+                .ctx
+                .db
+                .lock()
+                .await
+                .clone()
+                .ok_or(ToolError::NotConnected)?;
+            match super::objects::keyword_search_objects(&client, conn_id, query, None, None).await
+            {
                 Ok(items) => {
                     sections.push(format_keyword_section(&items));
                 }

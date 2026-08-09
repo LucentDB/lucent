@@ -58,6 +58,8 @@ async fn e2e_text_protocol_tool_parsing() {
         "Let me search for that.\n[TOOL_CALL] search_objects({\"query\":\"sarah\"}) [/TOOL_CALL]";
     let calls = lucent_lib::ai::tools::all_tools(lucent_lib::ai::tools::AiToolContext {
         db: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        connection_id: None,
+        capabilities: None,
         config: lucent_lib::ai::config::AiConfig::default(),
         schema_graph: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         embedder: std::sync::Arc::new(tokio::sync::Mutex::new(None)),

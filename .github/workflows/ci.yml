@@ -41,3 +41,21 @@ jobs:
       - name: test (unit tier)
         working-directory: src-tauri
         run: cargo test
+
+  rust-workspace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install Tauri system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: test (workspace + Docker integration tier)
+        run: cargo test --workspace
+      - name: integration tests (AI module, real Postgres)
+        working-directory: src-tauri
+        run: cargo test --features integration-tests

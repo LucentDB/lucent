@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 use crate::ai::config::AiConfig;
 use crate::ai::events::{AiEvent, DmlApprovalPayload, TokenUsage};
 use crate::ai::tools::AiToolContext;
+use crate::ai::truncate_utf8;
 
 // ── Message types ─────────────────────────────────────────────────────────
 
@@ -182,7 +183,6 @@ pub enum LlmError {
 
 // ── Conversation state ────────────────────────────────────────────────────
 
-#[derive(Debug)]
 pub struct ConversationState {
     pub connection_id: String,
     pub history: Vec<Message>,
@@ -191,6 +191,11 @@ pub struct ConversationState {
     /// run_readonly_query summaries keyed by normalized SQL — the model
     /// occasionally re-runs an identical query; serve it from here instead.
     pub query_cache: std::collections::HashMap<String, String>,
+    /// The IPC channel the frontend created for this conversation. Kept so
+    /// `execute_dml` can resume the agent on the same stream after the user
+    /// approves a staged DML statement (C1). `Channel` is `Clone`; it is not
+    /// `Debug`, which is why `ConversationState` no longer derives `Debug`.
+    pub event_channel: Option<tauri::ipc::Channel<crate::ai::events::AiEvent>>,
 }
 
 impl ConversationState {
@@ -201,6 +206,7 @@ impl ConversationState {
             state: AgentState::Idle,
             created_at: Instant::now(),
             query_cache: std::collections::HashMap::new(),
+            event_channel: None,
         }
     }
 
@@ -591,12 +597,7 @@ impl DatabaseAgent {
                             description, sql, ..
                         } => format!("DML: {description}. SQL: {sql}"),
                     };
-                    // Cap single tool output at 5000 chars to protect context window
-                    if raw.len() > 5000 {
-                        format!("{}... [truncated {} chars]", &raw[..5000], raw.len() - 5000)
-                    } else {
-                        raw
-                    }
+                    truncate_tool_output(&raw)
                 };
 
                 // Store fresh query results in the conversation cache.
@@ -673,6 +674,19 @@ impl DatabaseAgent {
 }
 
 // ── History-recording helpers ──────────────────────────────────────────────
+
+/// Cap a single tool output at 5000 bytes for the LLM context window.
+fn truncate_tool_output(raw: &str) -> String {
+    if raw.len() > 5000 {
+        format!(
+            "{}... [truncated {} chars]",
+            truncate_utf8(raw, 5000),
+            raw.len() - 5000
+        )
+    } else {
+        raw.to_string()
+    }
+}
 
 /// Remove SQL comments (`-- …\n` and `/* … */`) outside string literals.
 /// Single-quote literals with doubled-quote escaping are respected; nested
@@ -1074,5 +1088,23 @@ mod sink_tests {
             content: "hi".into(),
         });
         assert_eq!(sink.0.lock().unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod truncation_tests {
+    use super::*;
+
+    #[test]
+    fn tool_output_truncation_never_panics_on_multibyte_boundary() {
+        let raw = "中".repeat(6000);
+        let cut = truncate_tool_output(&raw);
+        assert!(std::str::from_utf8(cut.as_bytes()).is_ok());
+        assert!(cut.contains("truncated"), "{cut}");
+    }
+
+    #[test]
+    fn short_tool_output_passes_through_untouched() {
+        assert_eq!(truncate_tool_output("SELECT 1"), "SELECT 1");
     }
 }

@@ -37,6 +37,10 @@ export async function executeQuery(
   return invoke('execute_query', { sql, limit, offset, sort, filters });
 }
 
+export function cancelQuery() {
+  return invoke('cancel_query');
+}
+
 export async function getDatabases() {
   return invoke('get_databases');
 }
@@ -57,8 +61,8 @@ export async function getFunctionSource(schema, name) {
   return invoke('get_function_source', { schema, name });
 }
 
-export async function getViewSource(schema, name) {
-  return invoke('get_view_source', { schema, name });
+export async function getViewSource(schema, name, kind = 'view') {
+  return invoke('get_view_source', { schema, name, kind });
 }
 
 export async function getSequenceInfo(schema, name) {
@@ -107,6 +111,14 @@ export async function testConnection(id) {
   return invoke('test_connection', { id });
 }
 
+export async function listDrivers() {
+  return invoke('list_drivers');
+}
+
+export async function connectionCapabilities() {
+  return invoke('connection_capabilities');
+}
+
 // ─── SSH Config IPC ───────────────────────────────────────────────────
 
 /** @param {any} config @param {string | null} [secret] */
@@ -138,4 +150,11 @@ export async function deleteHistoryEntry(id) {
 
 export async function clearHistory() {
   return invoke('clear_history');
+}
+
+// ─── Logs Drawer IPC ──────────────────────────────────────────────────
+
+/** @param {number} [after] index to tail from — pass the count of lines already held */
+export async function getLogs(after = 0) {
+  return invoke('get_logs', { after });
 }

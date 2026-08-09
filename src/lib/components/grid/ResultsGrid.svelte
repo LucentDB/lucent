@@ -1,3 +1,20 @@
+<script context="module">
+  /**
+   * Render one cell for display.
+   *
+   * Numbers are rendered verbatim — NO locale separators. This is a database
+   * client: users select and copy these values, and `4,200,000,000,000` is not
+   * a number anyone can paste back into a query. `String(n)` also renders
+   * floats at their shortest round-trippable form, which is what we want.
+   */
+  export function formatCell(value) {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'boolean') return String(value);
+    if (typeof value === 'number') return String(value);
+    return String(value);
+  }
+</script>
+
 <script>
   import { untrack } from 'svelte';
   import FilterBar from './FilterBar.svelte';
@@ -16,6 +33,7 @@
     fetchedCount = 0,
     totalCount = null,
     isEnd = false,
+    truncated = false,
     duration = 0,
     error = null,
     tabId = null,
@@ -28,18 +46,19 @@
     compact = false,
     loading = false,
     onDescribeFilters = null,
+    pageSize = 200,
+    embedded = false,
+    summary = null,
   } = $props();
-
-  const PAGE_SIZE = 200;
 
   let checkedRows = $state(new Set());
   let barOpen = $state(false);
   let pickerOpen = $state(false);
   let columnWidths = $state({});
   let resizing = $state(null);
-  let filters = $state(normalize(initFilters));
-  let sortCol = $state(initSortCol);
-  let sortDir = $state(initSortDir);
+  let filters = $state(normalize($state.snapshot(initFilters)));
+  let sortCol = $state($state.snapshot(initSortCol));
+  let sortDir = $state($state.snapshot(initSortDir));
   let page = $state(0);
   let tableWrapperEl = $state(null);
 
@@ -75,7 +94,7 @@
   // after sort/filter change or re-execute in the same tab).
   $effect(() => {
     void fetchedCount;
-    if (fetchedCount > 0 && fetchedCount <= PAGE_SIZE) {
+    if (fetchedCount > 0 && fetchedCount <= pageSize) {
       page = 0;
       if (tableWrapperEl) {
         tableWrapperEl.scrollTop = 0;
@@ -85,7 +104,7 @@
 
   // Clamp page so it never points past the fetched data (handles race conditions
   // where goNext advances before fetchedCount catches up, or tab state resets).
-  let maxPage = $derived(Math.max(0, Math.ceil(fetchedCount / PAGE_SIZE) - 1));
+  let maxPage = $derived(Math.max(0, Math.ceil(fetchedCount / pageSize) - 1));
   $effect(() => {
     void maxPage;
     if (page > maxPage) {
@@ -94,10 +113,22 @@
   });
 
   // Current page's rows
-  let pageRows = $derived(rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE));
+  let pageRows = $derived(rows.slice(page * pageSize, (page + 1) * pageSize));
 
   // "Next" is enabled unless we've reached the end AND the next page isn't cached.
-  let canGoNext = $derived(!isEnd || (page + 1) * PAGE_SIZE < fetchedCount);
+  let canGoNext = $derived(!isEnd || (page + 1) * pageSize < fetchedCount);
+
+  /** The whole result is in hand and fits one page — nothing left to page. */
+  let fitsOnePage = $derived(isEnd && fetchedCount <= pageSize);
+
+  /**
+   * Counting is only worth offering when rows might exist beyond what we hold.
+   * Once isEnd is true the fetched count IS the total, so the button would run
+   * a COUNT(*) to restate a number already on screen.
+   */
+  let canCountAll = $derived(
+    !!onCountAll && totalCount === null && !isEnd && fetchedCount > 0,
+  );
 
   // Local guard to prevent racing ahead of in-flight fetches when clicking Next rapidly
   let isFetchingMore = $state(false);
@@ -105,7 +136,7 @@
   async function goNext() {
     if (isFetchingMore) return;
     const nextPage = page + 1;
-    const nextOffset = nextPage * PAGE_SIZE;
+    const nextOffset = nextPage * pageSize;
     if (nextOffset >= fetchedCount) {
       // Need to fetch — onNeedMore fetches the next chunk from offset=fetchedCount
       isFetchingMore = true;
@@ -118,7 +149,7 @@
     // Only advance if the next page actually has data now (either it was cached,
     // or the fetch filled it). Importantly: isEnd means "no more rows" — it should
     // NEVER let us advance past the last valid page.
-    if (fetchedCount > nextPage * PAGE_SIZE) {
+    if (fetchedCount > nextPage * pageSize) {
       page = nextPage;
     }
   }
@@ -282,8 +313,31 @@
   // --- Column resize ---
   let resizeGuide = $state(null);
 
+  const MIN_COL_WIDTH = 80;
+  const MAX_COL_WIDTH = 800;
+
   function getColWidth(i) {
     return columnWidths[i] || 150;
+  }
+
+  /**
+   * Keyboard equivalent of dragging the resize handle. The handle is a focusable
+   * separator, so it needs to respond to arrows or it is a focus trap that does
+   * nothing.
+   */
+  function handleResizeKeydown(e, i) {
+    const STEP = e.shiftKey ? 40 : 8;
+    let next = null;
+    if (e.key === 'ArrowLeft') next = getColWidth(i) - STEP;
+    else if (e.key === 'ArrowRight') next = getColWidth(i) + STEP;
+    else if (e.key === 'Home') next = MIN_COL_WIDTH;
+    else if (e.key === 'End') next = MAX_COL_WIDTH;
+    if (next === null) return;
+    e.preventDefault();
+    columnWidths = {
+      ...columnWidths,
+      [i]: Math.max(MIN_COL_WIDTH, Math.min(MAX_COL_WIDTH, next)),
+    };
   }
 
   // Keep the table width exactly matching the sum of column widths so
@@ -352,13 +406,13 @@
       checkedRows = new Set();
     } else {
       checkedRows = new Set(
-        Array.from({ length: visibleCount }, (_, i) => page * PAGE_SIZE + i),
+        Array.from({ length: visibleCount }, (_, i) => page * pageSize + i),
       );
     }
   }
 
   function toggleCheck(i) {
-    const absoluteIndex = page * PAGE_SIZE + i;
+    const absoluteIndex = page * pageSize + i;
     const next = new Set(checkedRows);
     if (next.has(absoluteIndex)) next.delete(absoluteIndex);
     else next.add(absoluteIndex);
@@ -372,24 +426,11 @@
     if (typeof value === 'number') return 'cell-number';
     return '';
   }
-
-  function formatCell(value) {
-    if (value === null || value === undefined) return 'NULL';
-    if (typeof value === 'boolean') return String(value);
-    if (typeof value === 'number') {
-      if (Number.isInteger(value)) return value.toLocaleString();
-      return value.toLocaleString(undefined, {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 6,
-      });
-    }
-    return String(value);
-  }
 </script>
 
 <svelte:window onkeydown={handleWindowKeydown} />
 
-<div class="results-grid" class:compact>
+<div class="results-grid" class:compact class:embedded>
   <!-- Action Toolbar -->
   <div class="toolbar">
     <div class="toolbar-left">
@@ -398,31 +439,41 @@
       {:else if fetchedCount > 0}
         <span class="row-count">
           <span class="check-icon">✓</span>
-          {#if compact}
-            {fetchedCount.toLocaleString()} rows
+          {#if compact || isEnd}
+            <!-- Complete result: the count is the count, nothing was "fetched
+                 so far". -->
+            {fetchedCount.toLocaleString()} row{fetchedCount === 1 ? '' : 's'}
           {:else}
             {fetchedCount.toLocaleString()} row{fetchedCount === 1 ? '' : 's'} fetched
           {/if}
-          {#if totalCount !== null}
+          {#if totalCount !== null && totalCount !== fetchedCount}
             <span class="total-count"
               >({totalCount.toLocaleString()} total)</span
             >
           {/if}
         </span>
+        {#if truncated}
+          <span class="truncated-note"
+            >— stopped at {fetchedCount.toLocaleString()} rows; the query was cancelled
+            on the server</span
+          >
+        {/if}
         {#if duration > 0}
           <span class="duration">{duration}s</span>
         {/if}
-        {#if !compact && totalCount === null && onCountAll}
+        {#if canCountAll && !compact}
           <button class="tool-btn count-btn" onclick={onCountAll}
             >Count all rows</button
           >
         {/if}
+      {:else if summary}
+        <span class="no-results">{summary}</span>
       {:else}
         <span class="no-results">No results</span>
       {/if}
     </div>
     <div class="toolbar-right">
-      {#if compact && totalCount === null && onCountAll && fetchedCount > 0}
+      {#if canCountAll && compact}
         <button
           class="icon-tool-btn"
           onclick={onCountAll}
@@ -528,6 +579,8 @@
         <span class="empty-title">No rows match your filters</span>
         <span class="empty-desc">Loosen or remove a filter to see rows</span>
         <button class="tool-btn" onclick={clearFilters}>Clear filters</button>
+      {:else if summary}
+        <span class="empty-title">{summary}</span>
       {:else}
         <span class="empty-title">No rows found</span>
         <span class="empty-desc">The query returned no results</span>
@@ -535,6 +588,11 @@
     </div>
   {:else if columns.length > 0}
     <div class="table-wrapper" class:loading bind:this={tableWrapperEl}>
+      {#if loading}
+        <div class="refetch-bar" role="status" aria-label="Refreshing rows">
+          <span class="refetch-bar-fill"></span>
+        </div>
+      {/if}
       {#if resizeGuide !== null}
         <div class="resize-guide" style="left: {resizeGuide}px"></div>
       {/if}
@@ -568,14 +626,37 @@
                   <button
                     class="col-menu-trigger"
                     aria-label="Column actions for {col.name}"
+                    aria-haspopup="menu"
                     aria-expanded={columnMenu?.column === col.name}
-                    onclick={(e) => openColumnMenu(e, col)}>⌄</button
+                    onclick={(e) => openColumnMenu(e, col)}
                   >
-                  <div
+                    <svg
+                      width="10"
+                      height="10"
+                      viewBox="0 0 12 12"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.75"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M3 4.5 6 7.5 9 4.5" />
+                    </svg>
+                  </button>
+                  <!-- A button, not a div with role="separator": a focusable
+                       separator is valid ARIA but Svelte's a11y checker treats
+                       the role as non-interactive, and a button gives the same
+                       keyboard affordance without the lint exception. -->
+                  <button
                     class="resize-handle"
+                    aria-label="Resize {col.name} column, currently {getColWidth(
+                      i,
+                    )} pixels"
                     onmousedown={(e) => startResize(e, i)}
+                    onkeydown={(e) => handleResizeKeydown(e, i)}
                     onclick={(e) => e.stopPropagation()}
-                  ></div>
+                  ></button>
                 </div>
               </th>
             {/each}
@@ -583,12 +664,12 @@
         </thead>
         <tbody>
           {#each pageRows as row, i}
-            <tr class:even={(page * PAGE_SIZE + i) % 2 === 0}>
+            <tr class:even={(page * pageSize + i) % 2 === 0}>
               <td class="row-num">
                 <input
                   type="checkbox"
                   onchange={() => toggleCheck(i)}
-                  checked={checkedRows.has(page * PAGE_SIZE + i)}
+                  checked={checkedRows.has(page * pageSize + i)}
                 />
               </td>
               {#each row as cell, j}
@@ -615,14 +696,14 @@
     </div>
 
     <!-- Page-based pagination: hidden when all rows fit on one page -->
-    {#if !(isEnd && fetchedCount <= PAGE_SIZE)}
+    {#if !fitsOnePage}
       <div class="pagination">
         <span class="page-info">
           Rows {Math.min(
-            page * PAGE_SIZE + 1,
+            page * pageSize + 1,
             fetchedCount,
           ).toLocaleString()}–{Math.min(
-            (page + 1) * PAGE_SIZE,
+            (page + 1) * pageSize,
             fetchedCount,
           ).toLocaleString()}
           {#if totalCount !== null}
@@ -676,6 +757,22 @@
     background: var(--bg-surface);
   }
 
+  /* Embedded: the cell already provides framing, so the grid drops its own. */
+  .results-grid.embedded {
+    border: none;
+    border-radius: 0;
+    background: transparent;
+  }
+  .results-grid.embedded th,
+  .results-grid.embedded td {
+    padding-top: 2px;
+    padding-bottom: 2px;
+  }
+  .results-grid.embedded .pagination {
+    padding: 4px 8px;
+    border-top: 1px solid var(--border);
+  }
+
   /* Toolbar */
   .toolbar {
     display: flex;
@@ -716,6 +813,11 @@
     color: var(--danger);
     font-weight: var(--weight-medium);
     font-size: var(--text-base);
+  }
+  .truncated-note {
+    color: var(--warning);
+    font-size: var(--text-sm);
+    margin-left: 0.5rem;
   }
   .no-results {
     color: var(--text-muted);
@@ -861,15 +963,17 @@
   }
   th {
     text-align: left;
-    padding: var(--space-2) var(--space-3);
+    padding: 4px 8px;
+    height: 38px;
     background: var(--bg-elevated);
     border-bottom: 2px solid var(--grid-header-border);
     border-right: 1px solid var(--grid-line);
     font-weight: var(--weight-semibold);
-    font-size: var(--text-sm);
+    font-size: var(--text-xs);
     color: var(--text);
     white-space: nowrap;
     user-select: none;
+    box-sizing: border-box;
   }
   th:last-child {
     border-right: none;
@@ -877,32 +981,53 @@
   th.sortable {
     cursor: pointer;
   }
-  th.sortable:hover {
-    background: var(--bg-hover);
-  }
-  th.active .col-name {
-    color: var(--accent);
-  }
   .col-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 4px;
     width: 100%;
+    height: 100%;
   }
-  /* .col-info is now a <button> styled above */
+  .col-info {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 1px;
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+    overflow: hidden;
+    min-width: 0;
+    flex: 1;
+    text-align: left;
+  }
   .col-name {
     font-weight: var(--weight-semibold);
-    letter-spacing: 0.04em;
+    font-size: 12px;
+    letter-spacing: 0.01em;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
+    width: 100%;
   }
   .col-type {
-    font-size: var(--text-xs);
+    font-size: 10px;
+    font-family: var(--font-mono);
     font-weight: var(--weight-normal);
     color: var(--text-muted);
-    text-transform: none;
+    text-transform: lowercase;
+    opacity: 0.75;
     letter-spacing: 0;
-    margin-top: 2px;
+    line-height: 1.2;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    width: 100%;
   }
   th.row-num {
     width: 44px;
@@ -924,8 +1049,20 @@
     top: 0;
     bottom: 0;
     width: 16px;
+    padding: 0;
+    border: none;
+    background: transparent;
     cursor: col-resize;
     z-index: 3;
+  }
+  /* The 2px indicator is drawn by ::after, so the default ring would sit 16px
+     wide over the neighbouring column. Show the indicator instead. */
+  .resize-handle:focus-visible {
+    outline: none;
+  }
+  .resize-handle:focus-visible::after {
+    background: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
   }
   .resize-handle::after {
     content: '';
@@ -1117,44 +1254,62 @@
     margin-left: var(--space-2);
     font-size: var(--text-sm);
   }
+  /* Refetching keeps the previous rows readable but clearly stale, rather than
+     blanking the grid — blanking used to unmount the filter UI entirely. */
   .table-wrapper.loading tbody {
-    opacity: 0.45;
-    transition: opacity var(--transition-fast);
+    opacity: 0.5;
+    transition: opacity var(--transition-normal);
   }
-  .table-wrapper.loading::before {
-    content: '';
+  /* An indeterminate bar driven by transform, not background-position: a
+     gradient sized to its element cannot be swept by shifting its position,
+     and transform is the only property here that stays off the paint path. */
+  .refetch-bar {
     position: sticky;
     top: 0;
     left: 0;
-    display: block;
+    z-index: 5;
     height: 2px;
-    background: linear-gradient(90deg, transparent, var(--accent), transparent);
-    animation: filter-loading 1s linear infinite;
-    z-index: 4;
+    overflow: hidden;
+    background: var(--accent-soft);
   }
-  @keyframes filter-loading {
+  .refetch-bar-fill {
+    display: block;
+    width: 40%;
+    height: 100%;
+    background: var(--accent);
+    border-radius: var(--radius-full);
+    animation: refetch-sweep 1.1s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+    will-change: transform;
+  }
+  @keyframes refetch-sweep {
     from {
-      background-position: -200px 0;
+      transform: translateX(-100%);
     }
     to {
-      background-position: 200px 0;
+      transform: translateX(250%);
     }
   }
 
-  .col-info {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    overflow: hidden;
-    padding: 0;
-    border: none;
-    background: transparent;
-    color: inherit;
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
+  @media (prefers-reduced-motion: reduce) {
+    .refetch-bar-fill {
+      width: 100%;
+      animation: refetch-pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes refetch-pulse {
+      0%,
+      100% {
+        opacity: 0.35;
+      }
+      50% {
+        opacity: 1;
+      }
+    }
   }
+
   .col-menu-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: center;
     flex-shrink: 0;
     width: 18px;
     height: 18px;
@@ -1162,14 +1317,22 @@
     border-radius: var(--radius-sm);
     background: transparent;
     color: var(--text-muted);
-    font-size: var(--text-sm);
-    line-height: 1;
     cursor: pointer;
     opacity: 0;
-    transition: opacity var(--transition-fast);
+    transition:
+      opacity var(--transition-fast),
+      background var(--transition-fast),
+      color var(--transition-fast);
   }
+  .col-menu-trigger:hover {
+    background: var(--bg-surface);
+    color: var(--text);
+  }
+  /* Revealed on hover, but never hidden from keyboard users or while its menu
+     is open — an invisible trigger that still takes focus is a trap. */
   th:hover .col-menu-trigger,
-  .col-menu-trigger:focus-visible {
+  .col-menu-trigger:focus-visible,
+  .col-menu-trigger[aria-expanded='true'] {
     opacity: 1;
   }
 </style>

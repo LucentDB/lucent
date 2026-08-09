@@ -1,4 +1,7 @@
-//! Single source of truth for SQL literal and identifier quoting.
+//! PostgreSQL literal and identifier quoting.
+//!
+//! Reached through `crate::sql_builder::PostgresSqlBuilder`, not called
+//! directly by feature code — quoting is a per-driver decision.
 //!
 //! PostgreSQL uses standard-conforming string literals by default
 //! (`standard_conforming_strings = on`), which means the backslash is an

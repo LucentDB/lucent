@@ -30,20 +30,17 @@
 
   function handleSelect(id: string) {
     selectedId = id;
-    // Connect via the connections store (this calls invoke('connect', { connectionId, config: null }))
     connections
       .connectToProfile(id)
       .then(() => {
-        // On success, notify parent with profile details so App.svelte can
-        // update UI state without reconnecting (which would need a password).
         const profile = connections.profiles.find((p) => p.id === id);
         if (profile) {
           onConnect?.({
             connectionId: id,
-            host: profile.host,
-            port: profile.port,
-            user: profile.user,
-            database: profile.database,
+            host: profile.params['host'] ?? '',
+            port: Number(profile.params['port']) || 0,
+            user: profile.params['user'] ?? '',
+            database: profile.params['database'] ?? '',
           });
         } else {
           onConnect?.({
@@ -55,9 +52,7 @@
           });
         }
       })
-      .catch(() => {
-        // Error is already set in connections store
-      });
+      .catch(() => {});
   }
 
   function handleNewConnection() {
@@ -100,22 +95,6 @@
   function handleCancelForm() {
     view = { mode: 'list' };
   }
-
-  function handleInlineConnect(config: {
-    host: string;
-    port: number;
-    user: string;
-    password: string;
-    database: string;
-  }) {
-    connections
-      .connectInline(config)
-      .then(() => {
-        addRecentConnection(config);
-        onConnect?.(config);
-      })
-      .catch(() => {});
-  }
 </script>
 
 <div class="connection-manager">
@@ -125,7 +104,9 @@
       <span class="logo">⌬</span>
       <h1 class="title">Lucent</h1>
     </div>
-    <p class="tagline">Connect to a PostgreSQL database to get started</p>
+    <p class="tagline">
+      Select a saved database or enter connection parameters to get started
+    </p>
   </div>
 
   {#if view.mode === 'list'}
@@ -139,6 +120,7 @@
         testingIds={connections.testingIds}
         onSelect={handleSelect}
         onTest={handleTestProfile}
+        onEdit={handleEditProfile}
         onDelete={handleDeleteProfile}
         onDuplicate={handleDuplicateProfile}
         onNewConnection={handleNewConnection}
@@ -147,7 +129,7 @@
       <!-- Error banner -->
       {#if connectError || connections.errorMessage}
         <div class="error-banner">
-          {connections.errorMessage ?? connectError}
+          <span>{connections.errorMessage ?? connectError}</span>
           <button
             class="dismiss-btn"
             onclick={() => (connections.errorMessage = null)}>✕</button
@@ -157,22 +139,18 @@
 
       <!-- Inline connection form for quick connect -->
       {#if !connections.activeProfileId}
-        <div class="inline-section">
-          <div class="inline-header">
+        <div class="quick-connect-container">
+          <div class="quick-connect-header">
             <h3>Quick Connect</h3>
           </div>
           <ConnectionForm
             onSave={(p, _pw) => {
-              // Save and then connect
               handleSaveProfile(p, _pw);
-              // If password is provided, connect too
               if (_pw) {
                 connections.connectInline({
-                  host: p.host,
-                  port: p.port,
-                  user: p.user,
-                  password: _pw,
-                  database: p.database,
+                  driver: p.driver,
+                  params: { ...p.params },
+                  secret: _pw,
                 });
               }
             }}
@@ -198,7 +176,7 @@
           </svg>
           Back
         </button>
-        <h2>New Connection</h2>
+        <h2>New Connection Profile</h2>
       </div>
       <ConnectionForm onSave={handleSaveProfile} onCancel={handleCancelForm} />
     </div>
@@ -220,7 +198,7 @@
           </svg>
           Back
         </button>
-        <h2>Edit Connection</h2>
+        <h2>Edit Connection Profile</h2>
       </div>
       <ConnectionForm
         profile={view.profile}
@@ -246,28 +224,33 @@
     flex-direction: column;
     background: var(--bg);
     overflow: hidden;
-    max-width: 640px;
+    max-width: 760px;
     margin: 0 auto;
     width: 100%;
+    height: 100%;
+    box-sizing: border-box;
   }
   .manager-header {
     text-align: center;
-    padding: 24px 24px 16px;
+    padding: 32px 24px 20px;
     flex-shrink: 0;
   }
   .brand {
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 8px;
-    margin-bottom: 4px;
+    gap: 10px;
+    margin-bottom: 6px;
   }
   .logo {
-    font-size: 28px;
+    font-size: 32px;
     color: var(--accent);
+    filter: drop-shadow(
+      0 2px 8px color-mix(in srgb, var(--accent) 30%, transparent)
+    );
   }
   .title {
-    font-size: 22px;
+    font-size: 24px;
     font-weight: 700;
     color: var(--text);
     letter-spacing: -0.03em;
@@ -281,7 +264,10 @@
   .manager-body {
     flex: 1;
     overflow-y: auto;
-    padding: 0 16px 16px;
+    padding: 0 24px 32px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
   }
   .manager-body.form-panel {
     padding-top: 4px;
@@ -289,11 +275,11 @@
   .panel-header {
     display: flex;
     align-items: center;
-    gap: 12px;
-    margin-bottom: 16px;
+    gap: 14px;
+    margin-bottom: 20px;
   }
   .panel-header h2 {
-    font-size: 16px;
+    font-size: 17px;
     font-weight: 600;
     color: var(--text);
     margin: 0;
@@ -301,14 +287,18 @@
   .back-btn {
     display: flex;
     align-items: center;
-    gap: 4px;
-    padding: 6px 10px;
+    gap: 6px;
+    padding: 7px 12px;
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: var(--bg-surface);
     color: var(--text-secondary);
     font-size: 13px;
+    font-weight: 500;
     cursor: pointer;
+    transition:
+      background 0.12s,
+      color 0.12s;
   }
   .back-btn:hover {
     background: var(--bg-hover);
@@ -319,8 +309,8 @@
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 10px 16px;
-    margin: 12px 0;
+    padding: 12px 16px;
+    margin: 16px 0;
     background: color-mix(in srgb, var(--error) 10%, transparent);
     color: var(--error);
     border-radius: var(--radius-md);
@@ -343,37 +333,36 @@
   .dismiss-btn:hover {
     background: color-mix(in srgb, var(--error) 20%, transparent);
   }
-  .inline-section {
-    margin-top: 20px;
-    padding: 16px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    background: var(--bg-surface);
+  .quick-connect-container {
+    margin-top: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
   }
-  .inline-header {
+  .quick-connect-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 12px;
+    padding: 0 4px;
   }
-  .inline-header h3 {
-    font-size: 13px;
+  .quick-connect-header h3 {
+    font-size: 14px;
     font-weight: 600;
     color: var(--text-secondary);
     margin: 0;
   }
   .shortcut-hint {
     text-align: center;
-    font-size: 11px;
+    font-size: 12px;
     color: var(--text-muted);
-    padding: 8px 16px;
+    padding: 12px 24px;
     flex-shrink: 0;
   }
   .shortcut-hint kbd {
-    font-size: 10px;
+    font-size: 11px;
     background: var(--bg-hover);
-    padding: 1px 5px;
-    border-radius: 3px;
+    padding: 2px 6px;
+    border-radius: 4px;
     border: 1px solid var(--border);
     font-family: var(--font-mono);
   }

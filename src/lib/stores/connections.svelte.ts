@@ -6,15 +6,38 @@ import { invoke } from '@tauri-apps/api/core';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
+export interface DriverField {
+  key: string;
+  label: string;
+  kind: 'text' | 'number' | 'password' | 'path' | 'select';
+  required: boolean;
+  default: string | null;
+  options: string[];
+  placeholder: string | null;
+}
+
+export interface DriverDescriptor {
+  id: string;
+  displayName: string;
+  fields: DriverField[];
+  hasSecret: boolean;
+}
+
+export interface ConnectionCapabilities {
+  driver: string;
+  displayName: string;
+  engineEnforcedReadonly: boolean;
+  readonlyDisclosure: string | null;
+}
+
 export interface ConnectionProfile {
   id: string;
   name: string;
   driver: string;
-  host: string;
-  port: number;
-  user: string;
-  database: string;
-  sslMode: 'disable' | 'prefer' | 'require';
+  /** `@mention` handle used by the AI to address this connection. */
+  alias: string | null;
+  /** Driver-defined connection parameters — see `drivers`. */
+  params: Record<string, string>;
   sshTunnelId: string | null;
   group: string | null;
   color: string | null;
@@ -48,6 +71,10 @@ class ConnectionsStore {
   loading = $state(true);
   /** Loading states per profile ID for test-connection */
   testingIds = $state<Set<string>>(new Set());
+  /** Driver descriptors that drive the connection form. Static per build. */
+  drivers = $state<DriverDescriptor[]>([]);
+  /** Capabilities of the live connection, or null when disconnected. */
+  capabilities = $state<ConnectionCapabilities | null>(null);
 
   /** Active profile object (derived) */
   activeProfile = $derived(
@@ -87,6 +114,19 @@ class ConnectionsStore {
     // Call loadProfiles directly — $effect is not valid outside .svelte components.
     // The store is instantiated at module level, so this runs on import.
     this.loadProfiles();
+    this.loadDrivers();
+  }
+
+  async loadDrivers() {
+    try {
+      this.drivers = await invoke<DriverDescriptor[]>('list_drivers');
+    } catch (e) {
+      console.error('Failed to load drivers:', e);
+    }
+  }
+
+  driverFor(id: string): DriverDescriptor | null {
+    return this.drivers.find((d) => d.id === id) ?? null;
   }
 
   async loadProfiles() {
@@ -159,6 +199,9 @@ class ConnectionsStore {
       });
       this.activeProfileId = id;
       this.status = 'connected';
+      this.capabilities = await invoke<ConnectionCapabilities | null>(
+        'connection_capabilities',
+      );
       // Refresh profiles to update last_used
       this.loadProfiles();
       return result;
@@ -173,12 +216,14 @@ class ConnectionsStore {
     }
   }
 
+  /**
+   * Connect with an inline driver config (no saved profile). `secret` is the
+   * keychain-format password for drivers that use one.
+   */
   async connectInline(config: {
-    host: string;
-    port: number;
-    user: string;
-    password: string;
-    database: string;
+    driver: string;
+    params: Record<string, string>;
+    secret?: string;
   }) {
     this.status = 'connecting';
     this.errorMessage = null;
@@ -186,6 +231,9 @@ class ConnectionsStore {
       await invoke('connect', { connectionId: null, config });
       this.activeProfileId = null;
       this.status = 'connected';
+      this.capabilities = await invoke<ConnectionCapabilities | null>(
+        'connection_capabilities',
+      );
     } catch (e) {
       const msg =
         typeof e === 'string'
@@ -204,6 +252,7 @@ class ConnectionsStore {
       this.status = 'disconnected';
       this.activeProfileId = null;
       this.errorMessage = null;
+      this.capabilities = null;
     }
   }
 
@@ -212,6 +261,7 @@ class ConnectionsStore {
     this.status = 'disconnected';
     this.activeProfileId = null;
     this.errorMessage = null;
+    this.capabilities = null;
   }
 }
 

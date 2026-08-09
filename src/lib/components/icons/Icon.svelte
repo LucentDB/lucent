@@ -181,4 +181,77 @@
   >
     <path d="M6 4l4 4-4 4" />
   </svg>
+{:else if name === 'sparkle'}
+  <!-- Filled four-point sparkle. Reads as "AI" far better than an outlined
+       five-point star, which looks like a favourite/bookmark control. -->
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
+    <path
+      d="M12 2.6l1.55 4.3a3.6 3.6 0 0 0 2.55 2.55L20.4 11l-4.3 1.55a3.6 3.6 0 0 0-2.55 2.55L12 19.4l-1.55-4.3a3.6 3.6 0 0 0-2.55-2.55L3.6 11l4.3-1.55A3.6 3.6 0 0 0 10.45 6.9L12 2.6z"
+    />
+    <path
+      d="M18.7 15.6l.62 1.72 1.72.62-1.72.62-.62 1.72-.62-1.72-1.72-.62 1.72-.62.62-1.72z"
+      opacity="0.7"
+    />
+  </svg>
+{:else if name === 'arrow'}
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2.2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <line x1="5" y1="12" x2="18" y2="12" /><polyline
+      points="12 6 18 12 12 18"
+    />
+  </svg>
+{:else if name === 'settings'}
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <line x1="4" y1="8" x2="20" y2="8" /><line
+      x1="4"
+      y1="16"
+      x2="20"
+      y2="16"
+    /><circle cx="10" cy="8" r="2.2" /><circle cx="15" cy="16" r="2.2" />
+  </svg>
+{:else if name === 'replay'}
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <path d="M3 10a9 9 0 1 1 3 6.7" /><polyline points="3 4 3 10 9 10" />
+  </svg>
+{:else if name === 'database'}
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <ellipse cx="12" cy="5" rx="8" ry="3" /><path
+      d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"
+    /><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" />
+  </svg>
 {/if}

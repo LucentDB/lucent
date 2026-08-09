@@ -1,0 +1,65 @@
+# Release workflow: sign + notarize + GitHub Release on tag push.
+#
+# Trigger: push any tag matching `v*` (e.g. `v1.0.0`).
+#   git tag v1.0.0 && git push origin v1.0.0
+#
+# Required repository secrets (Settings > Secrets and variables > Actions):
+#   APPLE_CERTIFICATE          base64-encoded .p12 signing certificate
+#                              (create: `openssl pkcs12 -export ...` or from Keychain,
+#                              then `base64 -i cert.p12`)
+#   APPLE_CERTIFICATE_PASSWORD password for the .p12
+#   APPLE_ID                   Apple Developer account email (notarization)
+#   APPLE_PASSWORD             app-specific password for notarytool (not your Apple ID
+#                              password; generate at appleid.apple.com > App-Specific Passwords)
+#   APPLE_TEAM_ID              Apple Developer Team ID
+#   GITHUB_TOKEN               provided automatically by GitHub
+#
+# See the production-readiness design doc:
+#   docs/superpowers/specs/2026-08-04-production-readiness-design.md (§12 signing/notarization)
+#
+# On first tagged push: the workflow signs the app, notarizes it, and creates a
+# draft GitHub Release with the .dmg attached. If secrets are absent the job
+# fails loudly (by design). macOS must be signed + notarized (Apple Developer
+# ID) per spec §12, and distributed via GitHub Releases + a Homebrew cask.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm ci
+      - name: Import Apple certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > /tmp/apple-cert.p12
+          security create-keychain -p temp temp.keychain-db
+          security set-keychain-settings -lut 21600 temp.keychain-db
+          security unlock-keychain -p temp temp.keychain-db
+          security import /tmp/apple-cert.p12 -k temp.keychain-db -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k temp temp.keychain-db
+          security list-keychains -d user -s temp.keychain-db
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Lucent ${{ github.ref_name }}"
+          releaseDraft: true
+          prerelease: false

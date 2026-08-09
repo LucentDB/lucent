@@ -253,11 +253,15 @@ describe('cell context menu', () => {
   });
 
   it('offers null checks for a NULL cell', async () => {
-    const { getByText, getAllByText } = setup({
+    const { getByText, container } = setup({
       rows: [[1, null, true, '2026-01-01T00:00:00Z']],
       fetchedCount: 1,
     });
-    await openCellMenu(getAllByText, 'NULL');
+    // NULL cells now render as empty (formatCell returns ''), so target the
+    // cell by its cell-null class instead of its old 'NULL' text.
+    const cell = container.querySelector('tbody tr td.cell-null');
+    if (!cell) throw new Error('Could not find NULL cell');
+    await fireEvent.contextMenu(cell);
     expect(getByText('Filter by is null')).toBeTruthy();
     expect(getByText('Filter by is not null')).toBeTruthy();
   });

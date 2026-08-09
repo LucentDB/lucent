@@ -16,15 +16,31 @@ lucent-protocol = { path = "../lucent-protocol" }
 lucent-worker-host = { path = "../lucent-worker-host" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
-tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
+tokio-postgres = { version = "0.7", features = [
+  "with-uuid-1",
+  "with-chrono-0_4",
+  "with-serde_json-1",
+] }
+tokio-postgres-rustls = "0.14"
+# ring feature pinned explicitly — the workspace graph enables both rustls
+# crypto providers (aws-lc-rs via default features elsewhere), so neither is
+# auto-selected; make_tls() installs ring. Feature unification means this
+# also stays true when dev-deps pull bollard/ring in.
+rustls = { version = "0.23", features = ["ring"] }
+rustls-native-certs = "0.8"
 rust_decimal = { version = "1", features = ["db-tokio-postgres"] }
 futures = { workspace = true }
 uuid = { workspace = true }
-chrono = "0.4"
+# Calendar math for the text decoder. Hand-rolling civil-from-days is a
+# correctness risk we have no reason to take.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 serde_json = "1"
 
 [dev-dependencies]
-testcontainers = "0.27"
+# `watchdog` stops+removes live test containers on SIGINT/SIGTERM/SIGQUIT —
+# without it, an interrupted test run (Ctrl-C, CI timeout) leaks every
+# running container: process death skips Drop cleanup entirely.
+testcontainers = { version = "0.27", features = ["watchdog"] }
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
 tempfile = "3"
 uuid = { workspace = true }

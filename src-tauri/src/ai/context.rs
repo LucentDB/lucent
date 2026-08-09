@@ -1,3 +1,4 @@
+use lucent_protocol::ConnectionId;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -23,6 +24,25 @@ pub struct SchemaNode {
     pub functions: Vec<String>,
 }
 
+/// The read-only enforcement block for the system prompt.
+///
+/// Deliberately returns `Option` and is placed **after** the cacheable static
+/// prefix: a per-connection sentence inside the prefix would break prompt
+/// caching for every conversation.
+pub(crate) fn enforcement_block(
+    readonly: lucent_protocol::ReadOnlyMode,
+    display_name: &str,
+) -> Option<String> {
+    readonly.disclosure().map(|note| {
+        format!(
+            "READ-ONLY ENFORCEMENT ({display_name}):\n\
+             - {note}\n\
+             - Do not tell the user a query is guaranteed safe by the database. \
+             It is not, on this connection."
+        )
+    })
+}
+
 /// Build the system prompt from a schema tree.
 /// Static content (tools, RULES) comes FIRST before dynamic schema content
 /// so prompt caching sees a stable prefix across different connected databases.
@@ -38,6 +58,7 @@ pub fn build_system_prompt(
     schema: &SchemaTree,
     graph: Option<&SchemaGraph>,
     _send_results_to_ai: bool,
+    capabilities: Option<&lucent_protocol::DriverCapabilities>,
 ) -> String {
     let mut lines: Vec<String> = vec![];
 
@@ -68,7 +89,7 @@ pub fn build_system_prompt(
     lines.push(String::new());
     lines.push("RULES:".into());
     lines.push(
-        "- Never query information_schema or pg_catalog directly. Use the tools above.".into(),
+        "- Never query catalog or system metadata tables directly. Use the tools above.".into(),
     );
     lines.push("- For INSERT/UPDATE/DELETE use preview_dml only — user must confirm.".into());
     lines.push(
@@ -175,6 +196,14 @@ pub fn build_system_prompt(
         Some(ContextTier::Pull) | None => { /* existing behavior, no extra guidance */ }
     }
     lines.push(String::new());
+
+    // ── Per-connection facts (after the cacheable prefix) ────────────────
+    if let Some(caps) = capabilities {
+        if let Some(block) = enforcement_block(caps.readonly, &caps.display_name) {
+            lines.push(String::new());
+            lines.push(block);
+        }
+    }
 
     // ── Dynamic content (changes per database / per connection) ─────────
     lines.push(format!(
@@ -288,6 +317,73 @@ struct CacheEntry {
     fetched_at: Instant,
 }
 
+/// Group a flat object list into the tree the prompt builder consumes.
+///
+/// Partition children are dropped — the parent already represents them, and
+/// listing 84 near-identical partitions would blow the context budget while
+/// adding no schema information.
+#[cfg(test)]
+pub(crate) fn objects_to_schema_tree(
+    database_name: String,
+    objects: Vec<lucent_protocol::ObjectSummary>,
+) -> SchemaTree {
+    objects_to_schema_tree_with_namespaces(database_name, Vec::new(), objects)
+}
+
+/// As `objects_to_schema_tree`, but seeded with a namespace list so schemas
+/// containing no objects still appear. An empty schema is information.
+pub(crate) fn objects_to_schema_tree_with_namespaces(
+    database_name: String,
+    namespaces: Vec<String>,
+    objects: Vec<lucent_protocol::ObjectSummary>,
+) -> SchemaTree {
+    use lucent_protocol::ObjectKind;
+    use std::collections::BTreeMap;
+
+    // BTreeMap keeps schemas sorted, which keeps the cacheable prompt prefix
+    // byte-stable across refreshes.
+    let mut by_schema: BTreeMap<String, SchemaNode> = BTreeMap::new();
+    for name in namespaces {
+        by_schema.entry(name.clone()).or_insert_with(|| SchemaNode {
+            name,
+            tables: Vec::new(),
+            views: Vec::new(),
+            functions: Vec::new(),
+        });
+    }
+
+    for object in objects {
+        if object.is_partition_child {
+            continue;
+        }
+        let schema = object.reference.namespace.join(".");
+        let node = by_schema
+            .entry(schema.clone())
+            .or_insert_with(|| SchemaNode {
+                name: schema,
+                tables: Vec::new(),
+                views: Vec::new(),
+                functions: Vec::new(),
+            });
+        match object.reference.kind {
+            ObjectKind::Table => node.tables.push(object.reference.name),
+            // The tree has no matview bucket; grouping them with views beats
+            // dropping them.
+            ObjectKind::View | ObjectKind::MaterializedView => {
+                node.views.push(object.reference.name)
+            }
+            ObjectKind::Function => node.functions.push(object.reference.name),
+            _ => {}
+        }
+    }
+
+    SchemaTree {
+        database_name,
+        server_version: String::new(),
+        schemas: by_schema.into_values().collect(),
+    }
+}
+
 impl SchemaCache {
     pub fn new(ttl_secs: u64) -> Self {
         Self {
@@ -336,91 +432,41 @@ impl SchemaCache {
     }
 
     /// Fetch the schema tree from a live database client and cache it.
+    ///
+    /// Two catalog requests total. The code this replaced issued one query for
+    /// schemas and then **three per schema** — 61 round trips on a 20-schema
+    /// database, on every connect.
     pub async fn refresh(
         &self,
         conn_id: String,
-        client: &mut crate::client::ConnectorClient,
+        client: &crate::client::ConnectorClient,
+        connection_id: ConnectionId,
     ) -> Result<SchemaTree, String> {
-        // Get schemas
-        let schema_rows = client
-            .execute(
-                "SELECT s.schema_name \
-                 FROM information_schema.schemata s \
-                 WHERE s.schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast') \
-                 ORDER BY s.schema_name",
-            )
+        use lucent_protocol::ObjectKind;
+
+        let namespaces = client
+            .list_namespaces(connection_id)
             .await
             .map_err(|e| format!("failed to fetch schemas: {e}"))?;
 
-        let mut schemas = Vec::new();
+        let objects = client
+            .list_all_objects(
+                connection_id,
+                vec![
+                    ObjectKind::Table,
+                    ObjectKind::View,
+                    ObjectKind::MaterializedView,
+                    ObjectKind::Function,
+                ],
+            )
+            .await
+            .map_err(|e| format!("failed to fetch objects: {e}"))?;
 
-        for row in &schema_rows.rows {
-            let schema_name = row[0].as_str().unwrap_or("public").to_string();
-
-            // Tables (skip partition children — they're collapsed into the parent)
-            let tables = client
-                .execute(&format!(
-                    "SELECT c.relname FROM pg_class c \
-                     JOIN pg_namespace n ON n.oid = c.relnamespace \
-                     LEFT JOIN pg_inherits i ON i.inhrelid = c.oid \
-                     WHERE n.nspname = '{}' AND c.relkind IN ('r', 'p') \
-                       AND i.inhrelid IS NULL \
-                     ORDER BY c.relname",
-                    schema_name.replace('\'', "''"),
-                ))
-                .await
-                .map_err(|e| format!("failed to fetch tables for {schema_name}: {e}"))?;
-            let table_names: Vec<String> = tables
-                .rows
-                .iter()
-                .filter_map(|r| r[0].as_str().map(String::from))
-                .collect();
-
-            // Views
-            let views = client
-                .execute(&format!(
-                    "SELECT table_name FROM information_schema.views \
-                     WHERE table_schema = '{}' ORDER BY table_name",
-                    schema_name.replace('\'', "''"),
-                ))
-                .await
-                .map_err(|e| format!("failed to fetch views for {schema_name}: {e}"))?;
-            let view_names: Vec<String> = views
-                .rows
-                .iter()
-                .filter_map(|r| r[0].as_str().map(String::from))
-                .collect();
-
-            // Functions
-            let funcs = client
-                .execute(&format!(
-                    "SELECT p.proname FROM pg_proc p \
-                     JOIN pg_namespace n ON p.pronamespace = n.oid \
-                     WHERE n.nspname = '{}' AND p.prokind = 'f' \
-                     ORDER BY p.proname",
-                    schema_name.replace('\'', "''"),
-                ))
-                .await
-                .map_err(|e| format!("failed to fetch functions for {schema_name}: {e}"))?;
-            let func_names: Vec<String> = funcs
-                .rows
-                .iter()
-                .filter_map(|r| r[0].as_str().map(String::from))
-                .collect();
-
-            schemas.push(SchemaNode {
-                name: schema_name,
-                tables: table_names,
-                views: view_names,
-                functions: func_names,
-            });
-        }
-
-        let tree = SchemaTree {
-            database_name: conn_id.rsplit('/').next().unwrap_or(&conn_id).to_string(),
-            server_version: String::new(),
-            schemas,
-        };
+        let tree = objects_to_schema_tree_with_namespaces(
+            conn_id.rsplit('/').next().unwrap_or(&conn_id).to_string(),
+            namespaces.iter().map(|n| n.display()).collect(),
+            objects,
+        );
 
         log::info!(
             "Schema cache refreshed for {conn_id}: {} schemas, {} total objects",
@@ -487,7 +533,7 @@ mod tests {
     #[test]
     fn push_tier_injects_full_column_detail_and_direct_sql_guidance() {
         let g = graph_for_prompt();
-        let p = build_system_prompt(&small(), Some(&g), false);
+        let p = build_system_prompt(&small(), Some(&g), false, None);
         assert!(
             p.contains("(status: text, examples: pending, paid)"),
             "push tier must carry the full M-Schema: {p}"
@@ -544,7 +590,7 @@ mod tests {
 
     #[test]
     fn no_graph_falls_back_to_tree_rendering() {
-        let p = build_system_prompt(&small(), None, false);
+        let p = build_system_prompt(&small(), None, false, None);
         assert!(
             p.contains("users") && p.contains("orders"),
             "without a graph the legacy tree listing still works"
@@ -558,7 +604,7 @@ mod tests {
     #[test]
     fn static_prefix_still_precedes_dynamic_content_with_graph() {
         let g = graph_for_prompt();
-        let p = build_system_prompt(&small(), Some(&g), false);
+        let p = build_system_prompt(&small(), Some(&g), false, None);
         let tools_pos = p.find("AVAILABLE TOOLS").expect("tools section");
         let schema_pos = p
             .find("# Table: public.invoices")
@@ -571,7 +617,7 @@ mod tests {
 
     #[test]
     fn small_schema_verbose_lists_names() {
-        let p = build_system_prompt(&small(), None, false);
+        let p = build_system_prompt(&small(), None, false, None);
         assert!(p.contains("users") && p.contains("orders") && p.contains("testdb"));
     }
 
@@ -590,14 +636,14 @@ mod tests {
             server_version: "PG16".into(),
             schemas,
         };
-        let p = build_system_prompt(&schema, None, false);
+        let p = build_system_prompt(&schema, None, false, None);
         assert!(p.contains("10 tables"), "each schema must show count");
         assert!(!p.contains("table_0_0"), "must NOT list individual names");
     }
 
     #[test]
     fn tools_and_rules_precede_database_structure_for_cache_friendliness() {
-        let p = build_system_prompt(&small(), None, false);
+        let p = build_system_prompt(&small(), None, false, None);
         let tools_pos = p.find("AVAILABLE TOOLS").expect("tools section present");
         let structure_pos = p
             .find("Database schema")
@@ -624,7 +670,7 @@ mod tests {
             server_version: "PG16".into(),
             schemas,
         };
-        let p = build_system_prompt(&schema, None, false);
+        let p = build_system_prompt(&schema, None, false, None);
         assert!(
             p.contains("use search_schema to find tables"),
             "compact-schema hint must point at the tool that actually exists"
@@ -637,7 +683,7 @@ mod tests {
 
     #[test]
     fn no_dead_tool_call_marker_syntax() {
-        let p = build_system_prompt(&small(), None, false);
+        let p = build_system_prompt(&small(), None, false, None);
         assert!(
             !p.contains("[TOOL_CALL]"),
             "no parser for this marker exists — teaching the model dead syntax wastes a turn"
@@ -646,7 +692,7 @@ mod tests {
 
     #[test]
     fn rules_include_complete_query_and_parallel_call_guidance() {
-        let p = build_system_prompt(&small(), None, false);
+        let p = build_system_prompt(&small(), None, false, None);
         assert!(p.contains("COMPLETE QUERIES"), "must nudge the model toward one comprehensive query over iterative single-metric queries");
         assert!(
             p.contains("PARALLEL TOOL CALLS"),
@@ -666,15 +712,15 @@ mod tests {
     #[test]
     fn send_results_flag_adds_analysis_hint() {
         // Data preview hint is always included — preview is sent regardless of flag.
-        let p = build_system_prompt(&small(), None, true);
+        let p = build_system_prompt(&small(), None, true, None);
         assert!(p.contains("Markdown table preview"));
-        let p = build_system_prompt(&small(), None, false);
+        let p = build_system_prompt(&small(), None, false, None);
         assert!(p.contains("Markdown table preview"));
     }
 
     #[test]
     fn rules_cover_ambiguous_metrics_and_ties() {
-        let p = build_system_prompt(&small(), None, false);
+        let p = build_system_prompt(&small(), None, false, None);
         assert!(
             p.contains("AMBIGUOUS METRICS"),
             "must instruct: pick one interpretation, state it, offer the alternative"
@@ -691,7 +737,7 @@ mod tests {
 
     #[test]
     fn rules_cover_join_discipline_reformat_and_schema_trust() {
-        let p = build_system_prompt(&small(), None, false);
+        let p = build_system_prompt(&small(), None, false, None);
         assert!(p.contains("JOIN DISCIPLINE"), "FK-paths-only rule missing");
         assert!(
             p.contains("TIME-VERSIONED TABLES"),
@@ -703,13 +749,106 @@ mod tests {
 
     #[test]
     fn rules_discourage_redundant_parallel_semantic_searches() {
-        let p = build_system_prompt(&small(), None, false);
+        let p = build_system_prompt(&small(), None, false, None);
         assert!(
             p.contains("ONE well-chosen search_schema call")
                 || p.contains("already expands to related tables"),
             "must nudge the model away from firing multiple near-duplicate search_schema \
              queries in one turn when a single broader query would already surface the \
              FK-clustered tables"
+        );
+    }
+
+    use lucent_protocol::{ObjectKind, ObjectRef, ObjectSummary};
+
+    fn obj(schema: &str, name: &str, kind: ObjectKind) -> ObjectSummary {
+        ObjectSummary {
+            reference: ObjectRef {
+                namespace: vec![schema.into()],
+                name: name.into(),
+                kind,
+            },
+            est_rows: None,
+            comment: None,
+            partition: None,
+            is_partition_child: false,
+        }
+    }
+
+    #[test]
+    fn groups_flat_object_list_into_a_schema_tree() {
+        let tree = super::objects_to_schema_tree(
+            "testdb".into(),
+            vec![
+                obj("public", "users", ObjectKind::Table),
+                obj("public", "active_users", ObjectKind::View),
+                obj("public", "calc_discount", ObjectKind::Function),
+                obj("audit", "events", ObjectKind::Table),
+            ],
+        );
+
+        assert_eq!(tree.database_name, "testdb");
+        // Schemas sorted so the prompt prefix stays stable across refreshes.
+        let names: Vec<&str> = tree.schemas.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["audit", "public"]);
+
+        let public = tree.schemas.iter().find(|s| s.name == "public").unwrap();
+        assert_eq!(public.tables, vec!["users".to_string()]);
+        assert_eq!(public.views, vec!["active_users".to_string()]);
+        assert_eq!(public.functions, vec!["calc_discount".to_string()]);
+    }
+
+    #[test]
+    fn partition_children_are_collapsed_into_their_parent() {
+        let child = ObjectSummary {
+            is_partition_child: true,
+            ..obj("public", "events_2026", ObjectKind::Table)
+        };
+        let tree = super::objects_to_schema_tree(
+            "db".into(),
+            vec![obj("public", "events", ObjectKind::Table), child],
+        );
+        assert_eq!(tree.schemas[0].tables, vec!["events".to_string()]);
+    }
+
+    #[test]
+    fn materialized_views_are_listed_as_views() {
+        // The AI's schema tree has no matview bucket; grouping them with views
+        // is more useful than dropping them, which is what happens today.
+        let tree = super::objects_to_schema_tree(
+            "db".into(),
+            vec![obj("public", "mv_daily", ObjectKind::MaterializedView)],
+        );
+        assert_eq!(tree.schemas[0].views, vec!["mv_daily".to_string()]);
+    }
+
+    #[test]
+    fn a_schema_with_no_objects_still_appears() {
+        // An empty schema is information: it tells the model the namespace
+        // exists. Grouping alone would silently drop it, so refresh() has to
+        // seed from the namespace list.
+        let tree = super::objects_to_schema_tree_with_namespaces(
+            "db".into(),
+            vec!["empty".to_string(), "public".to_string()],
+            vec![obj("public", "users", ObjectKind::Table)],
+        );
+        let names: Vec<&str> = tree.schemas.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["empty", "public"]);
+        assert!(tree.schemas[0].tables.is_empty());
+    }
+
+    #[test]
+    fn the_prompt_declares_weakened_read_only_after_the_cacheable_prefix() {
+        use lucent_protocol::ReadOnlyMode;
+
+        let block = super::enforcement_block(ReadOnlyMode::GuardOnly, "DuckDB");
+        let block = block.expect("GuardOnly must produce a block");
+        assert!(block.contains("DuckDB"), "{block}");
+        assert!(block.to_lowercase().contains("not enforced"), "{block}");
+
+        assert!(
+            super::enforcement_block(ReadOnlyMode::TransactionScoped, "PostgreSQL").is_none(),
+            "an intact guarantee adds nothing to the prompt"
         );
     }
 }

@@ -21,7 +21,11 @@ pub struct ConnectionsFile {
     pub ssh_tunnels: Vec<crate::ssh::SshConfig>,
 }
 
-/// A saved database connection profile.
+/// A saved database connection profile (v2).
+///
+/// Connection parameters live in `params`, keyed per driver, because
+/// `host`/`port`/`user` mean nothing to a DuckDB file or a BigQuery dataset.
+/// The password never appears here — it lives in the keychain, keyed by `id`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionProfile {
@@ -30,15 +34,13 @@ pub struct ConnectionProfile {
     pub name: String,
     #[serde(default = "default_driver")]
     pub driver: String,
-    #[serde(default = "default_host")]
-    pub host: String,
-    #[serde(default = "default_port")]
-    pub port: u16,
-    #[serde(default = "default_user")]
-    pub user: String,
-    pub database: String,
+    /// Short handle for `@mention` in AI chat. Derived from `name` on creation
+    /// and on migration; the user may override it.
     #[serde(default)]
-    pub ssl_mode: SslMode,
+    pub alias: Option<String>,
+    /// Driver-defined connection parameters. See `crate::drivers`.
+    #[serde(default)]
+    pub params: std::collections::BTreeMap<String, String>,
     pub ssh_tunnel_id: Option<String>,
     pub group: Option<String>,
     pub color: Option<String>,
@@ -51,29 +53,18 @@ pub struct ConnectionProfile {
 fn default_driver() -> String {
     "postgres".into()
 }
-fn default_host() -> String {
-    "127.0.0.1".into()
-}
-fn default_port() -> u16 {
-    5432
-}
-fn default_user() -> String {
-    "postgres".into()
-}
 
 impl ConnectionProfile {
-    /// Create a new profile with sensible defaults.
+    /// A new Postgres profile with the defaults the form starts from.
     pub fn new(name: String) -> Self {
         let now = chrono::Utc::now().to_rfc3339();
+        let alias = slugify_alias(&name);
         Self {
             id: uuid::Uuid::new_v4().to_string(),
+            alias: (!alias.is_empty()).then_some(alias),
+            driver: default_driver(),
+            params: crate::drivers::default_params("postgres"),
             name,
-            driver: "postgres".into(),
-            host: "127.0.0.1".into(),
-            port: 5432,
-            user: "postgres".into(),
-            database: "postgres".into(),
-            ssl_mode: SslMode::Prefer,
             ssh_tunnel_id: None,
             group: None,
             color: None,
@@ -85,25 +76,98 @@ impl ConnectionProfile {
     }
 }
 
-/// SSL mode for PostgreSQL connections.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-#[derive(Default)]
-pub enum SslMode {
-    Disable,
-    #[default]
-    Prefer,
-    Require,
-}
-
-impl std::fmt::Display for SslMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SslMode::Disable => write!(f, "disable"),
-            SslMode::Prefer => write!(f, "prefer"),
-            SslMode::Require => write!(f, "require"),
+/// Lowercase, hyphen-separated, alphanumerics only — safe to type after `@`.
+///
+/// Returns an empty string when nothing usable survives; the caller stores
+/// `None` rather than an empty alias, which would match every mention.
+pub fn slugify_alias(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut pending_sep = false;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_sep && !out.is_empty() {
+                out.push('-');
+            }
+            pending_sep = false;
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            pending_sep = true;
         }
     }
+    out
+}
+
+/// Read one v0/v1 profile object into the v2 shape.
+///
+/// Returns `None` only when the object lacks an `id`, which makes it
+/// unusable — every other field has a defensible default, and dropping a
+/// user's saved connection because a field was absent is not acceptable.
+pub fn migrate_v1_profile(value: &serde_json::Value) -> Option<ConnectionProfile> {
+    let id = value.get("id")?.as_str()?.to_string();
+    let name = value
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    let s = |key: &str, fallback: &str| {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or(fallback)
+            .to_string()
+    };
+
+    let mut params = std::collections::BTreeMap::new();
+    params.insert("host".to_string(), s("host", "127.0.0.1"));
+    params.insert(
+        "port".to_string(),
+        value
+            .get("port")
+            .and_then(|v| v.as_u64())
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "5432".to_string()),
+    );
+    params.insert("user".to_string(), s("user", "postgres"));
+    params.insert("database".to_string(), s("database", "postgres"));
+    params.insert("ssl_mode".to_string(), s("sslMode", "prefer"));
+
+    let alias = value
+        .get("alias")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| slugify_alias(&name));
+    let now = chrono::Utc::now().to_rfc3339();
+
+    Some(ConnectionProfile {
+        id,
+        driver: s("driver", "postgres"),
+        alias: (!alias.is_empty()).then_some(alias),
+        params,
+        ssh_tunnel_id: value
+            .get("sshTunnelId")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        group: value
+            .get("group")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        color: value
+            .get("color")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        icon: value
+            .get("icon")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        last_used: value
+            .get("lastUsed")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        created_at: s("createdAt", &now),
+        updated_at: s("updatedAt", &now),
+        name,
+    })
 }
 
 // ─── File Path ──────────────────────────────────────────────────────────────
@@ -132,23 +196,56 @@ pub fn connections_file_path() -> PathBuf {
 
 // ─── Read / Write ───────────────────────────────────────────────────────────
 
+/// Parse a connections file at any version.
+///
+/// v2 first, then v1/v0 through the migration. A profile that fails to migrate
+/// is skipped with a warning rather than discarding the whole file — one bad
+/// entry must not cost the user every saved connection.
+fn parse_connections_file(content: &str) -> (Vec<ConnectionProfile>, Vec<crate::ssh::SshConfig>) {
+    if let Ok(file) = serde_json::from_str::<ConnectionsFile>(content) {
+        // A v1 file also parses as v2 (every new field has a default), but its
+        // profiles come back with empty `params`. That is the signal to migrate.
+        if file.profiles.iter().all(|p| !p.params.is_empty()) || file.profiles.is_empty() {
+            return (file.profiles, file.ssh_tunnels);
+        }
+    }
+
+    let Ok(raw) = serde_json::from_str::<serde_json::Value>(content) else {
+        log::warn!("connections.json is not valid JSON; starting with no profiles");
+        return (Vec::new(), Vec::new());
+    };
+
+    let raw_profiles = raw
+        .get("profiles")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .or_else(|| raw.as_array().cloned())
+        .unwrap_or_default();
+
+    let mut profiles = Vec::with_capacity(raw_profiles.len());
+    for value in &raw_profiles {
+        match migrate_v1_profile(value) {
+            Some(p) => profiles.push(p),
+            None => log::warn!("skipping an unmigratable connection profile: {value}"),
+        }
+    }
+
+    let ssh = raw
+        .get("ssh_tunnels")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    log::info!("migrated {} connection profiles to v2", profiles.len());
+    (profiles, ssh)
+}
+
 /// Read all profiles from disk.
-/// Tries v1 wrapper format first, falls back to v0 bare array for compat.
 pub fn read_all_profiles() -> Vec<ConnectionProfile> {
     let path = connections_file_path();
-    if !path.exists() {
+    let Ok(content) = std::fs::read_to_string(&path) else {
         return vec![];
-    }
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return vec![],
     };
-    // Try v1 wrapper format
-    if let Ok(file) = serde_json::from_str::<ConnectionsFile>(&content) {
-        return file.profiles;
-    }
-    // Fall back to v0 bare array
-    serde_json::from_str::<Vec<ConnectionProfile>>(&content).unwrap_or_default()
+    parse_connections_file(&content).0
 }
 
 /// Write profiles and SSH configs atomically (write to temp, rename).
@@ -271,19 +368,12 @@ pub struct ConnectionProfileRepository {
 }
 
 impl ConnectionProfileRepository {
-    /// Load from disk on startup. Backward-compatible with v0 format.
+    /// Load from disk on startup. Backward-compatible with v0/v1 formats.
     pub fn load() -> Self {
         let path = connections_file_path();
         let (profiles, ssh_configs) = if path.exists() {
             let content = std::fs::read_to_string(&path).unwrap_or_default();
-            if let Ok(file) = serde_json::from_str::<ConnectionsFile>(&content) {
-                (file.profiles, file.ssh_tunnels)
-            } else {
-                // v0 bare array fallback
-                let profiles =
-                    serde_json::from_str::<Vec<ConnectionProfile>>(&content).unwrap_or_default();
-                (profiles, vec![])
-            }
+            parse_connections_file(&content)
         } else {
             (vec![], vec![])
         };

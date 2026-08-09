@@ -5,6 +5,8 @@ export interface TokenUsage {
   promptTokens: number;
   completionTokens: number;
   estimatedCostUsd: number | null;
+  /** Prompt tokens served from the provider's prefix cache (0 = no cache hit). */
+  cachedPromptTokens: number;
 }
 
 export interface ToolCallCard {
@@ -58,6 +60,10 @@ export interface Conversation {
     description: string;
     estimatedRowsAffected: number | null;
   } | null;
+  /** Real affected row count from the executed DML (C1), shown on the card. */
+  dmlResult: number | null;
+  /** Error from the DML execution attempt (C1), shown on the card. */
+  dmlError: string | null;
   usage: TokenUsage | null;
   createdAt: number;
 }
@@ -105,6 +111,8 @@ export function createConversation(connectionId: string): Conversation {
     messages: [],
     isPaused: false,
     pausedDml: null,
+    dmlResult: null,
+    dmlError: null,
     usage: null,
     createdAt: Date.now(),
   };
@@ -277,4 +285,11 @@ export function getConversationTitle(conv: Conversation): string {
     }
   }
   return 'New Chat';
+}
+
+/** One-line usage summary for the panel header, e.g. `120 in / 45 out tokens · $0.1234`. */
+export function formatUsageLine(usage: TokenUsage): string {
+  const line = `${usage.promptTokens} in / ${usage.completionTokens} out tokens`;
+  if (usage.estimatedCostUsd === null) return line;
+  return `${line} · $${usage.estimatedCostUsd.toFixed(4)}`;
 }

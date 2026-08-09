@@ -37,26 +37,54 @@ describe('FilterChip', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it('shows the column name and the operator options for the type', () => {
-    const { getByText, getByRole } = setup(TEXT_FILTER);
+  it('reads as a sentence: column, then operator', () => {
+    const { getByText, getByLabelText } = setup(TEXT_FILTER);
     expect(getByText('name')).toBeTruthy();
-    const select = getByRole('combobox') as HTMLSelectElement;
-    const values = Array.from(select.options).map(
-      (o: HTMLOptionElement) => o.value,
+    expect(getByLabelText('Filter operator for name').textContent).toContain(
+      'contains',
     );
-    expect(values).toContain('ncontains');
-    expect(values).not.toContain('gt');
   });
 
-  it('offers comparison operators for a numeric column', () => {
-    const { getByRole } = setup(
+  it('offers the type-appropriate operators in the operator menu', async () => {
+    const { getByLabelText, getByRole, queryByRole } = setup(TEXT_FILTER);
+    await fireEvent.click(getByLabelText('Filter operator for name'));
+    expect(getByRole('menuitem', { name: 'does not contain' })).toBeTruthy();
+    expect(queryByRole('menuitem', { name: '>' })).toBeNull();
+  });
+
+  it('offers comparison operators for a numeric column', async () => {
+    const { getByLabelText, getByRole } = setup(
       { id: 'a', column: 'age', operator: 'eq', value: '' },
       'int4',
     );
-    const select = getByRole('combobox') as HTMLSelectElement;
+    await fireEvent.click(getByLabelText('Filter operator for age'));
+    expect(getByRole('menuitem', { name: '≥' })).toBeTruthy();
+  });
+
+  it('labels the same operator in the language of the column type', () => {
+    const { getByLabelText } = setup(
+      { id: 'a', column: 'created_at', operator: 'gt', value: '' },
+      'timestamptz',
+    );
     expect(
-      Array.from(select.options).map((o: HTMLOptionElement) => o.value),
-    ).toContain('gte');
+      getByLabelText('Filter operator for created_at').textContent,
+    ).toContain('after');
+  });
+
+  it('uses a menu rather than a native select, for consistent chrome', () => {
+    const { queryByRole, getByLabelText } = setup(TEXT_FILTER);
+    expect(queryByRole('combobox')).toBeNull();
+    expect(
+      getByLabelText('Filter operator for name').getAttribute('aria-haspopup'),
+    ).toBe('menu');
+  });
+
+  it('reports the menu open state to assistive technology', async () => {
+    const { getByLabelText } = setup(TEXT_FILTER);
+    const trigger = getByLabelText('Filter operator for name');
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    await fireEvent.click(trigger);
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
   });
 
   it('hides the value input for an operator that needs no value', () => {
@@ -100,12 +128,19 @@ describe('FilterChip', () => {
   });
 
   it('commits an operator change at once', async () => {
-    const { getByRole, onChange, onCommit } = setup(TEXT_FILTER);
-    await fireEvent.change(getByRole('combobox'), {
-      target: { value: 'null' },
-    });
+    const { getByLabelText, getByRole, onChange, onCommit } =
+      setup(TEXT_FILTER);
+    await fireEvent.click(getByLabelText('Filter operator for name'));
+    await fireEvent.click(getByRole('menuitem', { name: 'is null' }));
     expect(onChange).toHaveBeenCalledWith({ operator: 'null' });
     expect(onCommit).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes the operator menu once a choice is made', async () => {
+    const { getByLabelText, getByRole, queryByRole } = setup(TEXT_FILTER);
+    await fireEvent.click(getByLabelText('Filter operator for name'));
+    await fireEvent.click(getByRole('menuitem', { name: 'is null' }));
+    expect(queryByRole('menu')).toBeNull();
   });
 
   it('removes the chip on Escape when it has no value yet', async () => {
@@ -144,5 +179,33 @@ describe('FilterChip', () => {
   it('does not mark a complete chip as pending', () => {
     const { container } = setup({ ...TEXT_FILTER, value: 'Ada' });
     expect(container.querySelector('.filter-chip.pending')).toBeNull();
+  });
+
+  it('sizes the value input to its content instead of truncating', () => {
+    const short = setup({ ...TEXT_FILTER, value: 'Ada' });
+    const shortWidth = (short.getByRole('textbox') as HTMLElement).style.width;
+    cleanup();
+
+    const long = setup({
+      ...TEXT_FILTER,
+      value: 'a-considerably-longer-value',
+    });
+    const longWidth = (long.getByRole('textbox') as HTMLElement).style.width;
+
+    expect(parseInt(longWidth, 10)).toBeGreaterThan(parseInt(shortWidth, 10));
+  });
+
+  it('caps the value input so one long filter cannot dominate the bar', () => {
+    const { getByRole } = setup({ ...TEXT_FILTER, value: 'x'.repeat(400) });
+    expect(
+      parseInt((getByRole('textbox') as HTMLElement).style.width, 10),
+    ).toBe(24);
+  });
+
+  it('keeps a floor width so an empty chip is still clickable', () => {
+    const { getByRole } = setup(TEXT_FILTER);
+    expect(
+      parseInt((getByRole('textbox') as HTMLElement).style.width, 10),
+    ).toBe(5);
   });
 });

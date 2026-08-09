@@ -132,3 +132,88 @@ describe('FilterBar', () => {
     ]);
   });
 });
+
+describe('FilterBar SQL preview freshness', () => {
+  const ADA = { id: 'a', column: 'name', operator: 'eq', value: 'Ada' };
+
+  function sqlSetup(
+    filters: Record<string, unknown>[],
+    describe: (specs: unknown) => Promise<string>,
+  ) {
+    const onDescribeFilters = describe;
+    const result = render(FilterBar, {
+      columns: COLUMNS,
+      filters,
+      onFiltersChange: vi.fn(),
+      onPickerOpenChange: vi.fn(),
+      onDescribeFilters,
+    });
+    return { ...result, onDescribeFilters };
+  }
+
+  // The preview previously refreshed only on open, so editing a chip left SQL
+  // on screen that no longer matched the query being run.
+  it('re-describes the filters when they change while the panel is open', async () => {
+    const describe = vi
+      .fn()
+      .mockResolvedValueOnce(`WHERE "name" = 'Ada'`)
+      .mockResolvedValueOnce(`WHERE "name" = 'Grace'`);
+
+    const { getByText, findByText, rerender } = sqlSetup([ADA], describe);
+    await fireEvent.click(getByText('SQL'));
+    expect(await findByText(`WHERE "name" = 'Ada'`)).toBeTruthy();
+
+    await rerender({ filters: [{ ...ADA, value: 'Grace' }] });
+    expect(await findByText(`WHERE "name" = 'Grace'`)).toBeTruthy();
+    expect(describe).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not re-describe when an edit leaves the applied set unchanged', async () => {
+    const describe = vi.fn().mockResolvedValue(`WHERE "name" = 'Ada'`);
+    const { getByText, findByText, rerender } = sqlSetup([ADA], describe);
+    await fireEvent.click(getByText('SQL'));
+    await findByText(`WHERE "name" = 'Ada'`);
+
+    // A pending chip is not part of the query, so the SQL cannot have changed.
+    await rerender({
+      filters: [ADA, { id: 'b', column: 'id', operator: 'eq', value: '' }],
+    });
+    expect(describe).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not query at all while the panel is closed', async () => {
+    const describe = vi.fn().mockResolvedValue('');
+    const { rerender } = sqlSetup([ADA], describe);
+    await rerender({ filters: [{ ...ADA, value: 'Grace' }] });
+    expect(describe).not.toHaveBeenCalled();
+  });
+
+  it('recovers to empty text when describing fails', async () => {
+    const describe = vi.fn().mockRejectedValue(new Error('not connected'));
+    const { getByText, findByText } = sqlSetup([ADA], describe);
+    await fireEvent.click(getByText('SQL'));
+    expect(await findByText('No filters applied')).toBeTruthy();
+  });
+
+  it('blocks Copy when there is nothing to copy', async () => {
+    const describe = vi.fn().mockResolvedValue('');
+    const { getByText } = sqlSetup([ADA], describe);
+    await fireEvent.click(getByText('SQL'));
+    expect((getByText('Copy') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('confirms a successful copy', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    const describe = vi.fn().mockResolvedValue(`WHERE "name" = 'Ada'`);
+    const { getByText, findByText } = sqlSetup([ADA], describe);
+    await fireEvent.click(getByText('SQL'));
+    await findByText(`WHERE "name" = 'Ada'`);
+    await fireEvent.click(getByText('Copy'));
+    expect(writeText).toHaveBeenCalledWith(`WHERE "name" = 'Ada'`);
+    expect(await findByText('Copied')).toBeTruthy();
+  });
+});

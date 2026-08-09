@@ -4,6 +4,7 @@ import {
   operatorsFor,
   defaultOperatorFor,
   needsValue,
+  operatorLabel,
   valuePlaceholderFor,
   isComplete,
   applyable,
@@ -125,6 +126,26 @@ describe('needsValue', () => {
     ]) {
       expect(needsValue(op)).toBe(true);
     }
+  });
+});
+
+describe('operatorLabel', () => {
+  it('labels a comparison by the column type it belongs to', () => {
+    expect(operatorLabel('gt', 'int4')).toBe('>');
+    expect(operatorLabel('gt', 'timestamptz')).toBe('after');
+  });
+
+  it('labels equality in the language of the type', () => {
+    expect(operatorLabel('eq', 'int4')).toBe('=');
+    expect(operatorLabel('eq', 'text')).toBe('is');
+  });
+
+  it('labels the substring operators', () => {
+    expect(operatorLabel('ncontains', 'text')).toBe('does not contain');
+  });
+
+  it('falls back to the raw operator when it does not apply to the type', () => {
+    expect(operatorLabel('contains', 'int4')).toBe('contains');
   });
 });
 

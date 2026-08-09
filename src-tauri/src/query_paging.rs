@@ -1,17 +1,24 @@
-use crate::commands::{quote_identifier, quote_string};
+use crate::sql_builder::SqlBuilder;
+use lucent_protocol::SqlDialect;
 use serde::Deserialize;
 use sqlparser::ast::Statement;
-use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::dialect::Dialect;
 use sqlparser::parser::Parser;
 
 /// Whether `sql` is a single `SELECT`/`WITH`/`VALUES`-shaped statement that
 /// can be safely wrapped as `SELECT * FROM (<sql>) AS _lucent_page ...`.
-/// Multi-statement input and anything that isn't a Statement::Query
-/// (INSERT/UPDATE/DELETE/DDL) returns false — those execute unwrapped,
-/// unpaginated, exactly as today.
-pub fn is_wrappable_query(sql: &str) -> bool {
-    let dialect = PostgreSqlDialect {};
-    match Parser::parse_sql(&dialect, sql) {
+///
+/// Multi-statement input, non-query statements, and SQL this build cannot parse
+/// all return false — those execute unwrapped, unpaginated, exactly as today.
+pub fn is_wrappable_query(sql: &str, dialect: SqlDialect) -> bool {
+    is_wrappable_with_parser(sql, crate::dialect::parser_for(dialect))
+}
+
+pub(crate) fn is_wrappable_with_parser(sql: &str, dialect: Option<Box<dyn Dialect>>) -> bool {
+    let Some(dialect) = dialect else {
+        return false;
+    };
+    match Parser::parse_sql(dialect.as_ref(), sql) {
         Ok(statements) if statements.len() == 1 => matches!(statements[0], Statement::Query(_)),
         _ => false,
     }
@@ -30,33 +37,35 @@ pub struct SortSpec {
     pub direction: String, // "asc" | "desc"
 }
 
-/// Escapes literal `%`, `_`, and `\` in a user-supplied value before it goes
-/// into an ILIKE pattern, so a search for "50%" matches the literal percent
-/// sign instead of being read as a wildcard.
-fn escape_like_pattern(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
-}
-
 /// Renders the WHERE clause a set of filters produces, or an empty string when
 /// there are none. Shared by the query path and the UI's SQL preview, so the
 /// SQL shown to the user is the SQL that runs.
-pub fn filters_to_where_clause(filters: &[FilterSpec]) -> String {
+pub fn filters_to_where_clause(filters: &[FilterSpec], builder: &dyn SqlBuilder) -> String {
     if filters.is_empty() {
         return String::new();
     }
-    let predicates: Vec<String> = filters.iter().map(filter_to_sql).collect();
+    let predicates: Vec<String> = filters.iter().map(|f| filter_to_sql(f, builder)).collect();
     format!("WHERE {}", predicates.join(" AND "))
 }
 
-pub fn wrap_for_count(base_sql: &str, filters: &[FilterSpec]) -> String {
-    let trimmed = base_sql.trim().trim_end_matches(';').trim_end();
+/// Trims surrounding whitespace and every trailing statement terminator, so a
+/// body can be safely wrapped in `(...)` as a subquery or CTE. Interior
+/// semicolons are untouched — `is_wrappable_query` is what rejects genuinely
+/// multi-statement input.
+pub fn normalize_sql_body(sql: &str) -> &str {
+    let mut s = sql.trim();
+    while s.ends_with(';') {
+        s = s[..s.len() - 1].trim_end();
+    }
+    s
+}
+
+pub fn wrap_for_count(base_sql: &str, filters: &[FilterSpec], builder: &dyn SqlBuilder) -> String {
+    let trimmed = normalize_sql_body(base_sql);
     let mut sql = format!("SELECT COUNT(*) FROM ({trimmed}) AS _lucent_count_base");
     if !filters.is_empty() {
         sql.push(' ');
-        sql.push_str(&filters_to_where_clause(filters));
+        sql.push_str(&filters_to_where_clause(filters, builder));
     }
     sql
 }
@@ -67,13 +76,14 @@ pub fn wrap_for_page(
     filters: &[FilterSpec],
     limit: i64,
     offset: i64,
+    builder: &dyn SqlBuilder,
 ) -> String {
-    let trimmed = base_sql.trim().trim_end_matches(';').trim_end();
+    let trimmed = normalize_sql_body(base_sql);
     let mut sql = format!("SELECT * FROM ({trimmed}) AS _lucent_page");
 
     if !filters.is_empty() {
         sql.push(' ');
-        sql.push_str(&filters_to_where_clause(filters));
+        sql.push_str(&filters_to_where_clause(filters, builder));
     }
 
     if let Some(s) = sort {
@@ -82,97 +92,149 @@ pub fn wrap_for_page(
         } else {
             "ASC"
         };
-        sql.push_str(&format!(" ORDER BY {} {dir}", quote_identifier(&s.column)));
+        sql.push_str(&format!(
+            " ORDER BY {} {dir}",
+            builder.quote_identifier(&s.column)
+        ));
     }
 
-    sql.push_str(&format!(" LIMIT {} OFFSET {}", limit.max(0), offset.max(0)));
+    // `page` re-emits the whole SQL plus the window clause.
+    sql = builder.page(&sql, limit, offset);
     sql
 }
 
-pub fn filter_to_sql(filter: &FilterSpec) -> String {
-    let col = quote_identifier(&filter.column);
+pub fn filter_to_sql(filter: &FilterSpec, builder: &dyn SqlBuilder) -> String {
+    let col = builder.quote_identifier(&filter.column);
     let val = filter.value.as_deref().unwrap_or("");
+    let text = builder.cast_to_text(&col);
     match filter.operator.as_str() {
-        "eq" => format!("{col} = {}", quote_string(val)),
-        "neq" => format!("{col} != {}", quote_string(val)),
-        "contains" => format!(
-            "{col}::text ILIKE {} ESCAPE '\\'",
-            quote_string(&format!("%{}%", escape_like_pattern(val)))
-        ),
-        "starts" => format!(
-            "{col}::text ILIKE {} ESCAPE '\\'",
-            quote_string(&format!("{}%", escape_like_pattern(val)))
-        ),
-        "ends" => format!(
-            "{col}::text ILIKE {} ESCAPE '\\'",
-            quote_string(&format!("%{}", escape_like_pattern(val)))
-        ),
+        "eq" => format!("{col} = {}", builder.quote_string(val)),
+        "neq" => format!("{col} != {}", builder.quote_string(val)),
+        "contains" => builder.case_insensitive_contains(&col, val),
+        "starts" => builder.case_insensitive_starts_with(&col, val),
+        "ends" => builder.case_insensitive_ends_with(&col, val),
         "ncontains" => format!(
-            "({col}::text NOT ILIKE {} ESCAPE '\\' OR {col} IS NULL)",
-            quote_string(&format!("%{}%", escape_like_pattern(val)))
+            "(NOT ({}) OR {col} IS NULL)",
+            builder.case_insensitive_contains(&col, val)
         ),
-        "gt" => format!("{col} > {}", quote_string(val)),
-        "gte" => format!("{col} >= {}", quote_string(val)),
-        "lt" => format!("{col} < {}", quote_string(val)),
-        "lte" => format!("{col} <= {}", quote_string(val)),
+        "gt" => format!("{col} > {}", builder.quote_string(val)),
+        "gte" => format!("{col} >= {}", builder.quote_string(val)),
+        "lt" => format!("{col} < {}", builder.quote_string(val)),
+        "lte" => format!("{col} <= {}", builder.quote_string(val)),
         "istrue" => format!("{col} IS TRUE"),
         "isfalse" => format!("{col} IS FALSE"),
         "null" => format!("{col} IS NULL"),
         "notnull" => format!("{col} IS NOT NULL"),
-        _ => "TRUE".to_string(),
+        _ => {
+            let _ = text;
+            "TRUE".to_string()
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use lucent_protocol::SqlDialect;
+
     use super::*;
+
+    const PG: SqlDialect = SqlDialect::PostgreSql;
 
     #[test]
     fn wrappable_for_plain_select() {
-        assert!(is_wrappable_query("SELECT * FROM users"));
+        assert!(is_wrappable_query("SELECT * FROM users", PG));
     }
 
     #[test]
     fn wrappable_for_cte() {
         assert!(is_wrappable_query(
-            "WITH r AS (SELECT * FROM orders) SELECT * FROM r"
+            "WITH r AS (SELECT * FROM orders) SELECT * FROM r",
+            PG
         ));
     }
 
     #[test]
     fn not_wrappable_for_insert() {
-        assert!(!is_wrappable_query("INSERT INTO users (name) VALUES ('x')"));
+        assert!(!is_wrappable_query(
+            "INSERT INTO users (name) VALUES ('x')",
+            PG
+        ));
     }
 
     #[test]
     fn not_wrappable_for_delete() {
-        assert!(!is_wrappable_query("DELETE FROM users WHERE id = 1"));
+        assert!(!is_wrappable_query("DELETE FROM users WHERE id = 1", PG));
     }
 
     #[test]
     fn not_wrappable_for_ddl() {
-        assert!(!is_wrappable_query("CREATE TABLE t (id int)"));
+        assert!(!is_wrappable_query("CREATE TABLE t (id int)", PG));
     }
 
     #[test]
     fn not_wrappable_for_multi_statement() {
-        assert!(!is_wrappable_query("SELECT 1; SELECT 2"));
+        assert!(!is_wrappable_query("SELECT 1; SELECT 2", PG));
     }
 
     #[test]
     fn not_wrappable_for_unparseable_sql() {
-        assert!(!is_wrappable_query("this is not sql"));
+        assert!(!is_wrappable_query("this is not sql", PG));
     }
 
     #[test]
     fn not_wrappable_for_empty_string() {
-        assert!(!is_wrappable_query(""));
+        assert!(!is_wrappable_query("", PG));
+    }
+
+    #[test]
+    fn an_unparseable_dialect_makes_nothing_wrappable() {
+        // Not fail-closed in the safety sense — an unwrappable query simply
+        // executes unpaged, exactly as a multi-statement script does today.
+        // But it must never wrap SQL it could not parse.
+        assert!(!super::is_wrappable_with_parser("SELECT 1", None));
+    }
+
+    #[test]
+    fn duckdb_specific_selects_are_wrappable_under_the_duckdb_dialect() {
+        assert!(
+            is_wrappable_query("SELECT * EXCLUDE (secret) FROM t", SqlDialect::DuckDb),
+            "a valid DuckDB SELECT must be pageable"
+        );
+    }
+
+    #[test]
+    fn dml_is_still_not_wrappable_under_any_dialect() {
+        for d in [SqlDialect::PostgreSql, SqlDialect::DuckDb] {
+            assert!(!is_wrappable_query("DELETE FROM t", d));
+            assert!(!is_wrappable_query("SELECT 1; SELECT 2", d));
+        }
+    }
+
+    #[test]
+    fn normalize_sql_body_strips_trailing_semicolons_and_space() {
+        assert_eq!(normalize_sql_body("SELECT 1"), "SELECT 1");
+        assert_eq!(normalize_sql_body("SELECT 1;"), "SELECT 1");
+        assert_eq!(normalize_sql_body("  SELECT 1 ;  "), "SELECT 1");
+        assert_eq!(normalize_sql_body("SELECT 1;;;"), "SELECT 1");
+        assert_eq!(normalize_sql_body("SELECT 1 ; ; "), "SELECT 1");
+    }
+
+    #[test]
+    fn normalize_sql_body_keeps_semicolon_inside_string_literal() {
+        // A trailing quote means the semicolon is inside a literal, not a terminator.
+        assert_eq!(normalize_sql_body("SELECT ';'"), "SELECT ';'");
     }
 }
 
 #[cfg(test)]
 mod filter_tests {
+    use crate::sql_builder::PostgresSqlBuilder;
+
     use super::*;
+
+    fn pg() -> PostgresSqlBuilder {
+        PostgresSqlBuilder
+    }
 
     #[test]
     fn eq_quotes_column_and_value() {
@@ -181,7 +243,7 @@ mod filter_tests {
             operator: "eq".into(),
             value: Some("Bob".into()),
         };
-        assert_eq!(filter_to_sql(&f), r#""name" = 'Bob'"#);
+        assert_eq!(filter_to_sql(&f, &pg()), r#""name" = 'Bob'"#);
     }
 
     #[test]
@@ -191,7 +253,7 @@ mod filter_tests {
             operator: "neq".into(),
             value: Some("archived".into()),
         };
-        assert_eq!(filter_to_sql(&f), r#""status" != 'archived'"#);
+        assert_eq!(filter_to_sql(&f, &pg()), r#""status" != 'archived'"#);
     }
 
     #[test]
@@ -202,7 +264,7 @@ mod filter_tests {
             value: Some("50%_off".into()),
         };
         assert_eq!(
-            filter_to_sql(&f),
+            filter_to_sql(&f, &pg()),
             r#""email"::text ILIKE '%50\%\_off%' ESCAPE '\'"#
         );
     }
@@ -214,7 +276,10 @@ mod filter_tests {
             operator: "starts".into(),
             value: Some("Ac".into()),
         };
-        assert_eq!(filter_to_sql(&f), r#""name"::text ILIKE 'Ac%' ESCAPE '\'"#);
+        assert_eq!(
+            filter_to_sql(&f, &pg()),
+            r#""name"::text ILIKE 'Ac%' ESCAPE '\'"#
+        );
     }
 
     #[test]
@@ -224,7 +289,7 @@ mod filter_tests {
             operator: "null".into(),
             value: None,
         };
-        assert_eq!(filter_to_sql(&f), r#""deleted_at" IS NULL"#);
+        assert_eq!(filter_to_sql(&f, &pg()), r#""deleted_at" IS NULL"#);
     }
 
     #[test]
@@ -234,7 +299,7 @@ mod filter_tests {
             operator: "notnull".into(),
             value: None,
         };
-        assert_eq!(filter_to_sql(&f), r#""deleted_at" IS NOT NULL"#);
+        assert_eq!(filter_to_sql(&f, &pg()), r#""deleted_at" IS NOT NULL"#);
     }
 
     #[test]
@@ -244,7 +309,7 @@ mod filter_tests {
             operator: "eq".into(),
             value: Some("x".into()),
         };
-        assert!(filter_to_sql(&f).starts_with(r#""weird""col""#));
+        assert!(filter_to_sql(&f, &pg()).starts_with(r#""weird""col""#));
     }
 
     #[test]
@@ -254,7 +319,7 @@ mod filter_tests {
             operator: "eq".into(),
             value: Some("O'Brien".into()),
         };
-        assert_eq!(filter_to_sql(&f), r#""name" = 'O''Brien'"#);
+        assert_eq!(filter_to_sql(&f, &pg()), r#""name" = 'O''Brien'"#);
     }
 
     #[test]
@@ -264,7 +329,7 @@ mod filter_tests {
             operator: "bogus".into(),
             value: Some("y".into()),
         };
-        assert_eq!(filter_to_sql(&f), "TRUE");
+        assert_eq!(filter_to_sql(&f, &pg()), "TRUE");
     }
 
     #[test]
@@ -275,8 +340,8 @@ mod filter_tests {
             value: Some("Ac".into()),
         };
         assert_eq!(
-            filter_to_sql(&f),
-            r#"("name"::text NOT ILIKE '%Ac%' ESCAPE '\' OR "name" IS NULL)"#
+            filter_to_sql(&f, &pg()),
+            r#"(NOT ("name"::text ILIKE '%Ac%' ESCAPE '\') OR "name" IS NULL)"#
         );
     }
 
@@ -288,7 +353,7 @@ mod filter_tests {
             value: Some("@example.com".into()),
         };
         assert_eq!(
-            filter_to_sql(&f),
+            filter_to_sql(&f, &pg()),
             r#""email"::text ILIKE '%@example.com' ESCAPE '\'"#
         );
     }
@@ -301,7 +366,7 @@ mod filter_tests {
             value: Some("50%_x".into()),
         };
         assert_eq!(
-            filter_to_sql(&f),
+            filter_to_sql(&f, &pg()),
             r#""code"::text ILIKE '%50\%\_x' ESCAPE '\'"#
         );
     }
@@ -314,8 +379,8 @@ mod filter_tests {
             value: Some("100%".into()),
         };
         assert_eq!(
-            filter_to_sql(&f),
-            r#"("code"::text NOT ILIKE '%100\%%' ESCAPE '\' OR "code" IS NULL)"#
+            filter_to_sql(&f, &pg()),
+            r#"(NOT ("code"::text ILIKE '%100\%%' ESCAPE '\') OR "code" IS NULL)"#
         );
     }
 
@@ -328,7 +393,7 @@ mod filter_tests {
                 operator: operator.into(),
                 value: Some("30".into()),
             };
-            assert_eq!(filter_to_sql(&f), format!(r#""age" {sql_op} '30'"#));
+            assert_eq!(filter_to_sql(&f, &pg()), format!(r#""age" {sql_op} '30'"#));
         }
     }
 
@@ -339,14 +404,14 @@ mod filter_tests {
             operator: "istrue".into(),
             value: None,
         };
-        assert_eq!(filter_to_sql(&t), r#""active" IS TRUE"#);
+        assert_eq!(filter_to_sql(&t, &pg()), r#""active" IS TRUE"#);
 
         let f = FilterSpec {
             column: "active".into(),
             operator: "isfalse".into(),
             value: None,
         };
-        assert_eq!(filter_to_sql(&f), r#""active" IS FALSE"#);
+        assert_eq!(filter_to_sql(&f, &pg()), r#""active" IS FALSE"#);
     }
 
     #[test]
@@ -356,12 +421,12 @@ mod filter_tests {
             operator: "bogus".into(),
             value: None,
         };
-        assert_eq!(filter_to_sql(&f), "TRUE");
+        assert_eq!(filter_to_sql(&f, &pg()), "TRUE");
     }
 
     #[test]
     fn where_clause_is_empty_without_filters() {
-        assert_eq!(filters_to_where_clause(&[]), "");
+        assert_eq!(filters_to_where_clause(&[], &pg()), "");
     }
 
     #[test]
@@ -379,7 +444,7 @@ mod filter_tests {
             },
         ];
         assert_eq!(
-            filters_to_where_clause(&filters),
+            filters_to_where_clause(&filters, &pg()),
             r#"WHERE "status" = 'active' AND "age" >= '30'"#
         );
     }
@@ -387,11 +452,17 @@ mod filter_tests {
 
 #[cfg(test)]
 mod wrap_tests {
+    use crate::sql_builder::PostgresSqlBuilder;
+
     use super::*;
+
+    fn pg() -> PostgresSqlBuilder {
+        PostgresSqlBuilder
+    }
 
     #[test]
     fn wraps_with_limit_and_offset_only() {
-        let sql = wrap_for_page("SELECT * FROM users", &None, &[], 200, 0);
+        let sql = wrap_for_page("SELECT * FROM users", &None, &[], 200, 0, &pg());
         assert_eq!(
             sql,
             r#"SELECT * FROM (SELECT * FROM users) AS _lucent_page LIMIT 200 OFFSET 0"#
@@ -400,7 +471,7 @@ mod wrap_tests {
 
     #[test]
     fn strips_trailing_semicolon_and_whitespace_from_base() {
-        let sql = wrap_for_page("SELECT * FROM users;  ", &None, &[], 200, 0);
+        let sql = wrap_for_page("SELECT * FROM users;  ", &None, &[], 200, 0, &pg());
         assert!(sql.starts_with("SELECT * FROM (SELECT * FROM users) AS _lucent_page"));
     }
 
@@ -410,7 +481,7 @@ mod wrap_tests {
             column: "created_at".into(),
             direction: "desc".into(),
         });
-        let sql = wrap_for_page("SELECT * FROM users", &sort, &[], 200, 0);
+        let sql = wrap_for_page("SELECT * FROM users", &sort, &[], 200, 0, &pg());
         assert_eq!(
             sql,
             r#"SELECT * FROM (SELECT * FROM users) AS _lucent_page ORDER BY "created_at" DESC LIMIT 200 OFFSET 0"#
@@ -423,7 +494,7 @@ mod wrap_tests {
             column: "id".into(),
             direction: "whatever".into(),
         });
-        let sql = wrap_for_page("SELECT * FROM users", &sort, &[], 200, 0);
+        let sql = wrap_for_page("SELECT * FROM users", &sort, &[], 200, 0, &pg());
         assert!(sql.contains(r#"ORDER BY "id" ASC"#));
     }
 
@@ -434,7 +505,7 @@ mod wrap_tests {
             operator: "eq".into(),
             value: Some("true".into()),
         }];
-        let sql = wrap_for_page("SELECT * FROM users", &None, &filters, 200, 0);
+        let sql = wrap_for_page("SELECT * FROM users", &None, &filters, 200, 0, &pg());
         assert_eq!(
             sql,
             r#"SELECT * FROM (SELECT * FROM users) AS _lucent_page WHERE "active" = 'true' LIMIT 200 OFFSET 0"#
@@ -455,7 +526,7 @@ mod wrap_tests {
                 value: Some("guest".into()),
             },
         ];
-        let sql = wrap_for_page("SELECT * FROM users", &None, &filters, 200, 0);
+        let sql = wrap_for_page("SELECT * FROM users", &None, &filters, 200, 0, &pg());
         assert!(sql.contains(r#"WHERE "active" = 'true' AND "role" != 'guest'"#));
     }
 
@@ -470,7 +541,7 @@ mod wrap_tests {
             operator: "eq".into(),
             value: Some("true".into()),
         }];
-        let sql = wrap_for_page("SELECT * FROM users", &sort, &filters, 50, 100);
+        let sql = wrap_for_page("SELECT * FROM users", &sort, &filters, 50, 100, &pg());
         assert_eq!(
             sql,
             r#"SELECT * FROM (SELECT * FROM users) AS _lucent_page WHERE "active" = 'true' ORDER BY "id" ASC LIMIT 50 OFFSET 100"#
@@ -479,18 +550,24 @@ mod wrap_tests {
 
     #[test]
     fn negative_limit_and_offset_are_clamped_to_zero() {
-        let sql = wrap_for_page("SELECT * FROM users", &None, &[], -5, -10);
+        let sql = wrap_for_page("SELECT * FROM users", &None, &[], -5, -10, &pg());
         assert!(sql.ends_with("LIMIT 0 OFFSET 0"));
     }
 }
 
 #[cfg(test)]
 mod count_tests {
+    use crate::sql_builder::PostgresSqlBuilder;
+
     use super::*;
+
+    fn pg() -> PostgresSqlBuilder {
+        PostgresSqlBuilder
+    }
 
     #[test]
     fn wraps_with_count_star() {
-        let sql = wrap_for_count("SELECT * FROM users", &[]);
+        let sql = wrap_for_count("SELECT * FROM users", &[], &pg());
         assert_eq!(
             sql,
             r#"SELECT COUNT(*) FROM (SELECT * FROM users) AS _lucent_count_base"#
@@ -504,7 +581,7 @@ mod count_tests {
             operator: "eq".into(),
             value: Some("true".into()),
         }];
-        let sql = wrap_for_count("SELECT * FROM users", &filters);
+        let sql = wrap_for_count("SELECT * FROM users", &filters, &pg());
         assert_eq!(
             sql,
             r#"SELECT COUNT(*) FROM (SELECT * FROM users) AS _lucent_count_base WHERE "active" = 'true'"#
@@ -513,7 +590,7 @@ mod count_tests {
 
     #[test]
     fn strips_trailing_semicolon() {
-        let sql = wrap_for_count("SELECT * FROM users;", &[]);
+        let sql = wrap_for_count("SELECT * FROM users;", &[], &pg());
         assert!(!sql.contains(';'));
     }
 }

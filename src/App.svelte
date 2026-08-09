@@ -1,5 +1,6 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
+  import { listen } from '@tauri-apps/api/event';
   import Sidebar from './lib/components/sidebar/Sidebar.svelte';
   import QueryEditor from './lib/components/editor/QueryEditor.svelte';
   import ResultsGrid from './lib/components/grid/ResultsGrid.svelte';
@@ -11,9 +12,20 @@
   import ChatLanding from './lib/components/chat/ChatLanding.svelte';
   import ChatPanel from './lib/components/chat/ChatPanel.svelte';
   import AiSettings from './lib/components/chat/AiSettings.svelte';
+  import Notebook from './lib/components/notebook/Notebook.svelte';
+  import LogsDrawer from './lib/components/LogsDrawer.svelte';
+  import { notebooks } from './lib/stores/notebooks.svelte.ts';
+  import { resultSummary } from './lib/utils/resultSummary.js';
+  import {
+    saveNotebook,
+    saveNotebookAs,
+    pickNotebookToOpen,
+    confirmDiscardIfDirty,
+  } from './lib/stores/notebook-files.ts';
   import {
     connect,
     executeQuery,
+    cancelQuery,
     disconnect,
     getFunctionSource,
     getViewSource,
@@ -28,12 +40,15 @@
     filterSpecFor,
   } from './lib/stores/tabQuery.js';
   import { getTheme } from './lib/stores/theme.svelte.js';
+  import { schemaSummary } from './lib/stores/schema-summary.svelte.ts';
+  import { connections } from './lib/stores/connections.svelte.ts';
   import { addRecentConnection } from './lib/stores/recent.js';
   import {
     chat,
     createConversation,
     addMessage,
     getActive,
+    updateLast,
     createNewTab as createNewChatTab,
     closeTab as closeChatTab,
     switchTab as switchChatTab,
@@ -50,8 +65,29 @@
   let view = $state('dashboard');
   let showPalette = $state(false);
   let showAiSettings = $state(false);
+  let showLogs = $state(false);
   let showChatPanel = $state(true);
   let hasTabs = $derived(tabs.length > 0);
+  // Shown on the AI landing's context strip. Sourced from the connections
+  // store rather than `config` because the sidebar's switcher calls
+  // connectToProfile() directly without telling App — so `config` can be
+  // stale, and a context strip naming the wrong database is worse than none.
+  // `activeProfile` is null for inline connections, where `config` is the
+  // only record of what we're attached to.
+  let connectionName = $derived(connections.activeProfile?.name ?? null);
+  let databaseName = $derived(
+    connections.activeProfile?.params['database'] ?? config?.database ?? null,
+  );
+
+  // Reloads the schema summary whenever the live database changes, covering
+  // both the initial connect and a switch from the sidebar. untrack() keeps
+  // the store's own $state out of this effect's dependencies, so settling a
+  // load can't retrigger it.
+  $effect(() => {
+    if (!connected || !databaseName) return;
+    const db = databaseName;
+    untrack(() => schemaSummary.load(db));
+  });
   let sidebarWidth = $state(252);
   let sidebarCollapsed = $state(false);
   const SIDEBAR_RAIL_WIDTH = 64;
@@ -134,10 +170,71 @@
 
   onMount(() => {
     theme.init();
+    void (async () => {
+      unlistenMenu = await listen('menu-action', (e) => {
+        void handleMenuAction(e.payload);
+      });
+    })();
   });
+
+  let unlistenMenu = null;
+
+  async function handleMenuAction(id) {
+    switch (id) {
+      case 'new-notebook':
+        goToNotebook();
+        return;
+      case 'new-query':
+        goToQuery();
+        return;
+      case 'open-notebook': {
+        const path = await pickNotebookToOpen();
+        if (path) await openNotebookFile(path);
+        return;
+      }
+      case 'save': {
+        if (activeTab?.kind === 'notebook') {
+          await saveNotebook(activeTab.id);
+          updateNotebookTabName(activeTab.id);
+        }
+        return;
+      }
+      case 'save-as': {
+        if (activeTab?.kind === 'notebook') {
+          await saveNotebookAs(activeTab.id);
+          updateNotebookTabName(activeTab.id);
+        }
+        return;
+      }
+    }
+  }
+
+  /** After a save, sync the tab's display name with the file that was written. */
+  function updateNotebookTabName(tabId) {
+    const model = notebooks.get(tabId);
+    if (!model?.filePath) return;
+    // Guard above ensures filePath is non-empty, so pop() always returns a string.
+    const newName = model.filePath.split('/').pop();
+    tabs = tabs.map((t) =>
+      t.id === tabId ? { ...t, name: newName, filePath: model.filePath } : t,
+    );
+  }
+
+  async function openNotebookFile(path) {
+    // Reuse an already-open tab for this file rather than opening a duplicate.
+    const existing = tabs.find(
+      (t) => t.kind === 'notebook' && t.filePath === path,
+    );
+    if (existing) {
+      switchTab(existing.id);
+      return;
+    }
+    goToNotebook(path);
+  }
 
   onDestroy(() => {
     if (session?.cleanup) session.cleanup();
+    unlistenMenu?.();
   });
 
   async function handleAiSend(message) {
@@ -168,11 +265,22 @@
         const conv = getActive();
         if (conv) {
           conv.isPaused = true;
+          conv.dmlResult = null;
+          conv.dmlError = null;
           conv.pausedDml = {
             sql: p.sql,
             description: p.description,
             estimatedRowsAffected: p.estimated_rows_affected,
           };
+          // Stamp the card onto the last (assistant) message so it renders
+          // in the thread with Execute/Cancel (C1).
+          updateLast(conv.id, {
+            dmlApproval: {
+              sql: p.sql,
+              description: p.description,
+              estimatedRowsAffected: p.estimated_rows_affected,
+            },
+          });
         }
       },
       onError: (p) => {
@@ -186,9 +294,15 @@
   async function handleRunDml() {
     const conv = getActive();
     if (!conv?.isPaused || !chat.activeConversationId) return;
-    await executeDml(chat.activeConversationId);
-    conv.isPaused = false;
-    conv.pausedDml = null;
+    try {
+      const res = await executeDml(chat.activeConversationId);
+      conv.dmlResult = res?.rows_affected ?? null;
+    } catch (e) {
+      conv.dmlError = formatError(e);
+    } finally {
+      conv.isPaused = false;
+      conv.pausedDml = null;
+    }
   }
 
   async function handleCancelDml() {
@@ -198,6 +312,10 @@
     if (conv) {
       conv.isPaused = false;
       conv.pausedDml = null;
+      conv.dmlResult = null;
+      conv.dmlError = null;
+      // Drop the card — its Execute button would be dead now.
+      updateLast(conv.id, { dmlApproval: undefined });
     }
   }
 
@@ -206,11 +324,26 @@
       e.preventDefault();
       showPalette = !showPalette;
     }
+    // Cmd+Shift+N — new notebook
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'n') {
+      e.preventDefault();
+      goToNotebook();
+    }
     // Cmd+Shift+A — toggle AI chat panel
     if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'a') {
       e.preventDefault();
       if (hasTabs) showChatPanel = !showChatPanel;
       else showChatPanel = true;
+    }
+    // Esc — cancel the in-flight editor query
+    if (e.key === 'Escape' && queryRunning) {
+      e.preventDefault();
+      cancelQuery().catch(() => {});
+    }
+    // Cmd/Ctrl+. — cancel the in-flight editor query
+    if ((e.metaKey || e.ctrlKey) && e.key === '.') {
+      e.preventDefault();
+      cancelQuery().catch(() => {});
     }
   }
 
@@ -237,7 +370,12 @@
     await disconnect();
     connected = false;
     config = null;
+    // Drop the cached schema so the next connection reads its own.
+    schemaSummary.reset();
     view = 'dashboard';
+    for (const t of tabs) {
+      if (t.kind === 'notebook') void notebooks.release(t.id);
+    }
     tabs = [];
     activeTabId = null;
     queryError = null;
@@ -248,6 +386,10 @@
 
   let queryError = $state(null);
   let connectError = $state(null);
+  // Editor queries in flight (primary runs + paginated fetches can overlap
+  // across tabs). Derived boolean drives the Stop button and shortcuts.
+  let queryRunCount = $state(0);
+  const queryRunning = $derived(queryRunCount > 0);
 
   function formatError(e) {
     if (typeof e === 'object' && e !== null && 'message' in e) {
@@ -259,6 +401,12 @@
 
   const CHUNK_SIZE = 200;
 
+  // A fetch is complete when the backend truncated it (non-wrappable queries
+  // can't be paged further) or the chunk came back short of a full page.
+  function pageComplete(result) {
+    return result.truncated === true || result.rows.length < CHUNK_SIZE;
+  }
+
   async function handleExecute(sql) {
     queryError = null;
     const tabId = activeTab?.id;
@@ -267,6 +415,7 @@
     if (!tab || tab.kind !== 'query') return;
 
     const start = performance.now();
+    queryRunCount += 1;
     try {
       const result = await executeQuery(sql, { limit: CHUNK_SIZE, offset: 0 });
       const elapsed = ((performance.now() - start) / 1000).toFixed(2);
@@ -276,8 +425,10 @@
         rows: result.rows,
         fetchedCount: result.rows.length,
         totalCount: null,
-        isEnd: result.rows.length < CHUNK_SIZE,
+        isEnd: pageComplete(result),
+        truncated: result.truncated === true,
         duration: parseFloat(elapsed),
+        summary: result.rows_affected != null ? resultSummary(result) : null,
         error: null,
       });
     } catch (e) {
@@ -290,8 +441,11 @@
         totalCount: null,
         isEnd: false,
         duration: 0,
+        summary: null,
       });
       queryError = msg;
+    } finally {
+      queryRunCount -= 1;
     }
   }
 
@@ -299,6 +453,7 @@
     const tab = tabs.find((t) => t.id === tabId);
     if (!tab || tab.isFetchingMore) return;
     updateTab(tabId, { isFetchingMore: true });
+    queryRunCount += 1;
     try {
       const opts = fetchMoreOptions(tab, CHUNK_SIZE);
       const result =
@@ -309,10 +464,14 @@
         rows: [...tab.rows, ...result.rows],
         fetchedCount: tab.fetchedCount + result.rows.length,
         isFetchingMore: false,
-        isEnd: result.rows.length < CHUNK_SIZE,
+        isEnd: pageComplete(result),
+        truncated: result.truncated === true,
+        summary: result.rows_affected != null ? resultSummary(result) : null,
       });
     } catch (e) {
       updateTab(tabId, { isFetchingMore: false, error: formatError(e) });
+    } finally {
+      queryRunCount -= 1;
     }
   }
 
@@ -323,6 +482,7 @@
     // rows here used to unmount the grid's filter UI mid-interaction.
     updateTab(tabId, { ...updates, refetching: true });
     const merged = { ...tab, ...updates };
+    queryRunCount += 1;
     try {
       const opts = refetchOptions(merged, CHUNK_SIZE);
       const result =
@@ -334,7 +494,9 @@
         rows: result.rows,
         fetchedCount: result.rows.length,
         totalCount: null,
-        isEnd: result.rows.length < CHUNK_SIZE,
+        isEnd: pageComplete(result),
+        truncated: result.truncated === true,
+        summary: result.rows_affected != null ? resultSummary(result) : null,
         error: null,
         refetching: false,
       });
@@ -344,8 +506,11 @@
         rows: [],
         fetchedCount: 0,
         totalCount: null,
+        summary: null,
         refetching: false,
       });
+    } finally {
+      queryRunCount -= 1;
     }
   }
 
@@ -372,7 +537,7 @@
     return executeQuery(sql, { limit: CHUNK_SIZE, offset: 0 });
   }
 
-  async function handleViewSubView(schema, name, subView) {
+  async function handleViewSubView(schema, name, subView, kind = 'view') {
     if (subView === 'data') {
       const existingTab = tabs.find(
         (t) => t.kind === 'view' && t.schema === schema && t.name === name,
@@ -400,7 +565,7 @@
       );
       if (existingTab?.sourceContent) return; // already loaded
       try {
-        const src = await getViewSource(schema, name);
+        const src = await getViewSource(schema, name, kind);
         updateTab(existingTab?.id || '', {
           sourceContent: src,
           sourceError: null,
@@ -416,7 +581,12 @@
     const tab = tabs.find((t) => t.id === tabId);
     if (tab && tab.kind === 'view') {
       updateTab(tabId, { subView });
-      handleViewSubView(tab.schema, tab.name, subView);
+      handleViewSubView(
+        tab.schema,
+        tab.name,
+        subView,
+        tab.sourceKind || 'view',
+      );
     }
   }
 
@@ -464,7 +634,7 @@
         activeTabId = tabId;
       }
       showChatPanel = true;
-    } else if (kind === 'view') {
+    } else if (kind === 'view' || kind === 'matview') {
       const existingTab = tabs.find(
         (t) => t.kind === 'view' && t.schema === schema && t.name === name,
       );
@@ -480,6 +650,7 @@
       const newTab = {
         id: tabId,
         kind: 'view',
+        sourceKind: kind,
         subView: 'data',
         schema,
         name,
@@ -503,9 +674,9 @@
       view = 'view';
 
       // Fetch data immediately
-      handleViewSubView(schema, name, 'data');
+      handleViewSubView(schema, name, 'data', kind);
       // Also fetch source in background
-      handleViewSubView(schema, name, 'source');
+      handleViewSubView(schema, name, 'source', kind);
     } else {
       const existingTab = tabs.find(
         (t) => t.kind === 'table' && t.schema === schema && t.name === name,
@@ -569,6 +740,7 @@
       filters: [],
       sortCol: null,
       sortDir: 'asc',
+      summary: null,
       error: null,
     };
     tabs = [...tabs, newTab];
@@ -579,8 +751,24 @@
     showChatPanel = true;
   }
 
+  function goToNotebook(filePath = null) {
+    const tabId = crypto.randomUUID();
+    const newTab = {
+      id: tabId,
+      kind: 'notebook',
+      name: filePath ? filePath.split('/').pop() : 'Untitled.lucent',
+      filePath: filePath,
+    };
+    tabs = [...tabs, newTab];
+    activeTabId = tabId;
+    view = 'notebook';
+    showChatPanel = true;
+    showPalette = false;
+  }
+
   function handlePaletteSelect(item) {
     if (item.id === 'new-query') goToQuery();
+    if (item.id === 'new-notebook') goToNotebook();
     if (item.id === 'toggle-theme') theme.toggle();
     if (item.id === 'disconnect') handleDisconnect();
     if (item.id === 'toggle-ai-chat') {
@@ -595,6 +783,7 @@
     if (!tab) return;
     activeTabId = tabId;
     if (tab.kind === 'query') view = 'query';
+    else if (tab.kind === 'notebook') view = 'notebook';
     else if (tab.kind === 'source') view = 'source';
     else if (tab.kind === 'view') {
       view = 'view';
@@ -604,7 +793,17 @@
     queryError = tab.error || null;
   }
 
-  function closeTab(tabId) {
+  async function closeTab(tabId) {
+    const tab = tabs.find((t) => t.id === tabId);
+    if (tab?.kind === 'notebook') {
+      const intent = await confirmDiscardIfDirty(tabId);
+      if (intent === 'cancel') return;
+      if (intent === 'save') {
+        const saved = await saveNotebook(tabId);
+        if (!saved) return; // save cancelled or failed — abort the close
+      }
+      await notebooks.release(tabId);
+    }
     tabs = tabs.filter((t) => t.id !== tabId);
     if (activeTabId === tabId) {
       if (tabs.length > 0) {
@@ -615,16 +814,9 @@
     }
   }
 
-  function closeMultipleTabs(tabIds) {
-    const idSet = new Set(tabIds);
-    const wasActive = idSet.has(activeTabId);
-    tabs = tabs.filter((t) => !idSet.has(t.id));
-    if (wasActive) {
-      if (tabs.length > 0) {
-        switchTab(tabs[tabs.length - 1].id);
-      } else {
-        activeTabId = null;
-      }
+  async function closeMultipleTabs(tabIds) {
+    for (const id of tabIds) {
+      await closeTab(id);
     }
   }
 
@@ -639,6 +831,13 @@
       description: 'Open the SQL editor',
       icon: '▸',
       shortcut: 'Cmd+Enter',
+    },
+    {
+      id: 'new-notebook',
+      label: 'New Notebook',
+      description: 'Create a new SQL notebook',
+      icon: '📓',
+      shortcut: '⌘⇧N',
     },
     {
       id: 'toggle-theme',
@@ -674,6 +873,7 @@
     {connected}
     {showAiSettings}
     {showChatPanel}
+    {showLogs}
     {hasTabs}
     connectionId={activeConnectionId}
     leftWidth={sidebarCollapsed ? SIDEBAR_RAIL_WIDTH : sidebarWidth}
@@ -681,6 +881,7 @@
     onToggleSidebar={() => (sidebarCollapsed = !sidebarCollapsed)}
     onToggleTheme={() => theme.toggle()}
     onToggleAi={() => (showAiSettings = !showAiSettings)}
+    onToggleLogs={() => (showLogs = !showLogs)}
     onToggleChat={() => {
       if (hasTabs) showChatPanel = !showChatPanel;
     }}
@@ -693,6 +894,19 @@
     onCloseTab={closeTab}
     onCloseTabs={closeMultipleTabs}
     onNewQuery={goToQuery}
+    onNotebookSave={async (id) => {
+      await saveNotebook(id);
+      updateNotebookTabName(id);
+    }}
+    onNotebookSaveAs={async (id) => {
+      await saveNotebookAs(id);
+      updateNotebookTabName(id);
+    }}
+    onNotebookOpen={async () => {
+      const path = await pickNotebookToOpen();
+      if (path) await openNotebookFile(path);
+    }}
+    isTabDirty={(id) => notebooks.get(id)?.isDirty ?? false}
   />
 
   {#if connected}
@@ -707,6 +921,7 @@
           <Sidebar
             onObjectClick={handleObjectClick}
             onDisconnect={handleDisconnect}
+            onOpenLogs={() => (showLogs = true)}
           />
           <div
             class="resize-handle sidebar-handle"
@@ -728,6 +943,8 @@
                   onContentChange={(val) => {
                     if (activeTab) activeTab.baseSql = val;
                   }}
+                  isRunning={queryRunning}
+                  onCancel={() => cancelQuery().catch(() => {})}
                 />
               </div>
               <div class="vsplit-handle" onmousedown={startVResize}></div>
@@ -738,6 +955,7 @@
                   fetchedCount={activeTab.fetchedCount}
                   totalCount={activeTab.totalCount}
                   isEnd={activeTab.isEnd}
+                  truncated={activeTab.truncated}
                   duration={activeTab.duration}
                   error={activeTab.error}
                   tabId={activeTab.id}
@@ -746,6 +964,7 @@
                   initSortDir={activeTab.sortDir}
                   compact={showChatPanel}
                   loading={activeTab.refetching || false}
+                  summary={activeTab.summary}
                   onDescribeFilters={describeFilters}
                   onStateChange={(updates) =>
                     handleGridStateChange(activeTab.id, updates)}
@@ -761,6 +980,7 @@
               fetchedCount={activeTab.fetchedCount}
               totalCount={activeTab.totalCount}
               isEnd={activeTab.isEnd}
+              truncated={activeTab.truncated}
               duration={activeTab.duration}
               error={activeTab.error}
               tabId={activeTab.id}
@@ -843,6 +1063,7 @@
                 fetchedCount={activeTab.fetchedCount}
                 totalCount={activeTab.totalCount}
                 isEnd={activeTab.isEnd}
+                truncated={activeTab.truncated}
                 duration={activeTab.duration}
                 error={activeTab.error}
                 tabId={activeTab.id}
@@ -859,12 +1080,19 @@
               />
             {:else}
               <SourceView
-                title={`${activeTab.schema}.${activeTab.name} (view)`}
+                title={`${activeTab.schema}.${activeTab.name} (${activeTab.sourceKind || 'view'})`}
                 source={activeTab.sourceContent || ''}
                 loading={false}
                 error={activeTab.sourceError || null}
               />
             {/if}
+          {:else if view === 'notebook' && activeTab}
+            <Notebook
+              tabId={activeTab.id}
+              filePath={activeTab.filePath}
+              connectionId={connections.activeProfileId ?? activeConnectionId}
+              database={databaseName}
+            />
           {:else if view === 'source' && activeTab}
             <SourceView
               title={currentObject
@@ -887,6 +1115,10 @@
               onSend={handleAiSend}
               onRunDml={handleRunDml}
               onCancelDml={handleCancelDml}
+              {connected}
+              database={databaseName}
+              {connectionName}
+              onOpenSettings={() => (showAiSettings = true)}
               onClose={() => (showChatPanel = false)}
               onNewChat={() => {
                 createNewChatTab(activeConnectionId);
@@ -907,6 +1139,10 @@
             onSend={handleAiSend}
             onRunDml={handleRunDml}
             onCancelDml={handleCancelDml}
+            {connected}
+            database={databaseName}
+            {connectionName}
+            onOpenSettings={() => (showAiSettings = true)}
             onNewChat={() => createNewChatTab(activeConnectionId)}
             onSwitchConv={switchChatTab}
             onCloseConv={closeChatTab}
@@ -915,13 +1151,8 @@
       {/if}
     </div>
   {:else}
-    <div class="landing-split">
-      <div class="landing-main">
-        <LandingPage onConnect={handleConnect} {connectError} />
-      </div>
-      <div class="landing-chat">
-        <ChatLanding onSend={handleAiSend} />
-      </div>
+    <div class="landing-full">
+      <LandingPage onConnect={handleConnect} {connectError} />
     </div>
   {/if}
 
@@ -951,6 +1182,10 @@
     onSelect={handlePaletteSelect}
     onClose={() => (showPalette = false)}
   />
+{/if}
+
+{#if showLogs}
+  <LogsDrawer onClose={() => (showLogs = false)} />
 {/if}
 
 <style>
@@ -1162,20 +1397,14 @@
     margin: 0 auto;
     width: 100%;
   }
-  .landing-split {
+  .landing-full {
+    flex: 1;
     display: flex;
-    flex: 1;
-    overflow: hidden;
-  }
-  .landing-main {
-    flex: 1;
+    flex-direction: column;
     overflow: auto;
-  }
-  .landing-chat {
-    width: 420px;
-    min-width: 360px;
-    border-left: 1px solid var(--border);
-    overflow: auto;
+    background: var(--bg);
+    width: 100%;
+    height: 100%;
   }
   .modal-overlay {
     position: fixed;

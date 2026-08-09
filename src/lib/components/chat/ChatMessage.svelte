@@ -3,7 +3,7 @@
   import { renderMarkdown } from './markdown.ts';
   import DmlApprovalCard from './DmlApprovalCard.svelte';
   import WorkSession from './WorkSession.svelte';
-  import { setSessionExpanded } from '../../stores/chat.svelte.ts';
+  import { chat, setSessionExpanded } from '../../stores/chat.svelte.ts';
 
   let {
     message,
@@ -20,6 +20,13 @@
   } = $props();
 
   let rendered = $derived(renderMarkdown(message.content));
+
+  // The DML card lives on a message, but its outcome (rows affected / error,
+  // C1) is conversation-level state — derive it so the card re-renders when
+  // execute_dml resolves.
+  const conv = $derived(
+    chat.conversations.find((c) => c.id === conversationId),
+  );
 
   function handleSessionToggle(expanded: boolean) {
     if (conversationId) {
@@ -41,6 +48,8 @@
     {#if message.dmlApproval}
       <DmlApprovalCard
         dml={message.dmlApproval}
+        result={conv?.dmlResult ?? null}
+        error={conv?.dmlError ?? null}
         onRun={onRunDml}
         onCancel={onCancelDml}
       />

@@ -46,6 +46,13 @@ fn seed_sql() -> &'static str {
 }
 
 async fn setup(name: &str) -> (impl Drop, tokio_postgres::Client) {
+    let (_port, container, client) = setup_with_port(name).await;
+    (container, client)
+}
+
+/// As `setup`, but also returns the container's host port so tests can drive
+/// the worker seam (`pg_config(port)` + `ConnectorClient`).
+async fn setup_with_port(name: &str) -> (u16, impl Drop, tokio_postgres::Client) {
     eprintln!("[{name}] Starting Postgres...");
     let c = testcontainers_modules::postgres::Postgres::default()
         .start()
@@ -63,7 +70,7 @@ async fn setup(name: &str) -> (impl Drop, tokio_postgres::Client) {
                 tokio::spawn(async move {
                     conn.await.ok();
                 });
-                return (c, client);
+                return (port, c, client);
             }
             Err(e) => {
                 last_err = Some(e);
@@ -72,6 +79,54 @@ async fn setup(name: &str) -> (impl Drop, tokio_postgres::Client) {
         }
     }
     panic!("[{name}] Failed to connect: {}", last_err.unwrap());
+}
+
+/// Spawn the worker, connect an app-side `ConnectorClient`, and return it with
+/// the connection id and the supervisor (caller must hold the supervisor and
+/// shut it down). This is the exact seam the AI tools and the schema index now
+/// consume — catalog questions go over this socket, not raw SQL.
+async fn worker_client(
+    port: u16,
+) -> (
+    crate::client::ConnectorClient,
+    lucent_protocol::ConnectionId,
+    crate::supervisor::Supervisor,
+) {
+    let mut supervisor = crate::supervisor::Supervisor::new();
+    let socket_path = supervisor
+        .ensure_running()
+        .await
+        .expect("supervisor running")
+        .to_path_buf();
+    let token = supervisor.handshake_token().to_owned();
+    let (client, conn_id) =
+        crate::client::ConnectorClient::connect(&socket_path, &token, pg_config(port))
+            .await
+            .expect("connect client");
+    (client, conn_id, supervisor)
+}
+
+/// Blocks until the Postgres port accepts connections (containers can take
+/// a few seconds past `start()` returning).
+async fn wait_for_postgres(port: u16) {
+    let conn_str =
+        format!("host=127.0.0.1 port={port} user=postgres password=postgres dbname=postgres");
+    let mut last_err = None;
+    for i in 0..10 {
+        match tokio_postgres::connect(&conn_str, NoTls).await {
+            Ok((_client, conn)) => {
+                tokio::spawn(async move {
+                    conn.await.ok();
+                });
+                return;
+            }
+            Err(e) => {
+                last_err = Some(e);
+                tokio::time::sleep(Duration::from_millis(500 * (i + 1))).await;
+            }
+        }
+    }
+    panic!("Postgres never became ready: {last_err:?}");
 }
 
 #[tokio::test]
@@ -93,43 +148,59 @@ async fn real_query_acme() {
     eprintln!("  Found Acme Corporation");
 }
 
+/// Name search through the catalog seam — the same RPC `search_schema` will
+/// use. The old raw query shape lived in `keyword_search_objects`, which moved
+/// below the seam; this test now asserts the production path.
 #[tokio::test]
 async fn real_search_tables_by_name() {
-    let (_c, client) = setup("search_tables").await;
+    let (_port, _c, client) = setup_with_port("search_tables").await;
     client.batch_execute(seed_sql()).await.unwrap();
-    let like = "%org%";
-    let rows = client
-        .query(
-            "SELECT c.relname FROM pg_class c \
-             JOIN pg_namespace n ON n.oid = c.relnamespace \
-             WHERE c.relkind = 'r' AND n.nspname = 'public' AND c.relname ILIKE $1 \
-             ORDER BY c.relname LIMIT 10",
-            &[&like],
-        )
+
+    let (mut worker, conn_id, mut supervisor) = worker_client(_port).await;
+    let hits = worker
+        .search_objects(conn_id, "org", vec![], None, 10)
         .await
-        .unwrap();
-    let found: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
-    assert!(found.iter().any(|n| n == "organizations"));
-    eprintln!("  Found {} tables matching 'org'", found.len());
+        .expect("search objects");
+    assert!(
+        hits.iter()
+            .any(|h| h.reference.name == "organizations" && h.column.is_none()),
+        "search for 'org' must hit the organizations table: {hits:?}"
+    );
+    eprintln!("  Found {} hits matching 'org'", hits.len());
+
+    let _ = worker.shutdown().await;
+    let _ = supervisor.shutdown().await;
 }
 
+/// Column info through the catalog seam — `get_objects_info` now reads columns
+/// from `describe_objects`, not an ad-hoc query.
 #[tokio::test]
 async fn real_column_info() {
-    let (_c, client) = setup("column_info").await;
+    use lucent_protocol::{ObjectKind, ObjectRef};
+
+    let (_port, _c, client) = setup_with_port("column_info").await;
     client.batch_execute(seed_sql()).await.unwrap();
-    let rows = client
-        .query(
-            "SELECT column_name, data_type FROM information_schema.columns \
-             WHERE table_schema = 'public' AND table_name = 'organizations' \
-             ORDER BY ordinal_position",
-            &[],
+
+    let (mut worker, conn_id, mut supervisor) = worker_client(_port).await;
+    let details = worker
+        .describe_objects(
+            conn_id,
+            vec![ObjectRef {
+                namespace: vec!["public".into()],
+                name: "organizations".into(),
+                kind: ObjectKind::Table,
+            }],
         )
         .await
-        .unwrap();
-    let cols: Vec<(String, String)> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
-    assert!(cols.iter().any(|(n, _)| n == "settings"), "jsonb column");
-    assert!(cols.iter().any(|(n, _)| n == "plan"));
-    eprintln!("  Found {} columns", cols.len());
+        .expect("describe objects");
+    assert_eq!(details.len(), 1, "one detail per requested object");
+    let names: Vec<&str> = details[0].columns.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"settings"), "jsonb column: {names:?}");
+    assert!(names.contains(&"plan"), "plan column: {names:?}");
+    eprintln!("  Found {} columns", names.len());
+
+    let _ = worker.shutdown().await;
+    let _ = supervisor.shutdown().await;
 }
 
 #[tokio::test]
@@ -152,9 +223,11 @@ async fn real_blast_radius() {
 async fn real_guard_rejects_dml() {
     let (_c, client) = setup("guard_dml").await;
     client.batch_execute(seed_sql()).await.unwrap();
-    assert!(
-        crate::ai::guard::validate_readonly("DELETE FROM organizations WHERE plan='free'").is_err()
-    );
+    assert!(crate::ai::guard::validate_readonly(
+        "DELETE FROM organizations WHERE plan='free'",
+        lucent_protocol::SqlDialect::PostgreSql,
+    )
+    .is_err());
     let rows = client
         .query("SELECT count(*) FROM organizations", &[])
         .await
@@ -163,181 +236,100 @@ async fn real_guard_rejects_dml() {
     assert_eq!(count, 3, "data intact");
 }
 
+/// Composite PK + individual FK columns must each appear exactly once in the
+/// catalog's column listing, with the correct PK flag. The old columns query
+/// (LEFT JOIN on key_column_usage) duplicated such columns — that query is gone;
+/// `describe_objects` now answers from the driver's catalog RPCs, and this
+/// test pins the same contract through the app's catalog seam.
 #[tokio::test]
 async fn composite_pk_and_fk_does_not_duplicate_columns_in_query() {
-    let (_c, client) = setup("no_dup_cols").await;
+    use lucent_protocol::{ObjectKind, ObjectRef};
+
+    let (_port, _c, client) = setup_with_port("no_dup_cols").await;
     client.batch_execute(seed_sql()).await.unwrap();
 
-    // The OLD query (LEFT JOIN key_column_usage) duplicates columns that are
-    // both in a composite PK AND individually FK-referenced.
-    let old_rows = client
-        .query(
-            "SELECT c.table_schema, c.table_name, c.column_name, c.data_type, \
-                    COALESCE(tc.constraint_type = 'PRIMARY KEY', false) AS is_primary_key \
-             FROM information_schema.columns c \
-             LEFT JOIN information_schema.key_column_usage kcu \
-               ON kcu.column_name = c.column_name \
-              AND kcu.table_name = c.table_name \
-              AND kcu.table_schema = c.table_schema \
-             LEFT JOIN information_schema.table_constraints tc \
-               ON tc.constraint_name = kcu.constraint_name \
-              AND tc.table_schema = kcu.table_schema \
-              AND tc.constraint_type = 'PRIMARY KEY' \
-             WHERE c.table_schema = 'public' AND c.table_name = 'line_items' \
-             ORDER BY c.column_name",
-            &[],
+    let (mut worker, conn_id, mut supervisor) = worker_client(_port).await;
+    let details = worker
+        .describe_objects(
+            conn_id,
+            vec![ObjectRef {
+                namespace: vec!["public".into()],
+                name: "line_items".into(),
+                kind: ObjectKind::Table,
+            }],
         )
         .await
-        .unwrap();
-    let old_org_id_count = old_rows
-        .iter()
-        .filter(|r| r.get::<_, String>(2) == "org_id")
-        .count();
-    let old_user_id_count = old_rows
-        .iter()
-        .filter(|r| r.get::<_, String>(2) == "user_id")
-        .count();
-    assert!(
-        old_org_id_count > 1,
-        "the OLD query must produce >1 row for org_id (composite PK + FK) — 
-         otherwise this test can't demonstrate the bug. Got {old_org_id_count}"
-    );
+        .expect("describe objects");
+    assert_eq!(details.len(), 1, "one detail for line_items");
 
-    // The NEW query (EXISTS semi-join) must produce exactly 1 row per column.
-    let new_rows = client
-        .query(
-            "SELECT c.table_schema, c.table_name, c.column_name, c.data_type, \
-                    EXISTS ( \
-                        SELECT 1 FROM information_schema.key_column_usage kcu \
-                        JOIN information_schema.table_constraints tc \
-                          ON tc.constraint_name = kcu.constraint_name \
-                         AND tc.table_schema = kcu.table_schema \
-                         AND tc.constraint_type = 'PRIMARY KEY' \
-                        WHERE kcu.column_name = c.column_name \
-                          AND kcu.table_name = c.table_name \
-                          AND kcu.table_schema = c.table_schema \
-                    ) AS is_primary_key \
-             FROM information_schema.columns c \
-             WHERE c.table_schema = 'public' AND c.table_name = 'line_items' \
-             ORDER BY c.column_name",
-            &[],
-        )
-        .await
-        .unwrap();
-    let new_org_id_count = new_rows
-        .iter()
-        .filter(|r| r.get::<_, String>(2) == "org_id")
-        .count();
-    let new_user_id_count = new_rows
-        .iter()
-        .filter(|r| r.get::<_, String>(2) == "user_id")
-        .count();
-
-    assert_eq!(
-        new_org_id_count, 1,
-        "org_id (composite PK + individual FK) must appear exactly once with EXISTS semi-join, not duplicated per constraint"
-    );
-    assert_eq!(
-        new_user_id_count, 1,
-        "user_id (composite PK + individual FK) must appear exactly once"
-    );
+    let cols = &details[0].columns;
+    for col in ["org_id", "user_id"] {
+        let occurrences = cols.iter().filter(|c| c.name == col).count();
+        assert_eq!(
+            occurrences, 1,
+            "{col} (composite PK + individual FK) must appear exactly once, not duplicated per constraint: {cols:?}"
+        );
+        let c = cols.iter().find(|c| c.name == col).unwrap();
+        assert!(c.is_primary_key, "{col} is part of the composite PK");
+    }
+    let quantity = cols.iter().find(|c| c.name == "quantity").unwrap();
+    assert!(!quantity.is_primary_key, "quantity is not a PK column");
     eprintln!(
-        "  Duplicate-column fix: OLD query returned {old_org_id_count}x org_id / {old_user_id_count}x user_id, NEW query returns {new_org_id_count}x / {new_user_id_count}x"
+        "  describe_objects returns {} columns for line_items",
+        cols.len()
     );
+
+    let _ = worker.shutdown().await;
+    let _ = supervisor.shutdown().await;
 }
 
+/// The PK flag must be deterministic through the catalog seam: composite-PK
+/// columns report is_primary_key=true exactly once each, no ambiguity from a
+/// naive dedup pass.
 #[tokio::test]
 async fn get_objects_info_query_reports_pk_consistently_for_composite_pk_and_fk_columns() {
-    let (_c, client) = setup("get_objects_info_pk_consistency").await;
+    use lucent_protocol::{ObjectKind, ObjectRef};
+
+    let (_port, _c, client) = setup_with_port("get_objects_info_pk_consistency").await;
     client.batch_execute(seed_sql()).await.unwrap();
 
-    // The OLD query (LEFT JOIN key_column_usage, as GetObjectsInfo::call used before
-    // this fix) produces one row per matching constraint. For org_id/user_id (each
-    // part of the composite PK AND individually FK-referenced), that's 2 rows each —
-    // one correctly flagged is_pk=true (the PK-constraint match), one incorrectly
-    // flagged is_pk=false (the FK-constraint match, which doesn't join to a
-    // PRIMARY KEY-typed table_constraints row). A dedup-by-column-name pass has no
-    // reliable way to know which of the two rows to keep, since both tie on
-    // ORDER BY c.ordinal_position — whichever Postgres emits first wins, which is a
-    // query-plan detail, not a guarantee.
-    let old_rows = client
-        .query(
-            "SELECT c.column_name, c.data_type, c.is_nullable, \
-                    tc.constraint_type AS constraint_type \
-             FROM information_schema.columns c \
-             LEFT JOIN information_schema.key_column_usage kcu \
-               ON kcu.column_name = c.column_name AND kcu.table_name = c.table_name \
-               AND kcu.table_schema = c.table_schema \
-             LEFT JOIN information_schema.table_constraints tc \
-               ON tc.constraint_name = kcu.constraint_name \
-               AND tc.table_schema = kcu.table_schema \
-               AND tc.constraint_type = 'PRIMARY KEY' \
-             WHERE c.table_schema = 'public' AND c.table_name = 'line_items' \
-             ORDER BY c.ordinal_position",
-            &[],
+    let (mut worker, conn_id, mut supervisor) = worker_client(_port).await;
+    let details = worker
+        .describe_objects(
+            conn_id,
+            vec![ObjectRef {
+                namespace: vec!["public".into()],
+                name: "line_items".into(),
+                kind: ObjectKind::Table,
+            }],
         )
         .await
-        .unwrap();
+        .expect("describe objects");
+    assert_eq!(details.len(), 1, "one detail for line_items");
 
-    let org_id_is_pk_values: Vec<bool> = old_rows
-        .iter()
-        .filter(|r| r.get::<_, String>(0) == "org_id")
-        .map(|r| r.get::<_, Option<String>>(3).as_deref() == Some("PRIMARY KEY"))
-        .collect();
-    assert!(
-        org_id_is_pk_values.contains(&true) && org_id_is_pk_values.contains(&false),
-        "the OLD query must produce BOTH a true and a false is_pk row for org_id — \
-         otherwise this test can't demonstrate that a naive first-row-wins dedup is \
-         ambiguous. Got: {org_id_is_pk_values:?}"
-    );
-
-    // The NEW query (EXISTS semi-join, matching GetObjectsInfo::call after this fix)
-    // must produce exactly one row per column, with the CORRECT is_pk value — no
-    // ambiguity, no dedup pass needed.
-    let new_rows = client
-        .query(
-            "SELECT c.column_name, c.data_type, c.is_nullable, \
-                    EXISTS ( \
-                        SELECT 1 FROM information_schema.key_column_usage kcu \
-                        JOIN information_schema.table_constraints tc \
-                          ON tc.constraint_name = kcu.constraint_name \
-                         AND tc.table_schema = kcu.table_schema \
-                         AND tc.constraint_type = 'PRIMARY KEY' \
-                        WHERE kcu.column_name = c.column_name \
-                          AND kcu.table_name = c.table_name \
-                          AND kcu.table_schema = c.table_schema \
-                    ) AS is_primary_key \
-             FROM information_schema.columns c \
-             WHERE c.table_schema = 'public' AND c.table_name = 'line_items' \
-             ORDER BY c.ordinal_position",
-            &[],
-        )
-        .await
-        .unwrap();
-
+    let cols = &details[0].columns;
     for expected_pk_col in ["org_id", "user_id"] {
-        let matches: Vec<bool> = new_rows
+        let matches: Vec<bool> = cols
             .iter()
-            .filter(|r| r.get::<_, String>(0) == expected_pk_col)
-            .map(|r| r.get::<_, bool>(3))
+            .filter(|c| c.name == expected_pk_col)
+            .map(|c| c.is_primary_key)
             .collect();
         assert_eq!(
-            matches.len(),
-            1,
-            "{expected_pk_col} must appear exactly once, not duplicated per constraint"
-        );
-        assert_eq!(
-            matches[0], true,
-            "{expected_pk_col} is part of the composite PK and must be reported as is_pk=true, deterministically"
+            matches,
+            vec![true],
+            "{expected_pk_col} is part of the composite PK and must be reported as is_pk=true exactly once, deterministically: {cols:?}"
         );
     }
 
-    let quantity_matches: Vec<bool> = new_rows
+    let quantity_matches: Vec<bool> = cols
         .iter()
-        .filter(|r| r.get::<_, String>(0) == "quantity")
-        .map(|r| r.get::<_, bool>(3))
+        .filter(|c| c.name == "quantity")
+        .map(|c| c.is_primary_key)
         .collect();
     assert_eq!(quantity_matches, vec![false], "quantity is not a PK column");
+
+    let _ = worker.shutdown().await;
+    let _ = supervisor.shutdown().await;
 }
 
 #[tokio::test]
@@ -356,6 +348,8 @@ async fn e2e_llm_tool_awareness() {
 
     let ctx = crate::ai::tools::AiToolContext {
         db: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        connection_id: None,
+        capabilities: None,
         config: crate::ai::config::AiConfig::default(),
         schema_graph: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         embedder: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
@@ -389,65 +383,221 @@ async fn e2e_llm_tool_awareness() {
     );
 }
 
+/// The driver catalog answers partition metadata and flags partition children;
+/// `harvest_to_entries` collapses children into their parent. Drive the real
+/// seam — worker binary → catalog RPC → graph harvest — and assert the same
+/// facts the old build_index Step 0 query used to provide.
 #[tokio::test]
 async fn partitioned_table_metadata_query_collapses_children() {
-    let (_c, client) = setup("partition_collapse").await;
-    client
-        .batch_execute(
-            "CREATE TABLE IF NOT EXISTS public.events (
-                 id BIGINT, created_at DATE NOT NULL, kind TEXT
-             ) PARTITION BY RANGE (created_at);
-             CREATE TABLE IF NOT EXISTS public.events_2025
-                 PARTITION OF public.events FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
-             CREATE TABLE IF NOT EXISTS public.events_2026
-                 PARTITION OF public.events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');",
-        )
-        .await
-        .unwrap();
+    use crate::ai::schema_graph::harvest_to_entries;
+    use crate::client::ConnectorClient;
+    use crate::supervisor::Supervisor;
+    use lucent_protocol::ObjectKind;
 
-    // Same query build_index runs in Step 0.
-    let rows = client
-        .query(
-            "SELECT n.nspname, c.relname, \
-                    (i.inhrelid IS NOT NULL) AS is_partition_child, \
-                    (SELECT count(*) FROM pg_inherits pi WHERE pi.inhparent = c.oid) AS partition_count, \
-                    CASE WHEN c.relkind = 'p' THEN pg_get_partkeydef(c.oid) END AS partkey \
-             FROM pg_class c \
-             JOIN pg_namespace n ON n.oid = c.relnamespace \
-             LEFT JOIN pg_inherits i ON i.inhrelid = c.oid \
-             WHERE c.relkind IN ('r', 'p') AND n.nspname = 'public' \
-               AND c.relname LIKE 'events%'",
-            &[],
-        )
+    let container = testcontainers_modules::postgres::Postgres::default()
+        .start()
         .await
-        .unwrap();
+        .expect("postgres container to start");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("get postgres port");
+    wait_for_postgres(port).await;
 
-    let parent = rows
+    // Seed through a raw session — the worker's own execute() rejects
+    // multi-statement DDL.
+    let conn_str =
+        format!("host=127.0.0.1 port={port} user=postgres password=postgres dbname=postgres");
+    let (raw, conn) = tokio_postgres::connect(&conn_str, NoTls).await.unwrap();
+    tokio::spawn(async move {
+        conn.await.ok();
+    });
+    raw.batch_execute(
+        "CREATE TABLE IF NOT EXISTS public.events (
+             id BIGINT, created_at DATE NOT NULL, kind TEXT
+         ) PARTITION BY RANGE (created_at);
+         CREATE TABLE IF NOT EXISTS public.events_2025
+             PARTITION OF public.events FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+         CREATE TABLE IF NOT EXISTS public.events_2026
+             PARTITION OF public.events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');",
+    )
+    .await
+    .unwrap();
+
+    let mut supervisor = Supervisor::new();
+    let socket_path = supervisor
+        .ensure_running()
+        .await
+        .expect("supervisor running")
+        .to_path_buf();
+    let token = supervisor.handshake_token().to_owned();
+    let (mut client, conn_id) = ConnectorClient::connect(&socket_path, &token, pg_config(port))
+        .await
+        .expect("connect client");
+
+    // The catalog RPC is the exact path build_index's harvest now consumes.
+    let objects = client
+        .list_all_objects(conn_id, vec![ObjectKind::Table])
+        .await
+        .expect("list all objects");
+
+    let parent = objects
         .iter()
-        .find(|r| r.get::<_, String>(1) == "events")
+        .find(|o| o.reference.name == "events")
         .expect("parent present");
-    assert!(!parent.get::<_, bool>(2), "parent is not a partition child");
+    assert!(
+        !parent.is_partition_child,
+        "parent is not a partition child"
+    );
+    let partition = parent
+        .partition
+        .as_ref()
+        .expect("parent reports its partition metadata");
     assert_eq!(
-        parent.get::<_, i64>(3),
-        2,
-        "parent reports its partition count"
+        partition.child_count, 2,
+        "parent reports its partition count: {partition:?}"
     );
     assert!(
-        parent
-            .get::<_, Option<String>>(4)
-            .unwrap()
-            .contains("RANGE"),
-        "partition key def"
+        partition.key.as_deref().unwrap_or("").contains("RANGE"),
+        "partition key def: {partition:?}"
     );
 
     for child in ["events_2025", "events_2026"] {
-        let row = rows
+        let row = objects
             .iter()
-            .find(|r| r.get::<_, String>(1) == child)
+            .find(|o| o.reference.name == child)
             .expect("child row");
         assert!(
-            row.get::<_, bool>(2),
+            row.is_partition_child,
             "{child} must be flagged as a partition child (and excluded from the graph)"
         );
     }
+
+    // The collapse itself: children are dropped, the parent keeps its
+    // annotation — the exact behavior the old raw query fed into the graph.
+    let (tables, _) = harvest_to_entries(objects, vec![]);
+    let names: Vec<&str> = tables.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["events"],
+        "partition children must be collapsed into the parent: {names:?}"
+    );
+    assert!(
+        tables[0]
+            .partition_info
+            .as_deref()
+            .unwrap_or("")
+            .contains("RANGE"),
+        "parent keeps its partition annotation: {:?}",
+        tables[0].partition_info
+    );
+
+    client.shutdown().await.expect("shutdown");
+    let _ = supervisor.shutdown().await;
+}
+
+// ── C1: execute_dml / execute_staged_dml against the real worker ────────────
+
+fn pg_config(port: u16) -> lucent_protocol::ConnectionConfig {
+    lucent_protocol::ConnectionConfig::new("postgres")
+        .with("host", "127.0.0.1")
+        .with("port", port.to_string())
+        .with("user", "postgres")
+        .with("database", "postgres")
+        .with("ssl_mode", "prefer")
+        .with_secret("postgres")
+}
+
+/// Regression test for C1: approving a DML card must actually execute the
+/// staged SQL and report the REAL affected count (Task 3.1's rows_affected),
+/// not the hardcoded 0 the command used to return. Drives the same core fn
+/// `execute_dml` calls, so it fails if that wiring is ever short-circuited.
+#[tokio::test]
+async fn execute_staged_dml_runs_the_approved_sql_and_reports_real_rows() {
+    use crate::ai::agent::{AgentState, ConversationState};
+    use crate::client::ConnectorClient;
+    use crate::commands::execute_staged_dml;
+    use crate::supervisor::Supervisor;
+    use std::sync::Arc;
+    use std::time::Instant;
+    use tokio::sync::Mutex;
+
+    let container = testcontainers_modules::postgres::Postgres::default()
+        .start()
+        .await
+        .expect("postgres container to start");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("get postgres port");
+    wait_for_postgres(port).await;
+
+    let mut supervisor = Supervisor::new();
+    let socket_path = supervisor
+        .ensure_running()
+        .await
+        .expect("supervisor running")
+        .to_path_buf();
+    let token = supervisor.handshake_token().to_owned();
+
+    let (mut client, conn_id) = ConnectorClient::connect(&socket_path, &token, pg_config(port))
+        .await
+        .expect("connect client");
+
+    client
+        .execute(conn_id, "CREATE TEMP TABLE dml_target (id INT, v TEXT)")
+        .await
+        .expect("create table");
+    client
+        .execute(
+            conn_id,
+            "INSERT INTO dml_target VALUES (1, 'a'), (2, 'b'), (3, 'c')",
+        )
+        .await
+        .expect("insert seed");
+
+    // Stage DML exactly as the agent does when it pauses for approval (C1).
+    let conv = Arc::new(Mutex::new(ConversationState::new("conn-1".into())));
+    {
+        let mut c = conv.lock().await;
+        c.state = AgentState::PausedForDml {
+            staged_sql: "UPDATE dml_target SET v = 'x' WHERE id >= 2".into(),
+            staged_at: Instant::now(),
+        };
+        c.query_cache.insert("SELECT 1".into(), "stale".into());
+    }
+
+    // Mirror execute_dml: take the staged SQL (PausedForDml → Idle), then run
+    // the core fn on session B.
+    let staged = conv
+        .lock()
+        .await
+        .take_staged_sql()
+        .expect("staged sql present");
+    let rows_affected = execute_staged_dml(&client, conn_id, &conv, staged)
+        .await
+        .expect("staged DML executes");
+
+    assert_eq!(
+        rows_affected, 2,
+        "UPDATE must report the real affected count"
+    );
+    assert!(
+        conv.lock().await.query_cache.is_empty(),
+        "query cache must be cleared after DML — cached summaries are stale"
+    );
+    assert!(
+        matches!(conv.lock().await.state, AgentState::Idle),
+        "conversation must be out of PausedForDml after approval"
+    );
+
+    // The rows really changed on the worker's session.
+    let check = client
+        .execute(conn_id, "SELECT COUNT(*) FROM dml_target WHERE v = 'x'")
+        .await
+        .expect("count changed rows");
+    assert_eq!(check.rows[0][0], serde_json::json!(2));
+
+    client.shutdown().await.expect("shutdown");
+    let _ = supervisor.shutdown().await;
 }

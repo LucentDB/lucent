@@ -43,14 +43,13 @@ async fn all_common_types_round_trip_correctly() {
     connect_with_retry(
         &connector,
         connection_id,
-        ConnectionConfig {
-            host: "127.0.0.1".to_string(),
-            port,
-            user: "postgres".to_string(),
-            password: "postgres".to_string(),
-            database: "postgres".to_string(),
-            ssl_mode: "prefer".to_string(),
-        },
+        ConnectionConfig::new("postgres")
+            .with("host", "127.0.0.1")
+            .with("port", port.to_string())
+            .with("user", "postgres")
+            .with("database", "postgres")
+            .with("ssl_mode", "prefer")
+            .with_secret("postgres"),
     )
     .await;
 
@@ -83,7 +82,7 @@ async fn all_common_types_round_trip_correctly() {
                 '2024-01-15 10:30:00'::timestamp               AS ts_val,
                 '2024-01-15 10:30:00+00'::timestamptz          AS tstz_val,
                 '1 year 2 months'::interval     AS interval_val,
-                '10.0.0.1/24'::cidr             AS cidr_val
+                '10.0.0.0/24'::cidr             AS cidr_val
             "#
             .to_string(),
             tx,
@@ -94,136 +93,144 @@ async fn all_common_types_round_trip_correctly() {
 
     assert_eq!(rows.len(), 22, "expected 22 result columns");
 
-    // int2
+    // 0-2: integers
+    assert!(matches!(rows[0], Value::Int64(42)), "int2: {:?}", rows[0]);
+    assert!(matches!(rows[1], Value::Int64(42)), "int4: {:?}", rows[1]);
     assert!(
-        matches!(rows[0], Value::Int(42)),
-        "int2: expected Int(42), got {:?}",
-        rows[0]
-    );
-    // int4
-    assert!(
-        matches!(rows[1], Value::Int(42)),
-        "int4: expected Int(42), got {:?}",
-        rows[1]
-    );
-    // int8
-    assert!(
-        matches!(rows[2], Value::Int(v) if v == 4200000000000i64),
-        "int8: expected Int(4200000000000), got {:?}",
+        matches!(rows[2], Value::Int64(4200000000000)),
+        "int8: {:?}",
         rows[2]
     );
-    // float4
+
+    // 3-4: floats
     assert!(
-        matches!(rows[3], Value::Float(v) if (v - std::f64::consts::PI).abs() < 0.01),
-        "float4: got {:?}",
+        matches!(rows[3], Value::Float64(f) if (f - 3.14).abs() < 1e-5),
+        "float4: {:?}",
         rows[3]
     );
-    // float8
     assert!(
-        matches!(rows[4], Value::Float(v) if (v - std::f64::consts::PI).abs() < 0.0001),
-        "float8: got {:?}",
+        matches!(rows[4], Value::Float64(f) if (f - 3.14159265358979).abs() < 1e-12),
+        "float8: {:?}",
         rows[4]
     );
-    // numeric
+
+    // 5: numeric keeps the server's text verbatim
     assert!(
-        matches!(rows[5], Value::Text(ref s) if s == "1234.56"),
-        "numeric: expected Text(\"1234.56\"), got {:?}",
+        matches!(rows[5], Value::Decimal(ref s) if s == "1234.56"),
+        "numeric: {:?}",
         rows[5]
     );
-    // bool
-    assert!(
-        matches!(rows[6], Value::Bool(true)),
-        "bool: got {:?}",
-        rows[6]
-    );
-    // text
+
+    // 6: bool — the wire text is "t", the value is typed
+    assert!(matches!(rows[6], Value::Bool(true)), "bool: {:?}", rows[6]);
+
+    // 7-8: text types stay Text
     assert!(
         matches!(rows[7], Value::Text(ref s) if s == "hello"),
-        "text: got {:?}",
+        "text: {:?}",
         rows[7]
     );
-    // varchar
     assert!(
         matches!(rows[8], Value::Text(ref s) if s == "varchar"),
-        "varchar: got {:?}",
+        "varchar: {:?}",
         rows[8]
     );
-    // jsonb
+
+    // 9: jsonb — Postgres normalizes and re-renders with a space
     assert!(
-        matches!(rows[9], Value::Text(ref s) if s.contains("\"a\":1")),
-        "jsonb: got {:?}",
+        matches!(rows[9], Value::Json(ref s) if s.contains("\"a\": 1")),
+        "jsonb: {:?}",
         rows[9]
     );
-    // json
+    // 10: json — stored and returned verbatim
     assert!(
-        matches!(rows[10], Value::Text(ref s) if s.contains("\"a\":1")),
-        "json: got {:?}",
+        matches!(rows[10], Value::Json(ref s) if s.contains("\"a\":1")),
+        "json: {:?}",
         rows[10]
     );
-    // uuid
+
+    // 11: uuid
     assert!(
-        matches!(rows[11], Value::Text(ref s) if s.len() == 36),
-        "uuid: got {:?}",
+        matches!(rows[11], Value::Uuid(u) if u.to_string() == "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"),
+        "uuid: {:?}",
         rows[11]
     );
-    // inet
+
+    // 12-13: inet and macaddr are not mapped — they take the escape hatch
     assert!(
-        matches!(rows[12], Value::Text(ref s) if s == "192.168.1.1"),
-        "inet: got {:?}",
+        matches!(rows[12], Value::Other { ref type_name, ref text } if type_name == "inet" && text == "192.168.1.1"),
+        "inet: {:?}",
         rows[12]
     );
-    // macaddr
     assert!(
-        matches!(rows[13], Value::Text(_)),
-        "macaddr: got {:?}",
+        matches!(rows[13], Value::Other { ref type_name, .. } if type_name == "macaddr"),
+        "macaddr: {:?}",
         rows[13]
     );
-    // bytea
+
+    // 14: bytea, hex output form
     assert!(
-        matches!(rows[14], Value::Text(ref s) if s.contains("deadbeef")),
-        "bytea: got {:?}",
+        matches!(rows[14], Value::Binary(ref b) if b == &vec![0xde, 0xad, 0xbe, 0xef]),
+        "bytea: {:?}",
         rows[14]
     );
-    // date
+
+    // 15: date — 2024-01-15 is 19737 days after the Unix epoch.
+    // If this ever reads 8781 we have leaked Postgres's 2000-01-01 binary epoch.
     assert!(
-        matches!(rows[15], Value::Text(_)),
-        "date: got {:?}",
+        matches!(rows[15], Value::Date(19737)),
+        "date: {:?}",
         rows[15]
     );
-    // time
+
+    // 16: time — 14:30:00 = 52,200 s past midnight
     assert!(
-        matches!(rows[16], Value::Text(_)),
-        "time: got {:?}",
+        matches!(rows[16], Value::Time(52_200_000_000)),
+        "time: {:?}",
         rows[16]
     );
-    // timetz
+
+    // 17: timetz is deliberately NOT Value::Time — it carries a zone, Time does not
     assert!(
-        matches!(rows[17], Value::Text(ref s) if s.contains("+05:30") || s.contains("+0530")),
-        "timetz: got {:?}",
+        matches!(rows[17], Value::Other { ref type_name, .. } if type_name == "timetz"),
+        "timetz: {:?}",
         rows[17]
     );
-    // timestamp
+
+    // 18: timestamp — wall clock, no zone
     assert!(
-        matches!(rows[18], Value::Text(_)),
-        "timestamp: got {:?}",
+        matches!(rows[18], Value::Timestamp { tz: false, .. }),
+        "timestamp: {:?}",
         rows[18]
     );
-    // timestamptz
+    // 19: timestamptz — a true instant; +00 offset means this equals the naive value
     assert!(
-        matches!(rows[19], Value::Text(_)),
-        "timestamptz: got {:?}",
+        matches!(rows[19], Value::Timestamp { tz: true, .. }),
+        "timestamptz: {:?}",
         rows[19]
     );
-    // interval
+    // Both describe the same moment here, so their micros must agree.
+    match (&rows[18], &rows[19]) {
+        (Value::Timestamp { micros: a, .. }, Value::Timestamp { micros: b, .. }) => {
+            assert_eq!(
+                a, b,
+                "a +00 timestamptz must equal the same naive timestamp"
+            );
+        }
+        other => panic!("expected two timestamps, got {other:?}"),
+    }
+
+    // 20: interval keeps its text
     assert!(
-        matches!(rows[20], Value::Text(_)),
-        "interval: got {:?}",
+        matches!(rows[20], Value::Interval(ref s) if s.contains("1 year")),
+        "interval: {:?}",
         rows[20]
     );
-    // cidr
+
+    // 21: cidr is not mapped
     assert!(
-        matches!(rows[21], Value::Text(_)),
-        "cidr: got {:?}",
+        matches!(rows[21], Value::Other { ref type_name, .. } if type_name == "cidr"),
+        "cidr: {:?}",
         rows[21]
     );
 }
@@ -237,14 +244,13 @@ async fn numeric_values_are_not_null() {
     connect_with_retry(
         &connector,
         connection_id,
-        ConnectionConfig {
-            host: "127.0.0.1".to_string(),
-            port,
-            user: "postgres".to_string(),
-            password: "postgres".to_string(),
-            database: "postgres".to_string(),
-            ssl_mode: "prefer".to_string(),
-        },
+        ConnectionConfig::new("postgres")
+            .with("host", "127.0.0.1")
+            .with("port", port.to_string())
+            .with("user", "postgres")
+            .with("database", "postgres")
+            .with("ssl_mode", "prefer")
+            .with_secret("postgres"),
     )
     .await;
 
@@ -267,8 +273,8 @@ async fn numeric_values_are_not_null() {
         "SUM of numeric must not be Null — got Null"
     );
     assert!(
-        matches!(total, Value::Text(ref s) if !s.is_empty()),
-        "numeric sum should be a non-empty text: got {:?}",
+        matches!(total, Value::Decimal(ref s) if !s.is_empty()),
+        "numeric sum should be a non-empty decimal: got {:?}",
         total
     );
 }
@@ -283,14 +289,13 @@ async fn null_values_are_null_not_sentinel() {
     connect_with_retry(
         &connector,
         connection_id,
-        ConnectionConfig {
-            host: "127.0.0.1".to_string(),
-            port,
-            user: "postgres".to_string(),
-            password: "postgres".to_string(),
-            database: "postgres".to_string(),
-            ssl_mode: "prefer".to_string(),
-        },
+        ConnectionConfig::new("postgres")
+            .with("host", "127.0.0.1")
+            .with("port", port.to_string())
+            .with("user", "postgres")
+            .with("database", "postgres")
+            .with("ssl_mode", "prefer")
+            .with_secret("postgres"),
     )
     .await;
 
@@ -311,5 +316,51 @@ async fn null_values_are_null_not_sentinel() {
             matches!(val, Value::Null),
             "column {i} should be Null, got {val:?}"
         );
+    }
+}
+
+#[tokio::test]
+async fn numeric_precision_and_int8_range_survive_the_wire() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let connector = PostgresConnector::default();
+    let connection_id = ConnectionId(Uuid::new_v4());
+    connect_with_retry(
+        &connector,
+        connection_id,
+        ConnectionConfig::new("postgres")
+            .with("host", "127.0.0.1")
+            .with("port", port.to_string())
+            .with("user", "postgres")
+            .with("database", "postgres")
+            .with("ssl_mode", "disable")
+            .with_secret("postgres"),
+    )
+    .await;
+
+    let (tx, mut rx) = mpsc::channel(4);
+    connector
+        .execute(
+            connection_id,
+            QueryId(Uuid::new_v4()),
+            "SELECT 12345678901234567890.123456789012345678::numeric AS n, \
+                    9223372036854775807::int8 AS i"
+                .into(),
+            tx,
+        )
+        .await;
+
+    let row = single_row(&mut rx).await;
+
+    match &row[0] {
+        Value::Decimal(s) => assert_eq!(
+            s, "12345678901234567890.123456789012345678",
+            "numeric must survive verbatim — never through a float"
+        ),
+        o => panic!("expected Decimal, got {o:?}"),
+    }
+    match &row[1] {
+        Value::Int64(i) => assert_eq!(*i, i64::MAX, "int8 must survive its full range"),
+        o => panic!("expected Int64, got {o:?}"),
     }
 }

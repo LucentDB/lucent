@@ -8,6 +8,11 @@ use testcontainers::runners::AsyncRunner;
 use tokio_postgres::NoTls;
 
 use crate::query_paging::{wrap_for_count, wrap_for_page, FilterSpec, SortSpec};
+use crate::sql_builder::PostgresSqlBuilder;
+
+fn pg() -> PostgresSqlBuilder {
+    PostgresSqlBuilder
+}
 
 async fn setup() -> (impl Drop, tokio_postgres::Client) {
     let c = testcontainers_modules::postgres::Postgres::default()
@@ -47,7 +52,7 @@ async fn setup() -> (impl Drop, tokio_postgres::Client) {
 #[tokio::test]
 async fn paginated_wrap_returns_exactly_the_requested_chunk() {
     let (_container, client) = setup().await;
-    let sql = wrap_for_page("SELECT * FROM widgets", &None, &[], 50, 0);
+    let sql = wrap_for_page("SELECT * FROM widgets", &None, &[], 50, 0, &pg());
     let rows = client.query(&sql, &[]).await.expect("query executes");
     assert_eq!(rows.len(), 50);
 }
@@ -57,14 +62,28 @@ async fn second_chunk_continues_where_the_first_left_off() {
     let (_container, client) = setup().await;
     let first = client
         .query(
-            &wrap_for_page("SELECT * FROM widgets ORDER BY id", &None, &[], 50, 0),
+            &wrap_for_page(
+                "SELECT * FROM widgets ORDER BY id",
+                &None,
+                &[],
+                50,
+                0,
+                &pg(),
+            ),
             &[],
         )
         .await
         .unwrap();
     let second = client
         .query(
-            &wrap_for_page("SELECT * FROM widgets ORDER BY id", &None, &[], 50, 50),
+            &wrap_for_page(
+                "SELECT * FROM widgets ORDER BY id",
+                &None,
+                &[],
+                50,
+                50,
+                &pg(),
+            ),
             &[],
         )
         .await
@@ -81,7 +100,7 @@ async fn sort_pushdown_orders_by_the_requested_column() {
         column: "id".into(),
         direction: "desc".into(),
     });
-    let sql = wrap_for_page("SELECT * FROM widgets", &sort, &[], 5, 0);
+    let sql = wrap_for_page("SELECT * FROM widgets", &sort, &[], 5, 0, &pg());
     let rows = client.query(&sql, &[]).await.unwrap();
     let ids: Vec<i32> = rows.iter().map(|r| r.get::<_, i32>(0)).collect();
     assert_eq!(ids, vec![500, 499, 498, 497, 496]);
@@ -95,7 +114,7 @@ async fn filter_pushdown_restricts_to_matching_rows() {
         operator: "eq".into(),
         value: Some("false".into()),
     }];
-    let sql = wrap_for_page("SELECT * FROM widgets", &None, &filters, 500, 0);
+    let sql = wrap_for_page("SELECT * FROM widgets", &None, &filters, 500, 0, &pg());
     let rows = client.query(&sql, &[]).await.unwrap();
     assert_eq!(rows.len(), 250); // odd-numbered widgets are active=false
 }
@@ -103,7 +122,7 @@ async fn filter_pushdown_restricts_to_matching_rows() {
 #[tokio::test]
 async fn count_all_matches_the_actual_row_total() {
     let (_container, client) = setup().await;
-    let sql = wrap_for_count("SELECT * FROM widgets", &[]);
+    let sql = wrap_for_count("SELECT * FROM widgets", &[], &pg());
     let rows = client.query(&sql, &[]).await.unwrap();
     let count: i64 = rows[0].get(0);
     assert_eq!(count, 500);
@@ -117,7 +136,7 @@ async fn count_all_with_filter_matches_the_filtered_subset() {
         operator: "eq".into(),
         value: Some("true".into()),
     }];
-    let sql = wrap_for_count("SELECT * FROM widgets", &filters);
+    let sql = wrap_for_count("SELECT * FROM widgets", &filters, &pg());
     let rows = client.query(&sql, &[]).await.unwrap();
     let count: i64 = rows[0].get(0);
     assert_eq!(count, 250);
@@ -135,7 +154,7 @@ async fn contains_filter_with_percent_in_value_matches_literal_percent_not_wildc
         operator: "contains".into(),
         value: Some("50%".into()),
     }];
-    let sql = wrap_for_page("SELECT * FROM widgets", &None, &filters, 10, 0);
+    let sql = wrap_for_page("SELECT * FROM widgets", &None, &filters, 10, 0, &pg());
     let rows = client.query(&sql, &[]).await.unwrap();
     assert_eq!(rows.len(), 1);
 }

@@ -7,7 +7,9 @@ edition = "2021"
 lucent-protocol = { path = "../lucent-protocol" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
 uuid = { workspace = true }
+bincode = { workspace = true }

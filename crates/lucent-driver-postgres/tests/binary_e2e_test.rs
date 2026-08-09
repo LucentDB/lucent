@@ -53,6 +53,9 @@ async fn cancels_a_long_running_query_via_the_real_binary() {
 
     let stream = UnixStream::connect(&socket_path).await.unwrap();
     let mut framed = new_framed(stream);
+    write_message(&mut framed, &lucent_protocol::PROTOCOL_VERSION)
+        .await
+        .unwrap();
     write_message(&mut framed, &token.to_string())
         .await
         .unwrap();
@@ -62,14 +65,13 @@ async fn cancels_a_long_running_query_via_the_real_binary() {
         &mut framed,
         &WorkerRequest::Connect {
             connection_id,
-            config: ConnectionConfig {
-                host: "127.0.0.1".to_string(),
-                port,
-                user: "postgres".to_string(),
-                password: "postgres".to_string(),
-                database: "postgres".to_string(),
-                ssl_mode: "prefer".to_string(),
-            },
+            config: ConnectionConfig::new("postgres")
+                .with("host", "127.0.0.1")
+                .with("port", port.to_string())
+                .with("user", "postgres")
+                .with("database", "postgres")
+                .with("ssl_mode", "prefer")
+                .with_secret("postgres"),
         },
     )
     .await

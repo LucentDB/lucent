@@ -1,19 +1,22 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use lucent_protocol::ConnectionConfig;
+use lucent_protocol::{ConnectionConfig, ConnectionId, QueryId};
 use serde::Serialize;
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 use tokio::sync::{Mutex, RwLock};
+use uuid::Uuid;
 
 use crate::ai::agent::{AgentSink, AgentState, ConversationState, DatabaseAgent};
 use crate::ai::config::{keychain_account, AiConfig, KEYCHAIN_SERVICE};
 use crate::ai::context::SchemaCache;
-use crate::ai::events::{AiErrorPayload, AiEvent};
+use crate::ai::events::{AiErrorPayload, AiEvent, TokenUsage};
 use crate::ai::provider::LlmProvider;
 use crate::ai::providers::rig::RigProvider;
 use crate::ai::tools::AiToolContext;
 use tauri_plugin_clipboard_manager::ClipboardExt;
+use tracing::Instrument;
 
 use crate::client::{ConnectorClient, ExecuteResult};
 use crate::connections::ConnectionProfileRepository;
@@ -27,6 +30,19 @@ pub(crate) struct TauriSink {
 
 impl AgentSink for TauriSink {
     fn event(&self, event: crate::ai::events::AiEvent) {
+        // Accumulate before forwarding so a frontend fetch racing the `done`
+        // delivery (fire-and-forget `get_ai_usage`) never sees stale totals.
+        if let crate::ai::events::AiEvent::Done {
+            conversation_id,
+            usage,
+            ..
+        } = &event
+        {
+            let state = self.app_handle.state::<AppState>();
+            let mut entry = state.llm_usage.entry(conversation_id.clone()).or_default();
+            let accumulated = accumulate_usage(&entry, usage);
+            *entry = accumulated;
+        }
         let _ = self.channel.send(event);
     }
     fn dml_approval(&self, payload: crate::ai::events::DmlApprovalPayload) {
@@ -34,8 +50,25 @@ impl AgentSink for TauriSink {
     }
 }
 
-// SQL quoting lives in one place — see crate::sql_quote.
-pub(crate) use crate::sql_quote::{quote_identifier, quote_string};
+/// Pure accumulation of one run's usage into a conversation's totals. Cost is
+/// per-run (one model response), so the Option values sum when both present.
+pub(crate) fn accumulate_usage(existing: &TokenUsage, new: &TokenUsage) -> TokenUsage {
+    TokenUsage {
+        prompt_tokens: existing.prompt_tokens.saturating_add(new.prompt_tokens),
+        completion_tokens: existing
+            .completion_tokens
+            .saturating_add(new.completion_tokens),
+        cached_prompt_tokens: existing
+            .cached_prompt_tokens
+            .saturating_add(new.cached_prompt_tokens),
+        estimated_cost_usd: match (existing.estimated_cost_usd, new.estimated_cost_usd) {
+            (Some(a), Some(b)) => Some(a + b),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        },
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct CommandError {
@@ -65,10 +98,27 @@ pub struct AppState {
     /// API key cache: keychain access can stall seconds on first touch, and
     /// we otherwise hit it on every single message.
     pub api_key_cache: Arc<RwLock<Option<(crate::ai::config::AiProvider, String)>>>,
-    /// Single shared DB connection. Tools and the main app lock the same Mutex.
-    /// Wrapping in Arc lets us clone it into spawned tasks without ownership transfer.
+    /// Decrypted connection secrets (profile_id → password), cached so the
+    /// keychain is read at most once per launch. Keychain access can stall for
+    /// seconds and — whenever the binary's code signature changes (every dev
+    /// rebuild) — macOS prompts for the login password on EVERY access.
+    /// Connect, test-connection, AI chat, and notebooks all need the same
+    /// secret; this keeps them to a single keychain read.
+    pub password_cache: Arc<RwLock<HashMap<String, String>>>,
+    /// Hold this lock only to clone the Arc. Never hold it across `.execute().await` — a long query would serialize every other query and deadlock `cancel`.
     pub client: Arc<Mutex<Option<ConnectorClient>>>,
+    /// The ConnectionId assigned by the worker for the current connection.
+    pub current_connection_id: Mutex<Option<ConnectionId>>,
+    /// Postgres session dedicated to AI tools, preflight, and DML — so BEGIN/
+    /// ROLLBACK and statement_timeout on the AI path can never touch the
+    /// editor's session (the same worker socket, a different ConnectionId).
+    pub ai_connection_id: Mutex<Option<ConnectionId>>,
+    /// The in-flight editor query (if any) — used by cancel_query. Set before
+    /// execute().await, cleared after; holds the newest in-flight editor query;
+    /// older completions must not clear a newer registration.
+    pub editor_query: Mutex<Option<(QueryId, ConnectionId)>>,
     pub current_database: Mutex<Option<String>>,
+    pub current_connection_config: Mutex<Option<lucent_protocol::ConnectionConfig>>,
     // AI module state
     pub conversations: DashMap<String, Arc<Mutex<ConversationState>>>,
     pub ai_config: Arc<RwLock<AiConfig>>,
@@ -76,6 +126,23 @@ pub struct AppState {
     pub schema_graph: Arc<Mutex<Option<crate::ai::schema_graph::SchemaGraph>>>,
     pub embedder: Arc<Mutex<Option<crate::ai::embed::Embedder>>>,
     pub reranker: Arc<Mutex<Option<crate::ai::rerank::Reranker>>>,
+    pub notebook_sessions: DashMap<String, crate::notebook::session::NotebookSession>,
+    /// Ring buffer of worker stderr lines for the in-app Logs drawer: the
+    /// supervisor's drain task appends; `get_logs` tails from the frontend.
+    pub logs: crate::supervisor::LogBuffer,
+    /// Per-conversation accumulated LLM token usage, keyed by conversation id.
+    /// Fed by `TauriSink` on every `AiEvent::Done`; read by `get_ai_usage`.
+    pub llm_usage: DashMap<String, TokenUsage>,
+    /// Capabilities of the connected driver. `None` when disconnected.
+    /// Phase 2 moves this onto `LiveConnection`; `capabilities()` is the seam
+    /// that keeps that a small change.
+    pub driver_capabilities: Mutex<Option<lucent_protocol::DriverCapabilities>>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AppState {
@@ -85,7 +152,12 @@ impl AppState {
             repo: Arc::new(ConnectionProfileRepository::load()),
             supervisor: Mutex::new(None),
             client: Arc::new(Mutex::new(None)),
+            current_connection_id: Mutex::new(None),
+            ai_connection_id: Mutex::new(None),
+            editor_query: Mutex::new(None),
             current_database: Mutex::new(None),
+            current_connection_config: Mutex::new(None),
+            driver_capabilities: Mutex::new(None),
             conversations: DashMap::new(),
             schema_cache: Arc::new(SchemaCache::new(ai_config.schema_cache_ttl_secs)),
             ai_config: Arc::new(RwLock::new(ai_config)),
@@ -93,7 +165,24 @@ impl AppState {
             embedder: Arc::new(Mutex::new(None)),
             reranker: Arc::new(Mutex::new(None)),
             api_key_cache: Arc::new(RwLock::new(None)),
+            password_cache: Arc::new(RwLock::new(HashMap::new())),
+            notebook_sessions: DashMap::new(),
+            logs: crate::supervisor::new_log_buffer(),
+            llm_usage: DashMap::new(),
         }
+    }
+
+    /// Clone the active ConnectorClient out of the mutex. Hold this lock only
+    /// for the clone — never across `execute().await`: a long query would
+    /// serialize every other query and deadlock `cancel`. Every query site
+    /// must go through this (or the same clone-then-drop pattern).
+    pub async fn client_handle(&self) -> Option<crate::client::ConnectorClient> {
+        self.client.lock().await.clone()
+    }
+
+    /// Clone the connected driver's capabilities. `None` when disconnected.
+    pub async fn capabilities(&self) -> Option<lucent_protocol::DriverCapabilities> {
+        self.driver_capabilities.lock().await.clone()
     }
 }
 
@@ -101,6 +190,86 @@ impl AppState {
 pub struct ConnectResult {
     pub server_version: String,
     pub database: String,
+}
+
+#[cfg(test)]
+mod capability_state_tests {
+    use lucent_protocol::ReadOnlyMode;
+
+    use super::CapabilityView;
+
+    #[test]
+    fn the_view_the_frontend_gets_names_the_enforcement_level() {
+        let strong = CapabilityView::from(&lucent_driver_postgres_caps());
+        assert_eq!(strong.driver, "postgres");
+        assert_eq!(strong.display_name, "PostgreSQL");
+        assert!(strong.engine_enforced_readonly);
+        assert!(
+            strong.readonly_disclosure.is_none(),
+            "an intact guarantee must produce no note, not a reassuring one"
+        );
+    }
+
+    #[test]
+    fn a_guard_only_driver_ships_its_disclosure_to_the_ui() {
+        let mut caps = lucent_driver_postgres_caps();
+        caps.readonly = ReadOnlyMode::GuardOnly;
+        let view = CapabilityView::from(&caps);
+        assert!(!view.engine_enforced_readonly);
+        let note = view.readonly_disclosure.expect("must disclose");
+        assert!(note.to_lowercase().contains("not enforced"), "{note}");
+    }
+
+    fn lucent_driver_postgres_caps() -> lucent_protocol::DriverCapabilities {
+        lucent_protocol::DriverCapabilities {
+            id: "postgres".into(),
+            display_name: "PostgreSQL".into(),
+            sql_dialect: lucent_protocol::SqlDialect::PostgreSql,
+            namespace_model: lucent_protocol::NamespaceModel::DbSchemaObject,
+            readonly: ReadOnlyMode::TransactionScoped,
+            statement_timeout: lucent_protocol::TimeoutSupport::Statement,
+            cancel: lucent_protocol::CancelMode::Native,
+            paging: lucent_protocol::PagingStyle::LimitOffset,
+            identifier_quote: '"',
+            string_literal: lucent_protocol::StringLiteralStyle::StandardConforming,
+            auth: lucent_protocol::AuthModel::UserPassword,
+        }
+    }
+}
+
+/// The capability facts the UI needs, flattened for the frontend.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityView {
+    pub driver: String,
+    pub display_name: String,
+    /// False when the AST guard is the only read-only protection.
+    pub engine_enforced_readonly: bool,
+    /// Present only when the guarantee is weakened. The badge renders it as a
+    /// warning; absence means "nothing to say", not "everything is fine".
+    pub readonly_disclosure: Option<String>,
+}
+
+impl From<&lucent_protocol::DriverCapabilities> for CapabilityView {
+    fn from(c: &lucent_protocol::DriverCapabilities) -> Self {
+        Self {
+            driver: c.id.clone(),
+            display_name: c.display_name.clone(),
+            engine_enforced_readonly: c.readonly.is_engine_enforced(),
+            readonly_disclosure: c.readonly.disclosure().map(str::to_string),
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn connection_capabilities(
+    state: State<'_, AppState>,
+) -> Result<Option<CapabilityView>, CommandError> {
+    Ok(state
+        .capabilities()
+        .await
+        .as_ref()
+        .map(CapabilityView::from))
 }
 
 #[derive(Debug, Serialize)]
@@ -121,43 +290,55 @@ pub struct SchemaInfo {
     pub object_count: i64,
 }
 
+/// Normalized namespaces → the flat `SchemaInfo` the sidebar consumes.
+///
+/// Postgres emits one path segment, so this reproduces today's schema names
+/// exactly. A driver with deeper namespaces renders dotted.
+fn namespaces_to_schema_info(namespaces: Vec<lucent_protocol::Namespace>) -> Vec<SchemaInfo> {
+    namespaces
+        .into_iter()
+        .map(|n| SchemaInfo {
+            name: n.display(),
+            // The frontend field is a plain i64. Until it learns to render
+            // "unknown", collapse None here — in exactly one place.
+            object_count: n.object_count.unwrap_or(0) as i64,
+        })
+        .collect()
+}
+
+/// Normalized object summaries → the sidebar's `SchemaObject` list.
+///
+/// Partition children are dropped: a table with 84 partitions would otherwise
+/// bury every other object in the tree.
+fn summaries_to_schema_objects(
+    summaries: Vec<lucent_protocol::ObjectSummary>,
+) -> Vec<SchemaObject> {
+    summaries
+        .into_iter()
+        .filter(|s| !s.is_partition_child)
+        .map(|s| SchemaObject {
+            name: s.reference.name,
+            kind: s.reference.kind.as_str().to_string(),
+            row_count: s.est_rows.map(|n| n as i64),
+        })
+        .collect()
+}
+
 #[tauri::command]
 pub async fn get_schemas(state: State<'_, AppState>) -> Result<Vec<SchemaInfo>, CommandError> {
-    let mut client_lock = state.client.lock().await;
-    let client = client_lock
-        .as_mut()
+    let conn_id = (*state.current_connection_id.lock().await)
+        .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
+    let client = state
+        .client_handle()
+        .await
         .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
 
-    let result = client
-        .execute(
-            "SELECT s.schema_name, \
-               (SELECT count(*) FROM information_schema.tables t \
-                WHERE t.table_schema = s.schema_name AND t.table_type = 'BASE TABLE') + \
-               (SELECT count(*) FROM information_schema.views v \
-                WHERE v.table_schema = s.schema_name) + \
-               (SELECT count(*) FROM pg_proc p JOIN pg_namespace n \
-                ON p.pronamespace = n.oid \
-                WHERE n.nspname = s.schema_name AND p.prokind = 'f') + \
-               (SELECT count(*) FROM information_schema.sequences seq \
-                WHERE seq.sequence_schema = s.schema_name) \
-             AS total \
-             FROM information_schema.schemata s \
-             WHERE s.schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast') \
-             ORDER BY s.schema_name",
-        )
+    let namespaces = client
+        .list_namespaces(conn_id)
         .await
         .map_err(|e| CommandError::new("QueryError", e))?;
 
-    let schemas = result
-        .rows
-        .iter()
-        .map(|r| SchemaInfo {
-            name: r[0].as_str().unwrap_or("").to_string(),
-            object_count: r[1].as_i64().unwrap_or(0),
-        })
-        .collect();
-
-    Ok(schemas)
+    Ok(namespaces_to_schema_info(namespaces))
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -185,20 +366,11 @@ pub async fn connect(
             .get_profile(prof_id)
             .await
             .ok_or_else(|| CommandError::new("NotFound", "connection profile not found"))?;
-        let password = crate::connections::get_password(prof_id)
-            .map_err(|e| CommandError::new("KeychainError", e.to_string()))?;
 
         // Mark last_used
         state.repo.mark_used(prof_id).await.ok();
 
-        ConnectionConfig {
-            host: profile.host.clone(),
-            port: profile.port,
-            user: profile.user.clone(),
-            password,
-            database: profile.database.clone(),
-            ssl_mode: profile.ssl_mode.to_string(),
-        }
+        profile_to_config(&state, &profile, prof_id).await?
     } else if let Some(cfg) = config {
         cfg
     } else {
@@ -208,11 +380,64 @@ pub async fn connect(
         ));
     };
 
+    // Correlate everything below (including bridged `log::` lines) under the
+    // `connect` span. No await inside the span construction.
+    let span = crate::trace::connect_span(
+        resolved.get("host").unwrap_or(""),
+        resolved.port().unwrap_or(0),
+        resolved.get("database").unwrap_or(""),
+    );
+    connect_impl(state, resolved).instrument(span).await
+}
+
+/// Build a driver config from a saved profile plus its keychain secret.
+async fn profile_to_config(
+    state: &AppState,
+    profile: &crate::connections::ConnectionProfile,
+    profile_id: &str,
+) -> Result<ConnectionConfig, CommandError> {
+    let mut config = ConnectionConfig::new(profile.driver.clone());
+    for (key, value) in &profile.params {
+        config = config.with(key.clone(), value.clone());
+    }
+
+    // The secret lives in the keychain, never in connections.json.
+    match cached_password(state, profile_id).await {
+        Ok(secret) => config = config.with_secret(secret),
+        // A driver with AuthModel::FilePath or None has no secret to fetch.
+        Err(crate::connections::KeychainError::NotFound) => {}
+        Err(e) => return Err(CommandError::new("KeychainError", e.to_string())),
+    }
+    Ok(config)
+}
+
+/// Read a profile's keychain secret at most once per launch; later reads for
+/// the same profile come from memory.
+pub(crate) async fn cached_password(
+    state: &AppState,
+    profile_id: &str,
+) -> Result<String, crate::connections::KeychainError> {
+    if let Some(pw) = state.password_cache.read().await.get(profile_id) {
+        return Ok(pw.clone());
+    }
+    let pw = crate::connections::get_password(profile_id)?;
+    state
+        .password_cache
+        .write()
+        .await
+        .insert(profile_id.to_string(), pw.clone());
+    Ok(pw)
+}
+
+async fn connect_impl(
+    state: State<'_, AppState>,
+    resolved: ConnectionConfig,
+) -> Result<ConnectResult, CommandError> {
     log::info!(
         "Connecting to database {:?}@{}/{}",
-        resolved.user,
-        resolved.host,
-        resolved.database
+        resolved.get("user").unwrap_or(""),
+        resolved.get("host").unwrap_or(""),
+        resolved.get("database").unwrap_or("")
     );
 
     // Disconnect previous connection if any
@@ -220,10 +445,12 @@ pub async fn connect(
         let mut client_lock = state.client.lock().await;
         if let Some(ref mut old_client) = *client_lock {
             log::info!("Disconnecting previous connection before new connect");
-            let _ = old_client.disconnect().await;
+            let _ = old_client.shutdown().await;
         }
         // Clear before connecting
         *client_lock = None;
+        // The AI session dies with the old client.
+        *state.ai_connection_id.lock().await = None;
     }
 
     // Invalidate schema cache for old connection
@@ -234,9 +461,10 @@ pub async fn connect(
     // where the socket file exists while the old worker is shutting down.
     let mut last_connect_err: Option<String> = None;
     let mut client: Option<ConnectorClient> = None;
+    let mut connect_id: Option<ConnectionId> = None;
     for attempt in 0..3 {
         let mut supervisor_lock = state.supervisor.lock().await;
-        let sup = supervisor_lock.get_or_insert_with(Supervisor::new);
+        let sup = supervisor_lock.get_or_insert_with(|| Supervisor::with_logs(state.logs.clone()));
         let sp = match sup.ensure_running().await {
             Ok(p) => p.to_path_buf(),
             Err(e) => {
@@ -250,8 +478,9 @@ pub async fn connect(
         drop(supervisor_lock);
 
         match ConnectorClient::connect(&sp, &tk, resolved.clone()).await {
-            Ok(c) => {
+            Ok((c, cid)) => {
                 client = Some(c);
+                connect_id = Some(cid);
                 break;
             }
             Err(e) => {
@@ -266,23 +495,44 @@ pub async fn connect(
             }
         }
     }
-    let mut client = client.ok_or_else(|| {
+    let client = client.ok_or_else(|| {
         let msg = last_connect_err.unwrap_or_else(|| "unable to start worker".to_string());
         CommandError::new("ConnectError", msg)
     })?;
+    let worker_conn_id = connect_id
+        .ok_or_else(|| CommandError::new("ConnectError", "connection ID not available"))?;
     let server_version = client
         .server_info
         .as_ref()
         .map(|s| s.version.clone())
         .unwrap_or_default();
-    let database = resolved.database.clone();
+    let database = resolved.get("database").unwrap_or("").to_string();
     log::info!("Connected to {database} (Postgres {server_version})");
 
+    let capabilities = client.server_info.as_ref().map(|s| s.capabilities.clone());
+    if let Some(caps) = &capabilities {
+        if !caps.readonly.is_engine_enforced() {
+            // Loud on purpose: this is the moment the two-layer read-only
+            // guarantee in the README stops holding for this connection.
+            log::warn!(
+                "Connected to a {} database with NO engine-enforced read-only. \
+                 The AI's SQL guard is the only protection.",
+                caps.display_name
+            );
+        }
+    }
+    *state.driver_capabilities.lock().await = capabilities;
+
     // Refresh schema cache BEFORE storing client (no lock needed)
-    let conn_id = format!("{}:{}/{}", resolved.host, resolved.port, resolved.database);
+    let conn_id = format!(
+        "{}:{}/{}",
+        resolved.get("host").unwrap_or(""),
+        resolved.port().unwrap_or(0),
+        resolved.get("database").unwrap_or("")
+    );
     state
         .schema_cache
-        .refresh(conn_id.clone(), &mut client)
+        .refresh(conn_id.clone(), &client, worker_conn_id)
         .await
         .ok();
 
@@ -326,27 +576,52 @@ pub async fn connect(
 
             let embedder_guard = state.embedder.lock().await;
             if let Some(embedder) = embedder_guard.as_ref() {
-                match crate::ai::schema_graph::SchemaIndexer::build_index(
-                    &mut client,
-                    embedder,
-                    ai_cfg.send_results_to_ai,
-                )
-                .await
-                {
-                    Ok(graph) => {
-                        *state.schema_graph.lock().await = Some(graph);
-                    }
-                    Err(e) => {
-                        log::warn!("Schema index build failed, continuing without it: {e}");
+                let capabilities = state.capabilities().await;
+                if let Some(capabilities) = capabilities.as_ref() {
+                    match crate::ai::schema_graph::SchemaIndexer::build_index(
+                        worker_conn_id,
+                        &client,
+                        embedder,
+                        ai_cfg.send_results_to_ai,
+                        capabilities,
+                    )
+                    .await
+                    {
+                        Ok(graph) => {
+                            *state.schema_graph.lock().await = Some(graph);
+                        }
+                        Err(e) => {
+                            log::warn!("Schema index build failed, continuing without it: {e}");
+                        }
                     }
                 }
             }
         }
     }
 
+    *state.current_connection_id.lock().await = Some(worker_conn_id);
+
+    // Dedicated AI session on the same worker socket. Failure is non-fatal —
+    // AI tools fall back to the editor session only if B is absent (see
+    // Task 2.2); the connect command must not fail because of it.
+    let ai_conn_id = ConnectionId(Uuid::new_v4());
+    let ai_cfg = resolved.clone();
+    let ai_result = client.connect_with_id(ai_conn_id, ai_cfg).await;
+    match ai_result {
+        Ok(_) => {
+            log::info!("AI session B established");
+            *state.ai_connection_id.lock().await = Some(ai_conn_id);
+        }
+        Err(e) => {
+            log::warn!("AI session B failed to open ({e}); AI tools will use the editor session");
+            *state.ai_connection_id.lock().await = None;
+        }
+    }
+
     *state.client.lock().await = Some(client);
 
     *state.current_database.lock().await = Some(database.clone());
+    *state.current_connection_config.lock().await = Some(resolved.clone());
 
     Ok(ConnectResult {
         server_version,
@@ -397,9 +672,22 @@ pub async fn save_connection(
         profile.id = uuid::Uuid::new_v4().to_string();
     }
 
+    // Derive the @mention alias from the name when the frontend didn't supply
+    // one, so every profile is addressable in AI chat. An empty slug is stored
+    // as `None` rather than an empty alias, which would match every mention.
+    if profile.alias.is_none() {
+        let slug = crate::connections::slugify_alias(&profile.name);
+        profile.alias = (!slug.is_empty()).then_some(slug);
+    }
+
     if let Some(ref pw) = password {
         crate::connections::set_password(&profile.id, pw)
             .map_err(|e| CommandError::new("KeychainError", e.to_string()))?;
+        state
+            .password_cache
+            .write()
+            .await
+            .insert(profile.id.clone(), pw.clone());
     }
 
     let is_new = state.repo.get_profile(&profile.id).await.is_none();
@@ -418,6 +706,7 @@ pub async fn save_connection(
 
 #[tauri::command]
 pub async fn delete_connection(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
+    state.password_cache.write().await.remove(&id);
     state
         .repo
         .delete_profile(&id)
@@ -439,6 +728,10 @@ pub async fn duplicate_connection(
     let mut copy = original.clone();
     copy.id = uuid::Uuid::new_v4().to_string();
     copy.name = format!("{} (copy)", copy.name);
+    // The copy must not inherit the original's @mention handle — two profiles
+    // sharing an alias would make every mention of it ambiguous.
+    let slug = crate::connections::slugify_alias(&copy.name);
+    copy.alias = (!slug.is_empty()).then_some(slug);
     let now = chrono::Utc::now().to_rfc3339();
     copy.created_at = now.clone();
     copy.updated_at = now;
@@ -447,6 +740,11 @@ pub async fn duplicate_connection(
     // Copy password if exists (best-effort)
     if let Ok(pw) = crate::connections::get_password(&id) {
         crate::connections::set_password(&copy.id, &pw).ok();
+        state
+            .password_cache
+            .write()
+            .await
+            .insert(copy.id.clone(), pw);
     }
 
     state
@@ -468,56 +766,62 @@ pub async fn test_connection(
         .get_profile(&id)
         .await
         .ok_or_else(|| CommandError::new("NotFound", "profile not found"))?;
-    let password = crate::connections::get_password(&id)
-        .map_err(|e| CommandError::new("KeychainError", e.to_string()))?;
 
-    // Build tokio_postgres config directly for quick ping
-    let mut pg_config = tokio_postgres::Config::new();
-    pg_config.host(&profile.host);
-    pg_config.port(profile.port);
-    pg_config.user(&profile.user);
-    pg_config.password(&password);
-    pg_config.dbname(&profile.database);
+    let config = profile_to_config(&state, &profile, &id).await?;
 
-    // Map SSL mode
-    match profile.ssl_mode {
-        crate::connections::SslMode::Disable => {
-            pg_config.ssl_mode(tokio_postgres::config::SslMode::Disable);
+    probe_connection(config, profile.driver.clone()).await
+}
+
+/// Probe a connection config through a dedicated, short-lived worker process.
+///
+/// A throwaway worker is required, not an optimization: the app's real worker
+/// serves exactly one socket — the live connection's — so a second probe socket
+/// would sit unaccepted in the backlog and time out after 15s, reporting a
+/// healthy database as unreachable. A fresh worker per probe leaves the live
+/// connection untouched and exercises the real seam.
+pub async fn probe_connection(
+    config: ConnectionConfig,
+    display_fallback: String,
+) -> Result<TestConnectionResult, CommandError> {
+    let mut supervisor = Supervisor::new();
+
+    let socket_and_token = match supervisor.ensure_running().await {
+        Ok(path) => (path.to_path_buf(), supervisor.handshake_token().to_string()),
+        Err(e) => {
+            let _ = supervisor.shutdown().await;
+            return Err(CommandError::new("ConnectError", e));
         }
-        crate::connections::SslMode::Prefer => {
-            pg_config.ssl_mode(tokio_postgres::config::SslMode::Prefer);
+    };
+
+    let outcome = ConnectorClient::connect(&socket_and_token.0, &socket_and_token.1, config).await;
+    let result = match outcome {
+        Ok((mut client, cid)) => {
+            let version = client
+                .server_info
+                .as_ref()
+                .map(|s| s.version.clone())
+                .unwrap_or_default();
+            let display = client
+                .server_info
+                .as_ref()
+                .map(|s| s.capabilities.display_name.clone())
+                .unwrap_or(display_fallback);
+            let _ = client.disconnect_id(cid).await;
+            let _ = client.shutdown().await;
+            TestConnectionResult {
+                success: true,
+                message: format!("Connected to {display} {version}"),
+                server_version: Some(version),
+            }
         }
-        crate::connections::SslMode::Require => {
-            pg_config.ssl_mode(tokio_postgres::config::SslMode::Require);
+        Err(e) => {
+            let _ = supervisor.shutdown().await;
+            return Err(CommandError::new("ConnectionFailed", e));
         }
-    }
+    };
 
-    let (client, connection) = pg_config
-        .connect(tokio_postgres::NoTls)
-        .await
-        .map_err(|e| CommandError::new("ConnectionFailed", format!("{e}")))?;
-
-    // Spawn connection handler — we just need a quick ping
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            log::warn!("test connection background task error: {e}");
-        }
-    });
-
-    let row = client
-        .query_one("SELECT 1", &[])
-        .await
-        .map_err(|e| CommandError::new("QueryFailed", format!("{e}")))?;
-    let val: i32 = row.get(0);
-
-    Ok(TestConnectionResult {
-        success: true,
-        message: format!(
-            "Connected to PostgreSQL at {}:{}/{} (ping: SELECT {val})",
-            profile.host, profile.port, profile.database
-        ),
-        server_version: None,
-    })
+    let _ = supervisor.shutdown().await;
+    Ok(result)
 }
 
 // ─── SSH Config Commands ────────────────────────────────────────────────
@@ -557,7 +861,13 @@ pub async fn delete_ssh_config(state: State<'_, AppState>, id: String) -> Result
 
 // ─── Query History Commands ────────────────────────────────────────────
 
+// camelCase to match the frontend's `HistoryEntry` interface, which every
+// consumer already reads (`entry.rowCount`, `entry.executedAt`,
+// `entry.dateGroup`). Without this the fields arrived snake_case and silently
+// read as `undefined` — rendering "NaN rows", blank timestamps, and collapsing
+// the history panel's date grouping into a single unlabelled group.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HistoryEntryResult {
     pub id: String,
     pub connection_id: String,
@@ -681,19 +991,42 @@ pub async fn execute_query(
     sort: Option<crate::query_paging::SortSpec>,
     filters: Vec<crate::query_paging::FilterSpec>,
 ) -> Result<ExecuteResult, CommandError> {
-    let mut client_lock = state.client.lock().await;
-    let client = client_lock
-        .as_mut()
+    let conn_id = (*state.current_connection_id.lock().await)
+        .ok_or_else(|| CommandError::new("QueryError", "not connected — connect first"))?;
+    let client = state
+        .client_handle()
+        .await
         .ok_or_else(|| CommandError::new("QueryError", "not connected — connect first"))?;
 
-    let final_sql = if crate::query_paging::is_wrappable_query(&sql) {
-        crate::query_paging::wrap_for_page(&sql, &sort, &filters, limit, offset)
+    let capabilities = state
+        .capabilities()
+        .await
+        .ok_or_else(|| CommandError::new("QueryError", "not connected — connect first"))?;
+    let dialect = capabilities.sql_dialect;
+    let builder = crate::sql_builder::for_driver(&capabilities);
+
+    let final_sql = if crate::query_paging::is_wrappable_query(&sql, dialect) {
+        crate::query_paging::wrap_for_page(&sql, &sort, &filters, limit, offset, builder.as_ref())
     } else {
         sql
     };
 
     let start = std::time::Instant::now();
-    let result = client.execute(&final_sql).await;
+    let query_id = QueryId(Uuid::new_v4());
+    *state.editor_query.lock().await = Some((query_id, conn_id));
+    let result = client
+        .execute_with_id(
+            query_id,
+            conn_id,
+            &final_sql,
+            // Safety net for queries that cannot be LIMIT-wrapped (multi-
+            // statement, EXPLAIN, unparseable-but-executable): bound what gets
+            // materialized in this process and cancel the query server-side.
+            // Paged queries stay far below the cap.
+            Some(crate::client::HARD_ROW_CAP),
+        )
+        .await
+        .map(|(r, _)| r);
     let duration_ms = start.elapsed().as_millis() as u64;
     let db = state
         .current_database
@@ -701,14 +1034,30 @@ pub async fn execute_query(
         .await
         .clone()
         .unwrap_or_default();
+    // Attribute history entries to this connection so dedup never merges the
+    // same SQL across different servers (dedup keys on connection_id + db + sql).
+    let conn_desc = state
+        .current_connection_config
+        .lock()
+        .await
+        .clone()
+        .map(|c| {
+            format!(
+                "{}:{}/{}",
+                c.get("host").unwrap_or(""),
+                c.port().unwrap_or(0),
+                c.get("database").unwrap_or("")
+            )
+        })
+        .unwrap_or_default();
 
-    match result {
+    let outcome = match result {
         Ok(execute_result) => {
             let row_count = execute_result.row_count;
             // Fire-and-forget history entry
             let entry = crate::query_history::QueryHistoryEntry::new(
-                String::new(),
-                String::new(),
+                conn_desc.clone(),
+                conn_desc.clone(),
                 db,
                 final_sql.clone(),
                 duration_ms,
@@ -721,8 +1070,8 @@ pub async fn execute_query(
         }
         Err(e) => {
             let entry = crate::query_history::QueryHistoryEntry::new(
-                String::new(),
-                String::new(),
+                conn_desc.clone(),
+                conn_desc.clone(),
                 db,
                 final_sql.clone(),
                 duration_ms,
@@ -733,7 +1082,26 @@ pub async fn execute_query(
             let _ = crate::query_history::append_entry(entry);
             Err(CommandError::new("QueryError", e))
         }
+    };
+    // Clear only if the slot still holds THIS query's id — an overlapping
+    // newer query (pagination/filter refetch) must keep its registration.
+    let mut slot = state.editor_query.lock().await;
+    if matches!(*slot, Some((id, _)) if id == query_id) {
+        *slot = None;
     }
+    outcome
+}
+
+#[tauri::command]
+pub async fn cancel_query(state: State<'_, AppState>) -> Result<(), String> {
+    let Some((query_id, conn_id)) = *state.editor_query.lock().await else {
+        return Ok(()); // nothing running — not an error
+    };
+    let client = state
+        .client_handle()
+        .await
+        .ok_or_else(|| "not connected".to_string())?;
+    client.cancel(conn_id, query_id).await
 }
 
 #[tauri::command]
@@ -760,88 +1128,23 @@ pub async fn get_schema_objects(
     state: State<'_, AppState>,
     schema: String,
 ) -> Result<SchemaObjectsResult, CommandError> {
-    let mut client_lock = state.client.lock().await;
-    let client = client_lock
-        .as_mut()
+    let conn_id = (*state.current_connection_id.lock().await)
+        .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
+    let client = state
+        .client_handle()
+        .await
         .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
 
-    let safe = quote_string(&schema);
-
-    let tables = client
-        .execute(&format!(
-            "SELECT t.table_name, COALESCE(s.n_live_tup::bigint, 0) \
-             FROM information_schema.tables t \
-             LEFT JOIN pg_stat_user_tables s \
-               ON t.table_name = s.relname AND t.table_schema = s.schemaname \
-             WHERE t.table_schema = {safe} AND t.table_type = 'BASE TABLE' \
-             ORDER BY t.table_name"
-        ))
+    // One request replaces four sequential queries. Empty `kinds` means every
+    // kind the driver knows.
+    let summaries = client
+        .list_objects(conn_id, vec![schema.clone()], vec![])
         .await
         .map_err(|e| CommandError::new("QueryError", e))?;
-
-    let views = client
-        .execute(&format!(
-            "SELECT table_name FROM information_schema.views \
-             WHERE table_schema = {safe} ORDER BY table_name"
-        ))
-        .await
-        .map_err(|e| CommandError::new("QueryError", e))?;
-
-    let funcs = client
-        .execute(&format!(
-            "SELECT p.proname FROM pg_proc p \
-             JOIN pg_namespace n ON p.pronamespace = n.oid \
-             WHERE n.nspname = {safe} AND p.prokind = 'f' \
-             ORDER BY p.proname"
-        ))
-        .await
-        .map_err(|e| CommandError::new("QueryError", e))?;
-
-    let seqs = client
-        .execute(&format!(
-            "SELECT sequence_name FROM information_schema.sequences \
-             WHERE sequence_schema = {safe} ORDER BY sequence_name"
-        ))
-        .await
-        .map_err(|e| CommandError::new("QueryError", e))?;
-
-    let mut objects: Vec<SchemaObject> = Vec::new();
-
-    for row in &tables.rows {
-        objects.push(SchemaObject {
-            name: row[0].as_str().unwrap_or("").to_string(),
-            kind: "table".into(),
-            row_count: row[1].as_i64(),
-        });
-    }
-
-    for row in &views.rows {
-        objects.push(SchemaObject {
-            name: row[0].as_str().unwrap_or("").to_string(),
-            kind: "view".into(),
-            row_count: None,
-        });
-    }
-
-    for row in &funcs.rows {
-        objects.push(SchemaObject {
-            name: row[0].as_str().unwrap_or("").to_string(),
-            kind: "function".into(),
-            row_count: None,
-        });
-    }
-
-    for row in &seqs.rows {
-        objects.push(SchemaObject {
-            name: row[0].as_str().unwrap_or("").to_string(),
-            kind: "sequence".into(),
-            row_count: None,
-        });
-    }
 
     Ok(SchemaObjectsResult {
         name: schema,
-        objects,
+        objects: summaries_to_schema_objects(summaries),
     })
 }
 
@@ -851,8 +1154,13 @@ pub async fn disconnect(state: State<'_, AppState>) -> Result<DisconnectResult, 
     let client = state.client.lock().await.take();
 
     if let Some(mut c) = client {
+        // Best-effort graceful per-session close before shutdown() aborts the
+        // reader task that routes the Disconnected reply.
+        if let Some(ai_id) = *state.ai_connection_id.lock().await {
+            let _ = c.disconnect_id(ai_id).await;
+        }
         log::debug!("Running disconnect on connector client");
-        let _ = c.disconnect().await;
+        let _ = c.shutdown().await;
     }
 
     // TODO(multi-connection): only shutdown supervisor when last connection disconnects
@@ -861,9 +1169,39 @@ pub async fn disconnect(state: State<'_, AppState>) -> Result<DisconnectResult, 
         supervisor.shutdown().await.ok();
     }
 
+    *state.current_connection_id.lock().await = None;
+    *state.ai_connection_id.lock().await = None;
     *state.current_database.lock().await = None;
+    *state.driver_capabilities.lock().await = None;
+
+    // Notebook sessions hold ConnectionIds into the dying worker; clear them
+    // so attach/restart fails fast instead of against dead connections.
+    state.notebook_sessions.clear();
 
     Ok(DisconnectResult { ok: true })
+}
+
+// ─── Logs Drawer ───────────────────────────────────────────────────────
+
+/// Pure tailing helper: returns the buffer's lines at or after `after`.
+fn logs_after(logs: &std::collections::VecDeque<String>, after: usize) -> Vec<String> {
+    logs.iter().skip(after).cloned().collect()
+}
+
+/// Returns worker stderr lines from the in-app ring buffer, skipping the
+/// first `after` lines (tailing). The caller passes the count of lines it
+/// already holds, so repeated calls fetch only new lines. The buffer is
+/// capped (oldest dropped — see [`crate::supervisor::LOG_BUFFER_CAP`]), so
+/// an `after` beyond the retained prefix yields just the current tail.
+#[tauri::command]
+pub async fn get_logs(
+    state: State<'_, AppState>,
+    after: Option<u64>,
+) -> Result<Vec<String>, String> {
+    Ok(logs_after(
+        &*state.logs.lock().await,
+        after.unwrap_or(0) as usize,
+    ))
 }
 
 #[tauri::command]
@@ -872,29 +1210,24 @@ pub async fn get_function_source(
     schema: String,
     name: String,
 ) -> Result<String, CommandError> {
-    let mut client_lock = state.client.lock().await;
-    let client = client_lock
-        .as_mut()
+    let conn_id = (*state.current_connection_id.lock().await)
+        .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
+    let client = state
+        .client_handle()
+        .await
         .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
 
-    let sql = format!(
-        "SELECT pg_get_functiondef(p.oid) AS source \
-         FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid \
-         WHERE n.nspname = {} AND p.proname = {}",
-        quote_string(&schema),
-        quote_string(&name)
-    );
-
-    let result = client
-        .execute(&sql)
+    client
+        .object_ddl(
+            conn_id,
+            lucent_protocol::ObjectRef {
+                namespace: vec![schema],
+                name,
+                kind: lucent_protocol::ObjectKind::Function,
+            },
+        )
         .await
-        .map_err(|e| CommandError::new("QueryError", e))?;
-    Ok(result
-        .rows
-        .first()
-        .and_then(|r| r[0].as_str())
-        .unwrap_or("-- no source found")
-        .to_string())
+        .map_err(|e| CommandError::new("QueryError", e))
 }
 
 #[tauri::command]
@@ -902,32 +1235,34 @@ pub async fn get_view_source(
     state: State<'_, AppState>,
     schema: String,
     name: String,
+    kind: Option<String>,
 ) -> Result<String, CommandError> {
-    let mut client_lock = state.client.lock().await;
-    let client = client_lock
-        .as_mut()
+    let conn_id = (*state.current_connection_id.lock().await)
+        .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
+    let client = state
+        .client_handle()
+        .await
         .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
 
-    let sql = format!(
-        "SELECT pg_get_viewdef({}::regclass, true) AS source",
-        quote_string(&format!("{}.{}", schema, name))
-    );
-
-    let result = client
-        .execute(&sql)
+    // The driver returns the complete statement, header included — assembling
+    // `CREATE OR REPLACE VIEW` in the app would hardcode Postgres syntax.
+    // Materialized views need their own header, so the kind comes through
+    // from the sidebar click.
+    let kind = match kind.as_deref() {
+        Some("matview") => lucent_protocol::ObjectKind::MaterializedView,
+        _ => lucent_protocol::ObjectKind::View,
+    };
+    client
+        .object_ddl(
+            conn_id,
+            lucent_protocol::ObjectRef {
+                namespace: vec![schema],
+                name,
+                kind,
+            },
+        )
         .await
-        .map_err(|e| CommandError::new("QueryError", e))?;
-    let def = result
-        .rows
-        .first()
-        .and_then(|r| r[0].as_str())
-        .unwrap_or("-- no source found");
-    Ok(format!(
-        "CREATE OR REPLACE VIEW {}.{} AS\n{}",
-        quote_identifier(&schema),
-        quote_identifier(&name),
-        def
-    ))
+        .map_err(|e| CommandError::new("QueryError", e))
 }
 
 #[derive(Debug, Serialize)]
@@ -942,66 +1277,32 @@ pub async fn get_sequence_info(
     schema: String,
     name: String,
 ) -> Result<Vec<SequenceProperty>, CommandError> {
-    let mut client_lock = state.client.lock().await;
-    let client = client_lock
-        .as_mut()
+    let conn_id = (*state.current_connection_id.lock().await)
+        .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
+    let client = state
+        .client_handle()
+        .await
         .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
 
-    let sql = format!(
-        "SELECT seq.sequence_name::text, seq.data_type::text, \
-                seq.start_value::text, seq.minimum_value::text, \
-                seq.maximum_value::text, seq.increment::text, \
-                seq.cycle_option::text \
-         FROM information_schema.sequences seq \
-         WHERE seq.sequence_schema = {} AND seq.sequence_name = {}",
-        quote_string(&schema),
-        quote_string(&name)
-    );
-
-    let result = client
-        .execute(&sql)
+    let props = client
+        .object_properties(
+            conn_id,
+            lucent_protocol::ObjectRef {
+                namespace: vec![schema],
+                name,
+                kind: lucent_protocol::ObjectKind::Sequence,
+            },
+        )
         .await
         .map_err(|e| CommandError::new("QueryError", e))?;
 
-    if let Some(row) = result.rows.first() {
-        let get = |i: usize| {
-            row.get(i)
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string()
-        };
-        Ok(vec![
-            SequenceProperty {
-                key: "Data Type".into(),
-                value: get(1),
-            },
-            SequenceProperty {
-                key: "Start Value".into(),
-                value: get(2),
-            },
-            SequenceProperty {
-                key: "Min Value".into(),
-                value: get(3),
-            },
-            SequenceProperty {
-                key: "Max Value".into(),
-                value: get(4),
-            },
-            SequenceProperty {
-                key: "Increment".into(),
-                value: get(5),
-            },
-            SequenceProperty {
-                key: "Cycle".into(),
-                value: get(6),
-            },
-        ])
-    } else {
-        Ok(vec![SequenceProperty {
-            key: "Note".into(),
-            value: format!("{}.{} — no metadata found", schema, name),
-        }])
-    }
+    Ok(props
+        .into_iter()
+        .map(|p| SequenceProperty {
+            key: p.key,
+            value: p.value,
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -1014,21 +1315,45 @@ pub async fn browse_table(
     sort: Option<crate::query_paging::SortSpec>,
     filters: Vec<crate::query_paging::FilterSpec>,
 ) -> Result<ExecuteResult, CommandError> {
-    let mut client_lock = state.client.lock().await;
-    let client = client_lock
-        .as_mut()
+    let conn_id = (*state.current_connection_id.lock().await)
         .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
+    let client = state
+        .client_handle()
+        .await
+        .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
+
+    let capabilities = state
+        .capabilities()
+        .await
+        .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
+    let builder = crate::sql_builder::for_driver(&capabilities);
 
     let base_sql = format!(
         "SELECT * FROM {}.{}",
-        quote_identifier(&schema),
-        quote_identifier(&name)
+        builder.quote_identifier(&schema),
+        builder.quote_identifier(&name)
     );
-    let final_sql = crate::query_paging::wrap_for_page(&base_sql, &sort, &filters, limit, offset);
+    let final_sql = crate::query_paging::wrap_for_page(
+        &base_sql,
+        &sort,
+        &filters,
+        limit,
+        offset,
+        builder.as_ref(),
+    );
 
     client
-        .execute(&final_sql)
+        .execute_with_id(
+            QueryId(Uuid::new_v4()),
+            conn_id,
+            &final_sql,
+            // Safety net mirroring execute_query: the page size is caller-
+            // supplied, so cap what gets materialized even though the SQL
+            // itself is always LIMIT-wrapped.
+            Some(crate::client::HARD_ROW_CAP),
+        )
         .await
+        .map(|(r, _)| r)
         .map_err(|e| CommandError::new("QueryError", e))
 }
 
@@ -1038,21 +1363,35 @@ pub async fn count_all_rows(
     sql: String,
     filters: Vec<crate::query_paging::FilterSpec>,
 ) -> Result<i64, CommandError> {
-    if !crate::query_paging::is_wrappable_query(&sql) {
+    let dialect = state
+        .capabilities()
+        .await
+        .map(|c| c.sql_dialect)
+        .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
+
+    if !crate::query_paging::is_wrappable_query(&sql, dialect) {
         return Err(CommandError::new(
             "QueryError",
             "cannot count rows for a non-SELECT statement",
         ));
     }
 
-    let mut client_lock = state.client.lock().await;
-    let client = client_lock
-        .as_mut()
+    let conn_id = (*state.current_connection_id.lock().await)
+        .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
+    let client = state
+        .client_handle()
+        .await
         .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
 
-    let count_sql = crate::query_paging::wrap_for_count(&sql, &filters);
+    let capabilities = state
+        .capabilities()
+        .await
+        .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
+    let builder = crate::sql_builder::for_driver(&capabilities);
+
+    let count_sql = crate::query_paging::wrap_for_count(&sql, &filters, builder.as_ref());
     let result = client
-        .execute(&count_sql)
+        .execute(conn_id, &count_sql)
         .await
         .map_err(|e| CommandError::new("QueryError", e))?;
 
@@ -1071,10 +1410,42 @@ pub async fn count_all_rows(
 
 /// Renders the WHERE clause the given filters produce, for display in the
 /// grid's SQL preview. Pure string building — takes no AppState and touches no
-/// database, so it works before a connection exists.
+/// database, so it works before a connection exists. The preview renders for
+/// the *current* connection, which is PostgreSQL today, so the Postgres builder
+/// is the right renderer until a second driver reaches the grid.
 #[tauri::command]
 pub fn describe_filters(filters: Vec<crate::query_paging::FilterSpec>) -> String {
-    crate::query_paging::filters_to_where_clause(&filters)
+    crate::query_paging::filters_to_where_clause(&filters, &crate::sql_builder::PostgresSqlBuilder)
+}
+
+#[cfg(test)]
+mod logs_after_tests {
+    use std::collections::VecDeque;
+
+    use super::logs_after;
+
+    fn buffer(lines: &[&str]) -> VecDeque<String> {
+        lines.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn returns_all_lines_from_zero() {
+        let buf = buffer(&["a", "b", "c"]);
+        assert_eq!(logs_after(&buf, 0), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn returns_only_lines_after_the_index() {
+        let buf = buffer(&["a", "b", "c"]);
+        assert_eq!(logs_after(&buf, 1), vec!["b", "c"]);
+        assert_eq!(logs_after(&buf, 3), Vec::<String>::new());
+    }
+
+    #[test]
+    fn beyond_the_tail_is_empty() {
+        let buf = buffer(&["a", "b"]);
+        assert_eq!(logs_after(&buf, 10), Vec::<String>::new());
+    }
 }
 
 #[cfg(test)]
@@ -1104,7 +1475,7 @@ mod describe_filters_tests {
 
 /// Load API key with fallback chain: file → env var → keychain.
 /// File-first avoids macOS keychain prompts during development.
-fn load_api_key(config: &AiConfig) -> Result<String, String> {
+pub(crate) fn load_api_key(config: &AiConfig) -> Result<String, String> {
     // 1. Try ~/.lucent/ai-key.txt (avoids keychain prompts)
     if let Ok(home) = std::env::var("HOME") {
         let path = std::path::PathBuf::from(home)
@@ -1161,7 +1532,7 @@ fn load_api_key(config: &AiConfig) -> Result<String, String> {
 
 /// Pure lookup for the in-memory key cache: hit only when the cached entry
 /// belongs to the requested provider.
-fn cached_api_key(
+pub(crate) fn cached_api_key(
     cache: &Option<(crate::ai::config::AiProvider, String)>,
     provider: &crate::ai::config::AiProvider,
 ) -> Option<String> {
@@ -1171,79 +1542,78 @@ fn cached_api_key(
         .map(|(_, k)| k.clone())
 }
 
-#[tauri::command]
-pub async fn ai_chat(
-    state: State<'_, AppState>,
-    app_handle: tauri::AppHandle,
+/// Builds a conversation's system prompt: the schema tree (from the cache or,
+/// on expiry, rendered from the in-memory graph) plus the context tier used
+/// by preflight. Shared by `ai_chat` and `execute_dml`'s agent resume (C1).
+async fn build_system_prompt(
+    state: &AppState,
+    connection_id: &str,
+) -> (String, crate::ai::mschema::ContextTier) {
+    log::info!("Acquiring schema graph for system prompt");
+    let graph_guard = state.schema_graph.lock().await;
+    log::info!("Schema graph locked, building tier");
+    let tier = graph_guard
+        .as_ref()
+        .map(|g| crate::ai::mschema::select_tier(g).0)
+        .unwrap_or(crate::ai::mschema::ContextTier::Pull);
+    log::info!("Tier selected: {:?}", tier);
+    let prompt = if let Some(tree) = state.schema_cache.get(connection_id) {
+        let capabilities = state.capabilities().await;
+        let p = crate::ai::context::build_system_prompt(
+            &tree,
+            graph_guard.as_ref(),
+            state.ai_config.read().await.send_results_to_ai,
+            capabilities.as_ref(),
+        );
+        log::debug!("System prompt built ({} bytes, tier {:?})", p.len(), tier);
+        p
+    } else if let Some(g) = graph_guard.as_ref() {
+        log::info!(
+            "Schema tree expired for {connection_id}; rendering system prompt from in-memory graph"
+        );
+        let db_name = connection_id
+            .rsplit('/')
+            .next()
+            .unwrap_or(connection_id)
+            .to_string();
+        let tree = crate::ai::context::tree_from_graph(db_name, g);
+        let capabilities = state.capabilities().await;
+        crate::ai::context::build_system_prompt(
+            &tree,
+            Some(g),
+            state.ai_config.read().await.send_results_to_ai,
+            capabilities.as_ref(),
+        )
+    } else {
+        log::warn!(
+            "Schema cache miss for connection {connection_id} and no schema graph available"
+        );
+        "Database context not yet loaded.".into()
+    };
+    (prompt, tier)
+}
+
+/// Runs one full agent turn: provider creation, state transition to
+/// `Running`, preflight (skipped when `message` is empty — the resume-after-
+/// DML case needs no schema injection), the agent loop, and error/timeout
+/// handling. Deliberately has NO `PausedForDml` guard: `ai_chat` rejects new
+/// messages while a DML is pending, but `execute_dml` resumes the agent
+/// through here after the user approves.
+#[allow(clippy::too_many_arguments)]
+async fn run_agent_turn(
+    state: &AppState,
+    app_handle: &tauri::AppHandle,
     channel: tauri::ipc::Channel<AiEvent>,
-    message: String,
     conversation_id: String,
-    connection_id: String,
-    profile_id: Option<String>,
+    message: String,
+    system_prompt: String,
 ) -> Result<(), String> {
-    // Verify a database connection is active before starting the AI agent.
-    // Without this, the agent wastes tokens and time on tools that will all
-    // fail with "Database not connected".
-    if state.client.lock().await.is_none() && profile_id.is_none() {
-        return Err("Connect to a database before using AI features.".into());
-    }
-
-    // If profile_id is provided, resolve and ensure we're connected via that profile
-    if let Some(ref pid) = profile_id {
-        let profile = state
-            .repo
-            .get_profile(pid)
-            .await
-            .ok_or_else(|| "Connection profile not found".to_string())?;
-        let password =
-            crate::connections::get_password(pid).map_err(|e| format!("Keychain error: {e}"))?;
-        let config = lucent_protocol::ConnectionConfig {
-            host: profile.host.clone(),
-            port: profile.port,
-            user: profile.user.clone(),
-            password,
-            database: profile.database.clone(),
-            ssl_mode: profile.ssl_mode.to_string(),
-        };
-
-        // Ensure worker is connected
-        let (socket_path, token) = {
-            let mut supervisor_lock = state.supervisor.lock().await;
-            let sup = supervisor_lock.get_or_insert_with(Supervisor::new);
-            let socket_path = sup
-                .ensure_running()
-                .await
-                .map_err(|e| format!("Worker startup failed: {e}"))?
-                .to_path_buf();
-            let token = sup.handshake_token().to_string();
-            (socket_path, token)
-        };
-
-        let mut client_lock = state.client.lock().await;
-        if client_lock.is_none() {
-            let new_client = ConnectorClient::connect(&socket_path, &token, config)
-                .await
-                .map_err(|e| format!("Connect failed: {e}"))?;
-            *client_lock = Some(new_client);
-        }
-    }
     let conv = state
         .conversations
-        .entry(conversation_id.clone())
-        .or_insert_with(|| Arc::new(Mutex::new(ConversationState::new(connection_id.clone()))))
+        .get(&conversation_id)
+        .ok_or("Conversation not found")?
         .clone();
 
-    {
-        let locked = conv.lock().await;
-        if let AgentState::PausedForDml { .. } = &locked.state {
-            return Err("Approve or cancel the pending DML before sending another message.".into());
-        }
-    }
-
-    log::info!(
-        "ai_chat: conversation={conversation_id}, message_len={}",
-        message.len()
-    );
     let config = state.ai_config.read().await.clone();
     log::debug!(
         "ai_chat config: provider={}, model={}, max_turns={}, send_results_to_ai={}",
@@ -1274,43 +1644,13 @@ pub async fn ai_chat(
         }
     };
 
-    log::info!("Acquiring schema graph for system prompt");
-    let (system_prompt, context_tier) = {
-        let graph_guard = state.schema_graph.lock().await;
-        log::info!("Schema graph locked, building tier");
-        let tier = graph_guard
+    let context_tier = {
+        let guard = state.schema_graph.lock().await;
+        guard
             .as_ref()
             .map(|g| crate::ai::mschema::select_tier(g).0)
-            .unwrap_or(crate::ai::mschema::ContextTier::Pull);
-        log::info!("Tier selected: {:?}", tier);
-        let prompt = if let Some(tree) = state.schema_cache.get(&connection_id) {
-            let p = crate::ai::context::build_system_prompt(
-                &tree,
-                graph_guard.as_ref(),
-                config.send_results_to_ai,
-            );
-            log::debug!("System prompt built ({} bytes, tier {:?})", p.len(), tier);
-            p
-        } else if let Some(g) = graph_guard.as_ref() {
-            log::info!(
-                "Schema tree expired for {connection_id}; rendering system prompt from in-memory graph"
-            );
-            let db_name = connection_id
-                .rsplit('/')
-                .next()
-                .unwrap_or(&connection_id)
-                .to_string();
-            let tree = crate::ai::context::tree_from_graph(db_name, g);
-            crate::ai::context::build_system_prompt(&tree, Some(g), config.send_results_to_ai)
-        } else {
-            log::warn!(
-                "Schema cache miss for connection {connection_id} and no schema graph available"
-            );
-            "Database context not yet loaded.".into()
-        };
-        (prompt, tier)
+            .unwrap_or(crate::ai::mschema::ContextTier::Pull)
     };
-    log::info!("System prompt complete ({} bytes)", system_prompt.len());
 
     log::info!("Creating LLM provider");
     let provider: Arc<dyn LlmProvider> = Arc::new(RigProvider::new(
@@ -1329,8 +1669,14 @@ pub async fn ai_chat(
 
     log::info!("Provider created, building tool context");
 
+    let ai_conn_id = {
+        let guard = state.ai_connection_id.lock().await;
+        *guard
+    };
     let tool_ctx = AiToolContext {
         db: state.client.clone(),
+        connection_id: ai_conn_id.or(*state.current_connection_id.lock().await),
+        capabilities: state.capabilities().await,
         config: config.clone(),
         schema_graph: state.schema_graph.clone(),
         embedder: state.embedder.clone(),
@@ -1338,23 +1684,28 @@ pub async fn ai_chat(
     };
 
     // Pre-flight: augment the message with value hints and retrieved schema
-    // context before the first LLM call.
-    log::info!("Pre-flight starting");
-    let augmented_message = {
+    // context before the first LLM call. Skipped for the resume-after-DML
+    // turn — the outcome message is already in history.
+    let augmented_message = if message.is_empty() {
+        message
+    } else {
+        log::info!("Pre-flight starting");
         let graph_guard = tool_ctx.schema_graph.lock().await;
         let emb_guard = tool_ctx.embedder.lock().await;
         let result = crate::ai::preflight::run_preflight(
+            tool_ctx.connection_id,
             Some(&tool_ctx.db),
             graph_guard.as_ref(),
             emb_guard.as_ref(),
             &context_tier,
             &message,
+            tool_ctx.capabilities.as_ref(),
         )
         .await;
         log::info!("Pre-flight completed");
         match result {
             Some(block) => format!("{message}\n\n{block}"),
-            None => message.clone(),
+            None => message,
         }
     };
 
@@ -1414,6 +1765,117 @@ pub async fn ai_chat(
 }
 
 #[tauri::command]
+pub async fn ai_chat(
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+    channel: tauri::ipc::Channel<AiEvent>,
+    message: String,
+    conversation_id: String,
+    connection_id: String,
+    profile_id: Option<String>,
+) -> Result<(), String> {
+    // Correlate the whole turn (including bridged `log::` lines) under the
+    // `ai_chat` span.
+    let span = crate::trace::ai_chat_span(&conversation_id);
+    ai_chat_impl(
+        state,
+        app_handle,
+        channel,
+        message,
+        conversation_id,
+        connection_id,
+        profile_id,
+    )
+    .instrument(span)
+    .await
+}
+
+async fn ai_chat_impl(
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+    channel: tauri::ipc::Channel<AiEvent>,
+    message: String,
+    conversation_id: String,
+    connection_id: String,
+    profile_id: Option<String>,
+) -> Result<(), String> {
+    // Verify a database connection is active before starting the AI agent.
+    // Without this, the agent wastes tokens and time on tools that will all
+    // fail with "Database not connected".
+    if state.client.lock().await.is_none() && profile_id.is_none() {
+        return Err("Connect to a database before using AI features.".into());
+    }
+
+    // If profile_id is provided, resolve and ensure we're connected via that profile
+    if let Some(ref pid) = profile_id {
+        let profile = state
+            .repo
+            .get_profile(pid)
+            .await
+            .ok_or_else(|| "Connection profile not found".to_string())?;
+        let config = profile_to_config(&state, &profile, pid)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Ensure worker is connected
+        let (socket_path, token) = {
+            let mut supervisor_lock = state.supervisor.lock().await;
+            let sup =
+                supervisor_lock.get_or_insert_with(|| Supervisor::with_logs(state.logs.clone()));
+            let socket_path = sup
+                .ensure_running()
+                .await
+                .map_err(|e| format!("Worker startup failed: {e}"))?
+                .to_path_buf();
+            let token = sup.handshake_token().to_string();
+            (socket_path, token)
+        };
+
+        let mut client_lock = state.client.lock().await;
+        if client_lock.is_none() {
+            let (new_client, new_conn_id) = ConnectorClient::connect(&socket_path, &token, config)
+                .await
+                .map_err(|e| format!("Connect failed: {e}"))?;
+            *state.current_connection_id.lock().await = Some(new_conn_id);
+            *client_lock = Some(new_client);
+        }
+    }
+    let conv = state
+        .conversations
+        .entry(conversation_id.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(ConversationState::new(connection_id.clone()))))
+        .clone();
+
+    {
+        let locked = conv.lock().await;
+        if let AgentState::PausedForDml { .. } = &locked.state {
+            return Err("Approve or cancel the pending DML before sending another message.".into());
+        }
+    }
+
+    // Keep the channel on the conversation: `execute_dml` clones it to resume
+    // the agent on the same IPC stream after the user approves DML (C1).
+    conv.lock().await.event_channel = Some(channel.clone());
+
+    log::info!(
+        "ai_chat: conversation={conversation_id}, message_len={}",
+        message.len()
+    );
+    let (system_prompt, _context_tier) = build_system_prompt(&state, &connection_id).await;
+    log::info!("System prompt complete ({} bytes)", system_prompt.len());
+
+    run_agent_turn(
+        &state,
+        &app_handle,
+        channel,
+        conversation_id,
+        message,
+        system_prompt,
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn ai_cancel(state: State<'_, AppState>, conversation_id: String) -> Result<(), String> {
     let conv = state
         .conversations
@@ -1439,6 +1901,7 @@ pub async fn ai_cancel(state: State<'_, AppState>, conversation_id: String) -> R
 /// nothing else ever removes an entry.
 fn evict_conversation(state: &AppState, conversation_id: &str) {
     state.conversations.remove(conversation_id);
+    state.llm_usage.remove(conversation_id);
 }
 
 #[tauri::command]
@@ -1450,28 +1913,111 @@ pub async fn close_conversation(
     Ok(())
 }
 
+/// Executes the staged DML on the worker (session B), returns the REAL row
+/// count, and resumes the agent on the conversation's channel so it can
+/// confirm the outcome (C1). The frontend signature stays
+/// `executeDml(conversationId)` — tauri injects `AppHandle` itself.
 #[tauri::command]
 pub async fn execute_dml(
     state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
     conversation_id: String,
 ) -> Result<serde_json::Value, String> {
     let conv = state
         .conversations
         .get(&conversation_id)
-        .ok_or("Conversation not found")?;
+        .ok_or("Conversation not found")?
+        .clone();
     let staged_sql = conv
         .lock()
         .await
         .take_staged_sql()
         .ok_or("No pending DML for this conversation")?;
-    // Data changed — cached query results may be stale.
+
+    // Session B: the AI session when it exists (Task 2.2), else the editor's.
+    let conn_id = *state.ai_connection_id.lock().await;
+    let conn_id = conn_id
+        .or(*state.current_connection_id.lock().await)
+        .ok_or("not connected")?;
+    let client = state.client_handle().await.ok_or("not connected")?;
+
+    // The SQL came from take_staged_sql() — exactly what the user approved
+    // in the DML card. No re-read: the staged value is the executed value.
+    let rows_affected = execute_staged_dml(&client, conn_id, &conv, staged_sql.clone()).await?;
+
+    log::info!("DML executed: {rows_affected} rows affected — {staged_sql}");
+    let _ = app_handle.emit(
+        "dml:executed",
+        serde_json::json!({
+            "conversation_id": conversation_id.clone(),
+            "rows_affected": rows_affected,
+        }),
+    );
+
+    // Resume the agent so it can confirm the outcome (C1).
+    let channel = conv
+        .lock()
+        .await
+        .event_channel
+        .clone()
+        .ok_or("no event channel")?;
+    conv.lock().await.history.push(crate::ai::agent::Message::user(
+        format!(
+            "The user approved and executed the DML. Result: {rows_affected} rows affected. SQL: {staged_sql}. Confirm the result to the user."
+        ),
+    ));
+    let conv_conn_id = conv.lock().await.connection_id.clone();
+    let (system_prompt, _context_tier) = build_system_prompt(&state, &conv_conn_id).await;
+    run_agent_turn(
+        &state,
+        &app_handle,
+        channel,
+        conversation_id.clone(),
+        String::new(),
+        system_prompt,
+    )
+    .await?;
+
+    Ok(serde_json::json!({ "rows_affected": rows_affected, "sql": staged_sql }))
+}
+
+/// Core DML execution, split from the tauri command so integration tests can
+/// drive it against the real worker. Executes the staged SQL on session B and
+/// clears the query cache — data changed, cached query summaries are stale.
+pub(crate) async fn execute_staged_dml(
+    client: &ConnectorClient,
+    conn_id: ConnectionId,
+    conv: &Arc<Mutex<ConversationState>>,
+    staged_sql: String,
+) -> Result<u64, String> {
+    let result = client
+        .execute(conn_id, &staged_sql)
+        .await
+        .map_err(|e| format!("DML failed: {e}"))?;
+    let rows_affected = result.rows_affected.unwrap_or(0);
     conv.lock().await.query_cache.clear();
-    Ok(serde_json::json!({ "rows_affected": 0, "sql": staged_sql }))
+    Ok(rows_affected)
 }
 
 #[tauri::command]
 pub async fn get_ai_settings(state: State<'_, AppState>) -> Result<AiConfig, String> {
     Ok(state.ai_config.read().await.clone())
+}
+
+/// Returns the accumulated LLM token usage for a conversation. Unknown
+/// conversations yield zeros, so the frontend can always render a line.
+#[tauri::command]
+pub async fn get_ai_usage(
+    state: State<'_, AppState>,
+    conversation_id: String,
+) -> Result<serde_json::Value, String> {
+    let usage = state
+        .llm_usage
+        .get(&conversation_id)
+        .as_deref()
+        .cloned()
+        .unwrap_or_default();
+    Ok(serde_json::json!(usage))
 }
 
 #[tauri::command]
@@ -1525,6 +2071,65 @@ mod api_key_cache_tests {
 }
 
 #[cfg(test)]
+mod usage_tests {
+    use super::accumulate_usage;
+    use crate::ai::events::TokenUsage;
+
+    #[test]
+    fn sums_token_fields_and_cost_across_runs() {
+        let existing = TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            cached_prompt_tokens: 30,
+            estimated_cost_usd: Some(0.5),
+        };
+        let new = TokenUsage {
+            prompt_tokens: 50,
+            completion_tokens: 10,
+            cached_prompt_tokens: 5,
+            estimated_cost_usd: Some(0.25),
+        };
+        let acc = accumulate_usage(&existing, &new);
+        assert_eq!(acc.prompt_tokens, 150);
+        assert_eq!(acc.completion_tokens, 30);
+        assert_eq!(acc.cached_prompt_tokens, 35);
+        assert_eq!(acc.estimated_cost_usd, Some(0.75));
+    }
+
+    #[test]
+    fn cost_survives_runs_that_report_none() {
+        let with_cost = TokenUsage {
+            estimated_cost_usd: Some(1.0),
+            ..TokenUsage::default()
+        };
+        let no_cost = TokenUsage::default();
+        assert_eq!(
+            accumulate_usage(&with_cost, &no_cost).estimated_cost_usd,
+            Some(1.0)
+        );
+        assert_eq!(
+            accumulate_usage(&no_cost, &no_cost).estimated_cost_usd,
+            None
+        );
+    }
+
+    #[test]
+    fn accumulating_into_empty_totals_is_the_new_run() {
+        let new = TokenUsage {
+            prompt_tokens: 42,
+            completion_tokens: 7,
+            cached_prompt_tokens: 3,
+            estimated_cost_usd: None,
+        };
+        let acc = accumulate_usage(&TokenUsage::default(), &new);
+        assert_eq!(acc.prompt_tokens, 42);
+        assert_eq!(acc.completion_tokens, 7);
+        assert_eq!(acc.cached_prompt_tokens, 3);
+        assert_eq!(acc.estimated_cost_usd, None);
+    }
+}
+
+#[cfg(test)]
 mod conversation_lifecycle_tests {
     use super::{evict_conversation, AppState};
     use crate::ai::agent::ConversationState;
@@ -1554,10 +2159,142 @@ mod conversation_lifecycle_tests {
     }
 
     #[test]
+    fn closing_a_conversation_evicts_its_usage_totals() {
+        let state = AppState::new();
+        let conversation_id = "conv-1".to_string();
+        state.llm_usage.insert(
+            conversation_id.clone(),
+            crate::ai::events::TokenUsage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                estimated_cost_usd: Some(0.01),
+                cached_prompt_tokens: 2,
+            },
+        );
+
+        evict_conversation(&state, &conversation_id);
+
+        assert!(
+            !state.llm_usage.contains_key(&conversation_id),
+            "usage totals must be evicted on close, not retained forever"
+        );
+    }
+
+    #[test]
     fn evicting_an_unknown_conversation_is_a_no_op() {
         let state = AppState::new();
         // Must not panic on double-close or a stale/already-evicted id.
         evict_conversation(&state, "does-not-exist");
         assert!(state.conversations.is_empty());
+        assert!(state.llm_usage.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod catalog_mapping_tests {
+    use lucent_protocol::{Namespace, ObjectKind, ObjectRef, ObjectSummary};
+
+    use super::{namespaces_to_schema_info, summaries_to_schema_objects};
+
+    fn summary(name: &str, kind: ObjectKind, est: Option<u64>) -> ObjectSummary {
+        ObjectSummary {
+            reference: ObjectRef {
+                namespace: vec!["app".into()],
+                name: name.into(),
+                kind,
+            },
+            est_rows: est,
+            comment: None,
+            partition: None,
+            is_partition_child: false,
+        }
+    }
+
+    #[test]
+    fn a_single_segment_namespace_keeps_todays_flat_schema_name() {
+        let info = namespaces_to_schema_info(vec![Namespace {
+            path: vec!["public".into()],
+            object_count: Some(7),
+        }]);
+        assert_eq!(info[0].name, "public");
+        assert_eq!(info[0].object_count, 7);
+    }
+
+    #[test]
+    fn an_unknown_object_count_renders_as_zero_not_as_a_crash() {
+        // The frontend field is a plain i64. Until it learns about unknown,
+        // map None to 0 here — deliberately, in one place.
+        let info = namespaces_to_schema_info(vec![Namespace {
+            path: vec!["public".into()],
+            object_count: None,
+        }]);
+        assert_eq!(info[0].object_count, 0);
+    }
+
+    #[test]
+    fn object_kinds_map_to_the_strings_the_sidebar_already_expects() {
+        let objects = summaries_to_schema_objects(vec![
+            summary("users", ObjectKind::Table, Some(10)),
+            summary("recent", ObjectKind::View, None),
+            summary("calc", ObjectKind::Function, None),
+            summary("counter", ObjectKind::Sequence, None),
+        ]);
+        let kinds: Vec<&str> = objects.iter().map(|o| o.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["table", "view", "function", "sequence"]);
+        assert_eq!(objects[0].row_count, Some(10));
+        assert_eq!(objects[1].row_count, None);
+    }
+
+    #[test]
+    fn partition_children_are_hidden_from_the_sidebar() {
+        // 84 partitions of one table would bury every other object in the tree.
+        let child = ObjectSummary {
+            is_partition_child: true,
+            ..summary("events_2026", ObjectKind::Table, Some(5))
+        };
+        let objects =
+            summaries_to_schema_objects(vec![summary("events", ObjectKind::Table, None), child]);
+        let names: Vec<&str> = objects.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names, vec!["events"]);
+    }
+}
+
+#[cfg(test)]
+mod password_cache_tests {
+    use super::{cached_password, AppState};
+
+    #[tokio::test]
+    async fn a_cached_secret_is_returned_without_a_keychain_read() {
+        // Cache-first: once a secret is in memory, no keychain access happens
+        // (which is what eliminates the repeated macOS password prompts).
+        // Seeding the cache with a sentinel proves the hit path never falls
+        // through to get_password — if it did, this test would read (or fail
+        // on) the real keychain instead of returning the sentinel.
+        let state = AppState::new();
+        state
+            .password_cache
+            .write()
+            .await
+            .insert("prof-1".to_string(), "sentinel-secret".to_string());
+
+        let secret = cached_password(&state, "prof-1")
+            .await
+            .expect("cache hit must succeed");
+        assert_eq!(secret, "sentinel-secret");
+    }
+
+    #[tokio::test]
+    async fn a_missing_profile_is_a_not_found_not_a_panic() {
+        // A profile that has never been saved has no keychain item (or one we
+        // cannot read) — callers treat NotFound as "no secret for this driver",
+        // never as an error. This must not panic or hang on the cache path.
+        let state = AppState::new();
+        let result = cached_password(&state, "no-such-profile-xyz").await;
+        assert!(
+            result.is_err(),
+            "an unknown profile must not produce a secret"
+        );
+        // The cache must not have been polluted by the miss.
+        assert!(state.password_cache.read().await.is_empty());
     }
 }

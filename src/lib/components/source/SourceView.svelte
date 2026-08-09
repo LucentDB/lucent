@@ -29,6 +29,12 @@
         '.cm-activeLineGutter': { backgroundColor: 'transparent' },
         '.cm-cursor': { visibility: 'hidden' },
         '.cm-line': { padding: '0' },
+        '.cm-selectionBackground': {
+          background: 'var(--accent-selection, #c7d2fe)',
+        },
+        '&.cm-focused .cm-selectionBackground': {
+          background: 'var(--accent-selection, #c7d2fe)',
+        },
       }),
     ];
 

@@ -8,7 +8,7 @@
   import { connections } from '../../stores/connections.svelte';
   import { dbMatches, schemaMatches, objectMatches } from './sidebar-search.ts';
 
-  let { onObjectClick, onDisconnect } = $props();
+  let { onObjectClick, onDisconnect, onOpenLogs } = $props();
 
   let switcherOpen = $state(false);
 
@@ -29,10 +29,11 @@
   let objectLabels = {
     table: 'Tables',
     view: 'Views',
+    matview: 'Materialized Views',
     function: 'Functions',
     sequence: 'Sequences',
   };
-  let groupOrder = ['table', 'view', 'function', 'sequence'];
+  let groupOrder = ['table', 'view', 'matview', 'function', 'sequence'];
 
   async function switchConnection(id) {
     switcherOpen = false;
@@ -210,7 +211,9 @@
               onclick={() => switchConnection(p.id)}
             >
               <span class="switcher-item-name">{p.name}</span>
-              <span class="switcher-item-host">{p.host}:{p.port}</span>
+              <span class="switcher-item-host"
+                >{p.params['host']}:{p.params['port']}</span
+              >
             </button>
           {/each}
           {#if connections.status === 'connected'}
@@ -455,6 +458,23 @@
                                         />
                                         <path d="M3 9h18M3 15h18M9 3v18" />
                                       </svg>
+                                    {:else if obj.kind === 'matview'}
+                                      <!-- Materialized view: layered stacks (precomputed from a query) -->
+                                      <svg
+                                        class="obj-icon matview"
+                                        width="13"
+                                        height="13"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        stroke-width="2"
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                      >
+                                        <path d="M12 2 2 7l10 5 10-5-10-5z" />
+                                        <path d="m2 17 10 5 10-5" />
+                                        <path d="m2 12 10 5 10-5" />
+                                      </svg>
                                     {:else if obj.kind === 'view'}
                                       <!-- View: eye with sparkle dot -->
                                       <svg
@@ -534,6 +554,29 @@
         </div>
       {/each}
     {/if}
+  </div>
+
+  <div class="sidebar-footer">
+    <button class="footer-btn" onclick={onOpenLogs} title="Worker logs">
+      <svg
+        width="13"
+        height="13"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <polyline points="4 17 10 11 4 5" /><line
+          x1="12"
+          y1="19"
+          x2="20"
+          y2="19"
+        />
+      </svg>
+      <span>Logs</span>
+    </button>
   </div>
 </div>
 
@@ -1018,6 +1061,9 @@
   .obj-icon.view {
     color: #6366f1;
   } /* indigo  */
+  .obj-icon.matview {
+    color: #0ea5e9;
+  } /* sky */
   .obj-icon.function {
     color: #a855f7;
   } /* purple */
@@ -1036,5 +1082,35 @@
   }
   .object-item.active .object-name {
     color: var(--accent);
+  }
+
+  /* ── Footer ───────────────────────────────────────── */
+  .sidebar-footer {
+    flex-shrink: 0;
+    border-top: 1px solid var(--border);
+    padding: 6px 8px;
+  }
+  .footer-btn {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 10px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    text-align: left;
+    transition: all var(--transition-fast);
+  }
+  .footer-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+  }
+  .footer-btn svg {
+    flex-shrink: 0;
   }
 </style>

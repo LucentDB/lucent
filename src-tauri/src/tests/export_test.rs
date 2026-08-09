@@ -263,3 +263,43 @@ fn test_null_handling() {
     assert!(insert.contains("NULL"));
     assert!(insert.contains("'not null'"));
 }
+
+#[test]
+fn csv_export_renders_typed_values_without_quoting_numbers() {
+    let columns = vec![
+        ColumnMeta {
+            name: "i".into(),
+            type_name: "int8".into(),
+        },
+        ColumnMeta {
+            name: "n".into(),
+            type_name: "numeric".into(),
+        },
+        ColumnMeta {
+            name: "b".into(),
+            type_name: "bool".into(),
+        },
+    ];
+    let rows = vec![vec![
+        serde_json::json!(42),
+        serde_json::json!("1234.56"),
+        serde_json::json!(true),
+    ]];
+    // This file already does `use super::super::export::*;` at the top, so
+    // `format_csv`, `ExportOptions`, and `ColumnMeta` are all in scope unqualified.
+    let csv = format_csv(&columns, &rows, &ExportOptions::default());
+    assert!(csv.contains("42,1234.56,true"), "got: {csv}");
+}
+
+#[test]
+fn csv_export_quotes_a_decimal_that_contains_the_delimiter() {
+    // Some locales emit grouped numerics; the value is a JSON string, so the
+    // RFC 4180 quoting path must still engage.
+    let columns = vec![ColumnMeta {
+        name: "n".into(),
+        type_name: "numeric".into(),
+    }];
+    let rows = vec![vec![serde_json::json!("1,234.56")]];
+    let csv = format_csv(&columns, &rows, &ExportOptions::default());
+    assert!(csv.contains("\"1,234.56\""), "got: {csv}");
+}

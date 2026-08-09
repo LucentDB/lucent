@@ -8,7 +8,7 @@ use lucent_protocol::{
 };
 use lucent_worker_host::{BatchSender, Connector, ExecutionEvent};
 use tokio::sync::{Mutex, RwLock};
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::Client;
 
 fn pg_error_message(e: &tokio_postgres::Error) -> String {
     if let Some(db) = e.as_db_error() {
@@ -16,6 +16,40 @@ fn pg_error_message(e: &tokio_postgres::Error) -> String {
     } else {
         e.to_string()
     }
+}
+
+/// Map the config's ssl_mode parameter onto tokio-postgres. An absent or
+/// unknown value falls back to Prefer — never to a stronger mode, which would
+/// turn a working connection into a confusing failure.
+fn ssl_mode(config: &ConnectionConfig) -> tokio_postgres::config::SslMode {
+    match config.get("ssl_mode") {
+        Some("disable") => tokio_postgres::config::SslMode::Disable,
+        Some("require") => tokio_postgres::config::SslMode::Require,
+        _ => tokio_postgres::config::SslMode::Prefer,
+    }
+}
+
+fn cfg_err(message: String) -> LucentError {
+    LucentError::new(LucentErrorKind::Internal, message)
+}
+
+/// rustls connector over the system root store. `require` against a server
+/// without TLS fails loudly here — there is no silent plaintext downgrade.
+fn make_tls() -> tokio_postgres_rustls::MakeRustlsConnect {
+    // The workspace graph enables both rustls crypto providers (bollard +
+    // this crate), so no default is auto-selected — install one explicitly.
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in rustls_native_certs::load_native_certs().certs {
+        let _ = roots.add(cert);
+    }
+    tokio_postgres_rustls::MakeRustlsConnect::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    )
 }
 
 const BATCH_SIZE: usize = 500;
@@ -33,13 +67,14 @@ impl PostgresConnector {
         config: ConnectionConfig,
     ) -> Result<ServerInfo, LucentError> {
         let mut pg_config = tokio_postgres::Config::new();
-        pg_config.host(&config.host);
-        pg_config.port(config.port);
-        pg_config.user(&config.user);
-        pg_config.password(&config.password);
-        pg_config.dbname(&config.database);
+        pg_config.host(config.require("host").map_err(cfg_err)?);
+        pg_config.port(config.port().unwrap_or(5432));
+        pg_config.user(config.require("user").map_err(cfg_err)?);
+        pg_config.password(config.secret.as_deref().unwrap_or(""));
+        pg_config.dbname(config.require("database").map_err(cfg_err)?);
+        pg_config.ssl_mode(ssl_mode(&config));
 
-        let (client, connection) = pg_config.connect(NoTls).await.map_err(|e| {
+        let (client, connection) = pg_config.connect(make_tls()).await.map_err(|e| {
             let kind = match e.code() {
                 Some(code) if code == &tokio_postgres::error::SqlState::INVALID_PASSWORD => {
                     LucentErrorKind::AuthenticationFailed
@@ -68,7 +103,10 @@ impl PostgresConnector {
             .await
             .insert(connection_id, Arc::new(client));
 
-        Ok(ServerInfo { version })
+        Ok(ServerInfo {
+            version,
+            capabilities: crate::capabilities::postgres(),
+        })
     }
 
     pub async fn disconnect(&self, connection_id: ConnectionId) -> Result<(), LucentError> {
@@ -121,6 +159,14 @@ impl PostgresConnector {
             }
         };
 
+        let pg_types: Arc<Vec<tokio_postgres::types::Type>> = Arc::new(
+            statement
+                .columns()
+                .iter()
+                .map(|c| c.type_().clone())
+                .collect(),
+        );
+
         let columns: Arc<Vec<ColumnMeta>> = Arc::new(
             statement
                 .columns()
@@ -150,15 +196,24 @@ impl PostgresConnector {
         };
 
         let mut batch: Vec<Vec<Value>> = Vec::with_capacity(BATCH_SIZE);
+        let mut emitted_rows = false;
+        let mut rows_affected: Option<u64> = None;
 
         use futures::StreamExt;
         let mut msg_stream = std::pin::pin!(msg_stream);
         while let Some(msg) = msg_stream.next().await {
             match msg {
                 Ok(tokio_postgres::SimpleQueryMessage::Row(row)) => {
+                    emitted_rows = true;
                     let values = (0..columns.len())
                         .map(|i| match row.try_get(i) {
-                            Ok(Some(v)) => Value::Text(v.to_string()),
+                            Ok(Some(v)) => match pg_types.get(i) {
+                                Some(ty) => crate::decode::pg_text_to_value(v, ty),
+                                // No metadata for this column (shape mismatch
+                                // between prepare() and the result). Text is
+                                // always correct-if-untyped; never drop the value.
+                                None => Value::Text(v.to_string()),
+                            },
                             _ => Value::Null,
                         })
                         .collect();
@@ -179,7 +234,11 @@ impl PostgresConnector {
                         }
                     }
                 }
-                Ok(tokio_postgres::SimpleQueryMessage::CommandComplete(_)) => {}
+                Ok(tokio_postgres::SimpleQueryMessage::CommandComplete(n)) => {
+                    if !emitted_rows && columns.is_empty() {
+                        rows_affected = Some(n);
+                    }
+                }
                 Ok(tokio_postgres::SimpleQueryMessage::RowDescription(_)) => {
                     // Column metadata already obtained from prepare() above
                 }
@@ -197,11 +256,20 @@ impl PostgresConnector {
             }
         }
 
-        let shape = ResultShape::Tabular {
-            columns,
-            rows: batch,
-        };
-        let _ = sender.send(ExecutionEvent::Batch(shape, true)).await;
+        if let Some(n) = rows_affected {
+            let _ = sender
+                .send(ExecutionEvent::Batch(
+                    ResultShape::Affected { rows_affected: n },
+                    true,
+                ))
+                .await;
+        } else {
+            let shape = ResultShape::Tabular {
+                columns,
+                rows: batch,
+            };
+            let _ = sender.send(ExecutionEvent::Batch(shape, true)).await;
+        }
         self.cancel_tokens.lock().await.remove(&query_id);
     }
 
@@ -213,7 +281,8 @@ impl PostgresConnector {
         let token = self.cancel_tokens.lock().await.get(&query_id).cloned();
         match token {
             Some(token) => token
-                .cancel_query(NoTls)
+                // cancel opens its own connection — it must speak TLS too
+                .cancel_query(make_tls())
                 .await
                 .map_err(|e| LucentError::new(LucentErrorKind::Internal, pg_error_message(&e))),
             None => Ok(()),
@@ -251,5 +320,51 @@ impl Connector for PostgresConnector {
 
     async fn disconnect(&self, connection_id: ConnectionId) -> Result<(), LucentError> {
         PostgresConnector::disconnect(self, connection_id).await
+    }
+
+    async fn catalog(
+        &self,
+        connection_id: ConnectionId,
+        request: lucent_protocol::CatalogRequest,
+    ) -> Result<lucent_protocol::CatalogResult, LucentError> {
+        let client = {
+            let clients = self.clients.read().await;
+            clients.get(&connection_id).cloned()
+        }
+        .ok_or_else(|| LucentError::new(LucentErrorKind::Internal, "unknown connection"))?;
+        crate::catalog::handle(&client, request).await
+    }
+}
+
+#[cfg(test)]
+mod ssl_mode_tests {
+    use super::*;
+
+    fn cfg(mode: &str) -> ConnectionConfig {
+        ConnectionConfig::new("postgres").with("ssl_mode", mode)
+    }
+
+    #[test]
+    fn maps_disable_prefer_require() {
+        assert!(matches!(
+            ssl_mode(&cfg("disable")),
+            tokio_postgres::config::SslMode::Disable
+        ));
+        assert!(matches!(
+            ssl_mode(&cfg("prefer")),
+            tokio_postgres::config::SslMode::Prefer
+        ));
+        assert!(matches!(
+            ssl_mode(&cfg("require")),
+            tokio_postgres::config::SslMode::Require
+        ));
+    }
+
+    #[test]
+    fn unknown_values_fall_back_to_prefer() {
+        assert!(matches!(
+            ssl_mode(&cfg("bogus")),
+            tokio_postgres::config::SslMode::Prefer
+        ));
     }
 }

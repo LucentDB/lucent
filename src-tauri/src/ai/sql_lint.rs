@@ -4,11 +4,11 @@
 //! time-versioned table without a range predicate (3.07x overcount).
 //! Fail-open by design: any parse or resolution failure yields no warnings.
 
+use lucent_protocol::SqlDialect;
 use sqlparser::ast::{
     Expr, Join, JoinConstraint, JoinOperator, ObjectNamePart, Query, Select, SetExpr, Statement,
     TableFactor,
 };
-use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 use std::collections::HashMap;
 
@@ -21,9 +21,14 @@ type AliasMap = HashMap<String, String>;
 /// ((table, column), (table, column)).
 type Equijoin = ((String, String), (String, String));
 
-pub fn lint_sql(graph: &SchemaGraph, sql: &str) -> Vec<String> {
-    let Ok(statements) = Parser::parse_sql(&PostgreSqlDialect {}, sql) else {
-        return vec![];
+pub fn lint_sql(graph: &SchemaGraph, sql: &str, dialect: SqlDialect) -> Vec<String> {
+    let Some(dialect) = crate::dialect::parser_for(dialect) else {
+        // The lint is advisory. A dialect we cannot parse means no warnings,
+        // never a blocked query — the guard is what fails closed, not this.
+        return Vec::new();
+    };
+    let Ok(statements) = Parser::parse_sql(dialect.as_ref(), sql) else {
+        return Vec::new();
     };
     let mut warnings: Vec<String> = Vec::new();
     for stmt in &statements {
@@ -213,6 +218,7 @@ fn is_fk_edge(graph: &SchemaGraph, t1: &str, c1: &str, t2: &str, c2: &str) -> bo
 mod tests {
     use super::*;
     use crate::ai::schema_graph::{ColumnEntry, FkEdge, SchemaGraph, TableEntry};
+    use lucent_protocol::SqlDialect;
     use std::collections::HashMap;
 
     /// Mirror of the real demo schema's relevant slice:
@@ -304,7 +310,7 @@ mod tests {
         // The exact join shape that overstated the seat-row answer 2.56x.
         let sql = "SELECT COUNT(*) FROM bookings.boarding_passes bp \
                    JOIN bookings.seats s ON s.airplane_code = '77W' AND bp.seat_no = s.seat_no";
-        let warnings = lint_sql(&demo_graph(), sql);
+        let warnings = lint_sql(&demo_graph(), sql, SqlDialect::PostgreSql);
         assert!(
             warnings
                 .iter()
@@ -319,7 +325,7 @@ mod tests {
         let sql = "SELECT COUNT(*) FROM bookings.flights f \
                    JOIN bookings.routes r ON f.route_no = r.route_no \
                    WHERE r.airplane_code = '77W'";
-        let warnings = lint_sql(&demo_graph(), sql);
+        let warnings = lint_sql(&demo_graph(), sql, SqlDialect::PostgreSql);
         assert!(
             warnings
                 .iter()
@@ -335,7 +341,7 @@ mod tests {
                      AND r.validity @> f.scheduled_departure \
                    WHERE r.airplane_code = '77W'";
         assert!(
-            lint_sql(&demo_graph(), sql).is_empty(),
+            lint_sql(&demo_graph(), sql, SqlDialect::PostgreSql).is_empty(),
             "informed join must not warn"
         );
     }
@@ -344,13 +350,13 @@ mod tests {
     fn fk_backed_join_is_silent() {
         let sql = "SELECT COUNT(*) FROM bookings.segments s \
                    JOIN bookings.flights f ON s.flight_id = f.flight_id";
-        assert!(lint_sql(&demo_graph(), sql).is_empty());
+        assert!(lint_sql(&demo_graph(), sql, SqlDialect::PostgreSql).is_empty());
     }
 
     #[test]
     fn unparseable_sql_is_fail_open() {
-        assert!(lint_sql(&demo_graph(), "SELEKT garbage FRM").is_empty());
-        assert!(lint_sql(&demo_graph(), "").is_empty());
+        assert!(lint_sql(&demo_graph(), "SELEKT garbage FRM", SqlDialect::PostgreSql).is_empty());
+        assert!(lint_sql(&demo_graph(), "", SqlDialect::PostgreSql).is_empty());
     }
 
     #[test]
@@ -359,7 +365,7 @@ mod tests {
         let sql = "WITH x AS (SELECT f.flight_id FROM bookings.flights f \
                    JOIN bookings.routes r ON f.route_no = r.route_no) \
                    SELECT COUNT(*) FROM x";
-        let warnings = lint_sql(&demo_graph(), sql);
+        let warnings = lint_sql(&demo_graph(), sql, SqlDialect::PostgreSql);
         assert!(
             warnings.iter().any(|w| w.contains("time-versioned")),
             "CTE bodies must be linted too: {warnings:?}"
@@ -373,7 +379,7 @@ mod tests {
         // The plan says joins can be in WHERE (old-style), not just JOIN ... ON.
         let sql = "SELECT COUNT(*) FROM bookings.boarding_passes bp, bookings.seats s \
                    WHERE s.airplane_code = '77W' AND bp.seat_no = s.seat_no";
-        let warnings = lint_sql(&demo_graph(), sql);
+        let warnings = lint_sql(&demo_graph(), sql, SqlDialect::PostgreSql);
         assert!(
             warnings
                 .iter()
@@ -407,7 +413,7 @@ mod tests {
         let sql = "SELECT f1.flight_id, f2.flight_id \
                    FROM bookings.flights f1 \
                    JOIN bookings.flights f2 ON f1.parent_flight_id = f2.flight_id";
-        let warnings = lint_sql(&g, sql);
+        let warnings = lint_sql(&g, sql, SqlDialect::PostgreSql);
         assert!(
             warnings.iter().all(|w| !w.contains("parent_flight_id")),
             "self-join must not warn: {warnings:?}"
@@ -423,7 +429,7 @@ mod tests {
         let sql_full = "SELECT COUNT(*) FROM bookings.boarding_passes bp \
                         FULL JOIN bookings.seats s ON bp.seat_no = s.seat_no";
         for (kind, sql) in [("LEFT", sql_left), ("RIGHT", sql_right), ("FULL", sql_full)] {
-            let warnings = lint_sql(&demo_graph(), sql);
+            let warnings = lint_sql(&demo_graph(), sql, SqlDialect::PostgreSql);
             assert!(
                 warnings
                     .iter()
@@ -437,7 +443,7 @@ mod tests {
     fn cross_join_without_on_is_silent() {
         let sql = "SELECT COUNT(*) FROM bookings.boarding_passes bp \
                    CROSS JOIN bookings.seats s";
-        let warnings = lint_sql(&demo_graph(), sql);
+        let warnings = lint_sql(&demo_graph(), sql, SqlDialect::PostgreSql);
         // CROSS JOIN has no ON → no equijoin extracted → no L1.
         assert!(
             warnings
@@ -453,7 +459,7 @@ mod tests {
                    FROM bookings.flights \
                    JOIN bookings.routes ON bookings.routes.route_no = bookings.flights.route_no \
                    WHERE bookings.routes.airplane_code = '77W'";
-        let warnings = lint_sql(&demo_graph(), sql);
+        let warnings = lint_sql(&demo_graph(), sql, SqlDialect::PostgreSql);
         assert!(
             warnings
                 .iter()
@@ -468,7 +474,7 @@ mod tests {
         // table reference should still trigger L2 globally.
         let sql = "SELECT COUNT(*) FROM (SELECT flight_id, route_no FROM bookings.flights) f \
                    JOIN bookings.routes r ON f.route_no = r.route_no";
-        let warnings = lint_sql(&demo_graph(), sql);
+        let warnings = lint_sql(&demo_graph(), sql, SqlDialect::PostgreSql);
         // The subquery means f is skipped (derived table), but routes still
         // gets an alias 'r' → should fire time-versioned warning.
         assert!(
@@ -486,7 +492,7 @@ mod tests {
         let sql = "SELECT COUNT(*) FROM bookings.flights f \
                    JOIN bookings.routes r ON f.route_no = r.route_no \
                      AND r.validity @> f.scheduled_departure";
-        let warnings = lint_sql(&demo_graph(), sql);
+        let warnings = lint_sql(&demo_graph(), sql, SqlDialect::PostgreSql);
         assert!(
             warnings.is_empty(),
             "informed versioned join must suppress L1: {warnings:?}"
@@ -499,7 +505,7 @@ mod tests {
         // skipped (fail-open).
         let sql = "SELECT 1; SELECT COUNT(*) FROM bookings.boarding_passes bp \
                    JOIN bookings.seats s ON bp.seat_no = s.seat_no";
-        let warnings = lint_sql(&demo_graph(), sql);
+        let warnings = lint_sql(&demo_graph(), sql, SqlDialect::PostgreSql);
         assert!(
             warnings.iter().any(|w| w.contains("seat_no")),
             "second SELECT must be linted: {warnings:?}"

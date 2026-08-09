@@ -254,6 +254,64 @@ fn test_clear_history() {
 }
 
 #[test]
+fn concurrent_readers_never_observe_torn_writes() {
+    let (dir, _) = with_temp_dir();
+
+    // Seed the file so a reader has a baseline to dip below.
+    for i in 0..100 {
+        let e = QueryHistoryEntry::new(
+            "conn-1".into(),
+            "Test".into(),
+            "postgres".into(),
+            format!("SELECT {i}"),
+            1,
+            Some(1),
+            "success".into(),
+            None,
+        );
+        append_entry(e).unwrap();
+    }
+
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader_stop = stop.clone();
+    let dir_for_reader = dir.path().to_path_buf();
+    let reader = std::thread::spawn(move || {
+        // TEST_CONFIG_DIR is thread_local — the reader thread must point at
+        // the same temp dir or it would read the real user history.
+        crate::connections::TEST_CONFIG_DIR
+            .with(|cell| *cell.borrow_mut() = Some(dir_for_reader.clone()));
+        let mut min_seen = usize::MAX;
+        while !reader_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            min_seen = min_seen.min(read_all_entries().len());
+        }
+        min_seen
+    });
+
+    // Keep rewriting while the reader spins — pre-fix, an unsynchronized
+    // reader can catch the file mid-rewrite (set_len(0) → partial write).
+    for i in 100..400 {
+        let e = QueryHistoryEntry::new(
+            "conn-1".into(),
+            "Test".into(),
+            "postgres".into(),
+            format!("SELECT {i}"),
+            1,
+            Some(1),
+            "success".into(),
+            None,
+        );
+        append_entry(e).unwrap();
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let min_seen = reader.join().unwrap();
+    assert!(
+        min_seen >= 100,
+        "reader must never observe a torn/empty history file (saw {min_seen})"
+    );
+}
+
+#[test]
 fn test_date_group() {
     assert_eq!(date_group(&chrono::Utc::now().to_rfc3339()), "Today");
     // Yesterday

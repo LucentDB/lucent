@@ -11,6 +11,8 @@
     tabId = null,
     content = '',
     onContentChange = () => {},
+    isRunning = false,
+    onCancel = () => {},
   } = $props();
   let executing = $state(false);
   let error = $state(null);
@@ -39,13 +41,20 @@
             borderRight: '1px solid var(--border)',
             background: 'var(--bg-surface)',
           },
-          '.cm-activeLineGutter': { backgroundColor: 'var(--accent-soft)' },
-          '.cm-activeLine': { backgroundColor: 'var(--accent-soft)' },
+          '.cm-activeLineGutter': { backgroundColor: 'transparent' },
+          '.cm-activeLine': { backgroundColor: 'var(--accent-active-line)' },
           '.cm-cursor': { borderLeftColor: 'var(--accent)' },
           '.cm-lineNumbers .cm-gutterElement': {
             color: 'var(--text-muted)',
             padding: '0 12px',
           },
+          '.cm-selectionBackground': {
+            background: 'var(--accent-selection, #c7d2fe)',
+          },
+          '&.cm-focused .cm-selectionBackground': {
+            background: 'var(--accent-selection, #c7d2fe)',
+          },
+          '&.cm-focused': { outline: 'none' },
         }),
       ],
       parent: container,
@@ -111,10 +120,20 @@
 <div class="query-editor" role="application" onkeydown={handleKeydown}>
   <div class="toolbar">
     <span class="shortcut-hint">⌘ + enter to run</span>
-    <button class="run-btn" onclick={handleExecute} disabled={executing}>
-      <span class="run-icon">▶</span>
-      {executing ? 'Running...' : 'Run'}
-    </button>
+    <div class="toolbar-actions">
+      {#if isRunning}
+        <button
+          class="toolbar-btn stop"
+          onclick={onCancel}
+          title="Cancel query (Esc)"
+          type="button">Stop</button
+        >
+      {/if}
+      <button class="run-btn" onclick={handleExecute} disabled={executing}>
+        <span class="run-icon">▶</span>
+        {executing ? 'Running...' : 'Run'}
+      </button>
+    </div>
   </div>
 
   <div class="editor-container" bind:this={container}></div>
@@ -144,9 +163,32 @@
     padding: var(--space-1) var(--space-3);
     border-bottom: 1px solid var(--border-light);
   }
+  .toolbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
   .shortcut-hint {
     font-size: var(--text-sm);
     color: var(--text-muted);
+  }
+  /* Stop button — always visible while running, styled like CellToolbar's stop. */
+  .toolbar-btn.stop {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 12px;
+    border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+    border-radius: var(--radius-md);
+    background: var(--bg-surface);
+    color: var(--danger);
+    font-size: var(--text-base);
+    font-weight: var(--weight-medium);
+    cursor: pointer;
+  }
+  .toolbar-btn.stop:hover {
+    background: var(--danger-bg);
+    color: var(--danger);
   }
   .run-btn {
     display: flex;

@@ -1,8 +1,19 @@
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::sync::Mutex as StdMutex;
 
 const MAX_ENTRIES: usize = 1000;
+
+/// Serializes all history file access within this process. The fs2 flock
+/// below is per-process on macOS (fcntl-based), so it cannot protect one
+/// thread from another — without this mutex a reader can observe the file
+/// mid-rewrite (torn JSONL) and a rewrite can clobber a concurrent append.
+static HISTORY_FILE_LOCK: StdMutex<()> = StdMutex::new(());
+
+fn history_guard() -> std::sync::MutexGuard<'static, ()> {
+    HISTORY_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -79,6 +90,7 @@ fn history_file_path() -> PathBuf {
 /// Append one entry with exclusive file lock. Deduplicates consecutive
 /// identical queries (same connection_id + database + sql).
 pub fn append_entry(entry: QueryHistoryEntry) -> Result<(), String> {
+    let _guard = history_guard();
     let path = history_file_path();
 
     let mut file = std::fs::OpenOptions::new()
@@ -149,13 +161,29 @@ pub fn append_entry(entry: QueryHistoryEntry) -> Result<(), String> {
     Ok(())
 }
 
-/// Read all entries, newest first.
+/// Read all entries, newest first. Serialized by the in-process history
+/// mutex so a reader can never observe the file mid-rewrite (torn JSONL
+/// lines would be silently dropped).
 pub fn read_all_entries() -> Vec<QueryHistoryEntry> {
+    let _guard = history_guard();
+    read_all_entries_unlocked()
+}
+
+/// Read path without the in-process guard — callers must hold it (mutating
+/// ops keep the guard across read-modify-rewrite so appends can't slip in).
+fn read_all_entries_unlocked() -> Vec<QueryHistoryEntry> {
     let path = history_file_path();
     if !path.exists() {
         return vec![];
     }
-    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut file = match std::fs::OpenOptions::new().read(true).open(&path) {
+        Ok(f) => f,
+        Err(_) => return vec![],
+    };
+    let mut content = String::new();
+    if file.read_to_string(&mut content).is_err() {
+        return vec![];
+    }
     let mut entries: Vec<QueryHistoryEntry> = content
         .lines()
         .filter(|l| !l.is_empty())
@@ -192,9 +220,11 @@ pub fn search_entries(
         .collect()
 }
 
-/// Toggle the favorite flag on an entry.
+/// Toggle the favorite flag on an entry. Holds the history mutex across the
+/// read-modify-rewrite so a concurrent append can't be clobbered in between.
 pub fn toggle_favorite(id: &str) -> Result<(), String> {
-    let entries = read_all_entries();
+    let _guard = history_guard();
+    let entries = read_all_entries_unlocked();
     let mut entries_reversed = entries;
     entries_reversed.reverse(); // need file order for rewrite
 
@@ -206,7 +236,8 @@ pub fn toggle_favorite(id: &str) -> Result<(), String> {
 
 /// Delete a single entry by ID.
 pub fn delete_entry(id: &str) -> Result<(), String> {
-    let entries = read_all_entries();
+    let _guard = history_guard();
+    let entries = read_all_entries_unlocked();
     let mut entries_reversed = entries;
     entries_reversed.reverse();
     entries_reversed.retain(|e| e.id != id);
@@ -215,6 +246,7 @@ pub fn delete_entry(id: &str) -> Result<(), String> {
 
 /// Clear all history.
 pub fn clear_history() -> Result<(), String> {
+    let _guard = history_guard();
     let path = history_file_path();
     if path.exists() {
         // Open with write and lock for safety
@@ -252,12 +284,18 @@ pub fn date_group(executed_at: &str) -> String {
 fn rewrite_all(entries: &[QueryHistoryEntry]) -> Result<(), String> {
     let path = history_file_path();
     let mut file = std::fs::OpenOptions::new()
+        .read(true)
         .write(true)
         .create(true)
-        .truncate(true)
+        .truncate(false)
         .open(&path)
         .map_err(|e| e.to_string())?;
+    // Lock BEFORE truncating — a concurrent append_entry holds the exclusive
+    // lock while rewriting; truncating first would clobber its in-flight write.
     fs2::FileExt::lock_exclusive(&file).map_err(|e| e.to_string())?;
+    file.set_len(0).map_err(|e| e.to_string())?;
+    file.seek(std::io::SeekFrom::Start(0))
+        .map_err(|e| e.to_string())?;
 
     let mut buf = String::new();
     for e in entries {

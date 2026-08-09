@@ -16,11 +16,24 @@ fn with_temp_config_dir() -> (tempfile::TempDir, PathBuf) {
 fn test_connection_profile_defaults() {
     let profile = ConnectionProfile::new("Defaults".into());
     assert_eq!(profile.driver, "postgres");
-    assert_eq!(profile.host, "127.0.0.1");
-    assert_eq!(profile.port, 5432);
-    assert_eq!(profile.user, "postgres");
-    assert_eq!(profile.database, "postgres");
-    assert_eq!(profile.ssl_mode, SslMode::Prefer);
+    assert_eq!(
+        profile.params.get("host").map(String::as_str),
+        Some("127.0.0.1")
+    );
+    assert_eq!(profile.params.get("port").map(String::as_str), Some("5432"));
+    assert_eq!(
+        profile.params.get("user").map(String::as_str),
+        Some("postgres")
+    );
+    assert_eq!(
+        profile.params.get("database").map(String::as_str),
+        Some("postgres")
+    );
+    assert_eq!(
+        profile.params.get("ssl_mode").map(String::as_str),
+        Some("prefer")
+    );
+    assert_eq!(profile.alias.as_deref(), Some("defaults"));
     assert!(profile.ssh_tunnel_id.is_none());
     assert!(profile.group.is_none());
     assert!(profile.last_used.is_none());
@@ -30,12 +43,7 @@ fn test_connection_profile_defaults() {
 }
 
 #[test]
-fn test_ssl_mode_default() {
-    assert_eq!(SslMode::default(), SslMode::Prefer);
-}
-
-#[test]
-fn test_v1_wrapper_round_trip() {
+fn test_v2_wrapper_round_trip() {
     let (_dir, _config_path) = with_temp_config_dir();
 
     let profile = ConnectionProfile::new("Test DB".into());
@@ -47,23 +55,55 @@ fn test_v1_wrapper_round_trip() {
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].id, profile.id);
     assert_eq!(loaded[0].name, "Test DB");
-    assert_eq!(loaded[0].host, "127.0.0.1");
-    assert_eq!(loaded[0].port, 5432);
-    assert_eq!(loaded[0].ssl_mode, SslMode::Prefer);
+    assert_eq!(
+        loaded[0].params.get("host").map(String::as_str),
+        Some("127.0.0.1")
+    );
+    assert_eq!(loaded[0].alias.as_deref(), Some("test-db"));
 }
 
 #[test]
 fn test_v0_bare_array_compat() {
+    // A genuine v0 file predates the wrapper: a bare array of flat-field
+    // profiles. The read path must migrate them into params.
     let (_dir, config_path) = with_temp_config_dir();
     let path = config_path.join("connections.json");
 
-    let profile = ConnectionProfile::new("Legacy".into());
-    let json = serde_json::to_string_pretty(&[&profile]).unwrap();
-    std::fs::write(&path, &json).unwrap();
+    let v0 = serde_json::json!([{
+        "id": "legacy-1",
+        "name": "Legacy",
+        "driver": "postgres",
+        "host": "db.old.example",
+        "port": 6432,
+        "user": "olduser",
+        "database": "olddb",
+        "sslMode": "disable",
+        "sshTunnelId": null,
+        "group": null,
+        "color": null,
+        "icon": null,
+        "lastUsed": null,
+        "createdAt": "2025-01-01T00:00:00Z",
+        "updatedAt": "2025-01-01T00:00:00Z"
+    }]);
+    std::fs::write(&path, serde_json::to_string_pretty(&v0).unwrap()).unwrap();
 
     let profiles = read_all_profiles();
-    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles.len(), 1, "a v0 bare array must not read as empty");
     assert_eq!(profiles[0].name, "Legacy");
+    assert_eq!(
+        profiles[0].params.get("host").map(String::as_str),
+        Some("db.old.example")
+    );
+    assert_eq!(
+        profiles[0].params.get("port").map(String::as_str),
+        Some("6432")
+    );
+    assert_eq!(
+        profiles[0].params.get("ssl_mode").map(String::as_str),
+        Some("disable")
+    );
+    assert_eq!(profiles[0].alias.as_deref(), Some("legacy"));
 }
 
 #[test]
@@ -138,7 +178,8 @@ fn test_profile_serialization_renames() {
     // Verify camelCase field names
     assert!(json.get("id").is_some());
     assert!(json.get("name").is_some());
-    assert!(json.get("sslMode").is_some(), "expected camelCase sslMode");
+    assert!(json.get("alias").is_some(), "expected alias");
+    assert!(json.get("params").is_some(), "expected params");
     assert!(
         json.get("sshTunnelId").is_some(),
         "expected camelCase sshTunnelId"
@@ -156,8 +197,10 @@ fn test_profile_serialization_renames() {
         "expected camelCase updatedAt"
     );
 
-    // snake_case should NOT be present
-    assert!(json.get("ssl_mode").is_none());
+    // Postgres-shaped fields must NOT appear as top-level keys — they live in
+    // params now.
+    assert!(json.get("host").is_none());
+    assert!(json.get("sslMode").is_none());
 }
 
 #[test]
@@ -323,12 +366,17 @@ async fn test_repo_save_updates_existing() {
     repo.save_profile(profile.clone()).await.unwrap();
 
     // Modify and save again
-    profile.host = "db.example.com".into();
+    profile
+        .params
+        .insert("host".to_string(), "db.example.com".to_string());
     repo.save_profile(profile).await.unwrap();
 
     let list = repo.list_profiles().await;
     assert_eq!(list.len(), 1);
-    assert_eq!(list[0].host, "db.example.com");
+    assert_eq!(
+        list[0].params.get("host").map(String::as_str),
+        Some("db.example.com")
+    );
 }
 
 #[tokio::test]
@@ -415,4 +463,134 @@ async fn test_repo_persistence_across_loads() {
     let list = repo2.list_profiles().await;
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].name, "Persist Test");
+}
+
+// ─── Task 9: v2 migration and @mention aliases ──────────────────────────────
+
+#[test]
+fn slugifies_a_profile_name_into_a_mentionable_alias() {
+    assert_eq!(slugify_alias("Prod Warehouse"), "prod-warehouse");
+    assert_eq!(slugify_alias("staging_db 2"), "staging-db-2");
+    assert_eq!(slugify_alias("  Trim  Me  "), "trim-me");
+    // Punctuation would break `@mention` parsing.
+    assert_eq!(slugify_alias("acme/prod (eu)"), "acme-prod-eu");
+    // A name with nothing usable must not yield an empty alias, which would
+    // match every mention.
+    assert_eq!(slugify_alias("!!!"), "");
+}
+
+#[test]
+fn migrates_a_v1_profile_into_params_without_losing_a_field() {
+    let v1 = serde_json::json!({
+        "id": "abc",
+        "name": "Prod DB",
+        "driver": "postgres",
+        "host": "db.internal",
+        "port": 6543,
+        "user": "reader",
+        "database": "analytics",
+        "sslMode": "require",
+        "sshTunnelId": "tunnel-1",
+        "group": "Production",
+        "color": "#ff0000",
+        "icon": null,
+        "lastUsed": null,
+        "createdAt": "2026-01-01T00:00:00Z",
+        "updatedAt": "2026-01-01T00:00:00Z"
+    });
+
+    let profile = migrate_v1_profile(&v1).expect("v1 profiles must migrate");
+
+    assert_eq!(profile.id, "abc");
+    assert_eq!(profile.driver, "postgres");
+    assert_eq!(
+        profile.params.get("host").map(String::as_str),
+        Some("db.internal")
+    );
+    assert_eq!(profile.params.get("port").map(String::as_str), Some("6543"));
+    assert_eq!(
+        profile.params.get("user").map(String::as_str),
+        Some("reader")
+    );
+    assert_eq!(
+        profile.params.get("database").map(String::as_str),
+        Some("analytics")
+    );
+    assert_eq!(
+        profile.params.get("ssl_mode").map(String::as_str),
+        Some("require")
+    );
+
+    // Non-connection metadata survives untouched.
+    assert_eq!(profile.ssh_tunnel_id.as_deref(), Some("tunnel-1"));
+    assert_eq!(profile.group.as_deref(), Some("Production"));
+    assert_eq!(profile.created_at, "2026-01-01T00:00:00Z");
+
+    // Alias is derived, so existing profiles become mentionable immediately.
+    assert_eq!(profile.alias.as_deref(), Some("prod-db"));
+}
+
+#[test]
+fn a_v1_profile_missing_optional_fields_still_migrates() {
+    // v0/v1 files in the wild predate several fields.
+    let sparse = serde_json::json!({
+        "id": "x",
+        "name": "Local",
+        "database": "postgres",
+        "createdAt": "2026-01-01T00:00:00Z",
+        "updatedAt": "2026-01-01T00:00:00Z"
+    });
+    let profile = migrate_v1_profile(&sparse).expect("sparse profiles must migrate");
+    assert_eq!(profile.driver, "postgres", "driver must default");
+    assert_eq!(
+        profile.params.get("host").map(String::as_str),
+        Some("127.0.0.1")
+    );
+    assert_eq!(profile.params.get("port").map(String::as_str), Some("5432"));
+}
+
+#[test]
+fn reading_a_v1_file_upgrades_it_and_round_trips_as_v2() {
+    let dir = tempfile::tempdir().unwrap();
+    TEST_CONFIG_DIR.with(|c| *c.borrow_mut() = Some(dir.path().to_path_buf()));
+
+    let v1_file = serde_json::json!({
+        "profiles": [{
+            "id": "abc", "name": "Prod DB", "driver": "postgres",
+            "host": "db.internal", "port": 5432, "user": "reader",
+            "database": "analytics", "sslMode": "prefer",
+            "sshTunnelId": null, "group": null, "color": null, "icon": null,
+            "lastUsed": null,
+            "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z"
+        }],
+        "ssh_tunnels": []
+    });
+    std::fs::write(
+        connections_file_path(),
+        serde_json::to_string_pretty(&v1_file).unwrap(),
+    )
+    .unwrap();
+
+    let profiles = read_all_profiles();
+    assert_eq!(profiles.len(), 1, "a v1 file must not read as empty");
+    assert_eq!(
+        profiles[0].params.get("host").map(String::as_str),
+        Some("db.internal")
+    );
+
+    // Write v2 and read it back unchanged.
+    write_all(&profiles, &[]).unwrap();
+    let reread = read_all_profiles();
+    assert_eq!(reread, profiles, "v2 must round-trip losslessly");
+
+    TEST_CONFIG_DIR.with(|c| *c.borrow_mut() = None);
+}
+
+#[test]
+fn a_corrupt_file_yields_no_profiles_rather_than_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    TEST_CONFIG_DIR.with(|c| *c.borrow_mut() = Some(dir.path().to_path_buf()));
+    std::fs::write(connections_file_path(), "{ not json").unwrap();
+    assert!(read_all_profiles().is_empty());
+    TEST_CONFIG_DIR.with(|c| *c.borrow_mut() = None);
 }

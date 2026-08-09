@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ToolCallCard as T } from '../../stores/chat.svelte.ts';
-  let { tool }: { tool: T } = $props();
+  let { tool, cellCompleted = false }: { tool: T; cellCompleted?: boolean } =
+    $props();
   let open = $state(false);
 
   const icons: Record<string, string> = {
@@ -11,17 +12,18 @@
   };
 
   let statusIcon = $derived.by(() => {
-    if (!tool.summary) return 'spinner';
-    if (tool.summary === 'error' || tool.summary.startsWith('error'))
+    if (tool.summary === 'error' || tool.summary?.startsWith('error'))
       return 'error';
-    return 'done';
+    if (tool.summary) return 'done';
+    // No summary yet: still running, or cell finished without providing one.
+    return cellCompleted ? 'done' : 'spinner';
   });
 
   let statusLabel = $derived.by(() => {
-    if (!tool.summary) return 'Running…';
     if (tool.summary === 'error') return 'Failed';
-    if (tool.summary.startsWith('error')) return tool.summary;
-    return tool.summary;
+    if (tool.summary?.startsWith('error')) return tool.summary;
+    if (tool.summary) return tool.summary;
+    return cellCompleted ? 'Done' : 'Running…';
   });
 
   function argDisplay(args: unknown): string {

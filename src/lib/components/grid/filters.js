@@ -99,6 +99,16 @@ export function needsValue(operator) {
   return !NO_VALUE_OPERATORS.has(operator);
 }
 
+/**
+ * Human-readable label for an operator on a column of this type, e.g. `gt` is
+ * ">" on a number but "after" on a timestamp. Falls back to the raw operator
+ * so an unrecognized value renders as itself rather than as blank.
+ */
+export function operatorLabel(operator, typeName) {
+  const match = operatorsFor(typeName).find((o) => o.value === operator);
+  return match ? match.label : operator;
+}
+
 /** Placeholder text for a chip's value input, hinting at an accepted format. */
 export function valuePlaceholderFor(typeName) {
   switch (bucketFor(typeName)) {

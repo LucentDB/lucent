@@ -1,8 +1,32 @@
 <script lang="ts">
   import { chat } from '../../stores/chat.svelte.ts';
-  let { onSend }: { onSend: (msg: string) => void } = $props();
+
+  let {
+    onSend,
+    disabled = false,
+    placeholder = 'Ask anything about your database…',
+    hint = 'Enter to send · Shift+Enter for newline',
+    docked = true,
+  }: {
+    onSend: (msg: string) => void;
+    /** Blocks input for reasons beyond streaming — e.g. no connection. */
+    disabled?: boolean;
+    placeholder?: string;
+    /** Helper line under the field. Empty string hides it. */
+    hint?: string;
+    /**
+     * True when the input sits docked at the bottom of a message list, which
+     * is what the top border and surface fill are for. False when it floats
+     * inside centred content (the landing screen), where that border would
+     * render as a stray rule across the layout.
+     */
+    docked?: boolean;
+  } = $props();
+
   let value = $state('');
   let inputEl: HTMLTextAreaElement;
+
+  const blocked = $derived(chat.isStreaming || disabled);
 
   function handleKeydown(e: KeyboardEvent) {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
@@ -17,7 +41,7 @@
 
   function submit() {
     const t = value.trim();
-    if (!t || chat.isStreaming) return;
+    if (!t || blocked) return;
     onSend(t);
     value = '';
     if (inputEl) inputEl.style.height = 'auto';
@@ -31,20 +55,22 @@
   }
 </script>
 
-<div class="chat-input">
-  <div class="input-wrap" class:focused={false}>
+<div class="chat-input" class:docked>
+  <div class="input-wrap">
     <textarea
       bind:this={inputEl}
       bind:value
       onkeydown={handleKeydown}
       oninput={autoResize}
-      placeholder="Ask anything about your database…"
-      disabled={chat.isStreaming}
+      {placeholder}
+      disabled={blocked}
       rows={1}></textarea>
     <button
       class="send-btn"
+      class:busy={chat.isStreaming}
       onclick={submit}
-      disabled={chat.isStreaming || !value.trim()}
+      disabled={blocked || !value.trim()}
+      aria-label="Send message"
     >
       {#if chat.isStreaming}
         <span class="spinner"></span>
@@ -61,14 +87,21 @@
       {/if}
     </button>
   </div>
-  <div class="hint">Enter to send · Shift+Enter for newline</div>
+  {#if hint}
+    <div class="hint">{hint}</div>
+  {/if}
 </div>
 
 <style>
   .chat-input {
     padding: 12px 20px 10px;
+  }
+  .chat-input.docked {
     border-top: 1px solid var(--border);
     background: var(--bg-surface);
+  }
+  .chat-input:not(.docked) {
+    padding: 0;
   }
   .input-wrap {
     display: flex;
@@ -119,6 +152,8 @@
     cursor: pointer;
     flex-shrink: 0;
     transition:
+      background var(--transition-fast),
+      color var(--transition-fast),
       opacity var(--transition-fast),
       transform var(--transition-fast);
   }
@@ -126,10 +161,18 @@
     opacity: 0.9;
     transform: scale(1.05);
   }
+  /* A translucent accent fill read as a washed-out, half-broken button. A
+     neutral fill states "not yet" without diluting the brand colour. */
   .send-btn:disabled {
-    opacity: 0.3;
+    background: var(--bg-subtle);
+    color: var(--text-muted);
     cursor: not-allowed;
     transform: none;
+  }
+  /* Streaming keeps the accent — the button is working, not unavailable. */
+  .send-btn:disabled.busy {
+    background: var(--accent);
+    color: #fff;
   }
   .spinner {
     width: 14px;

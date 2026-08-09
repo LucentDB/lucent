@@ -12,8 +12,8 @@ tauri-build = { version = "2", features = [] }
 
 [features]
 default = []
-evals = []
-integration-tests = ["testcontainers", "testcontainers-modules"]
+evals = ["dep:tokio-postgres"]
+integration-tests = ["testcontainers", "testcontainers-modules", "dep:tokio-postgres"]
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -27,19 +27,34 @@ tempfile = "3"
 dashmap = { workspace = true }
 sqlparser = "0.62"
 futures = { workspace = true }
+bincode = { workspace = true }
 keyring = { workspace = true }
 rig-core = { workspace = true }
 
 # Embedding model for semantic schema search
 fastembed = "4"
 
+regex = "1"
+
 # Logging
 log = "0.4"
-env_logger = "0.11"
+
+# Tracing: subscriber + log bridge + rotating file appender
+# `default-features = false`: the default `tracing-log` feature would install
+# the log bridge inside `.init()`; we install it explicitly in trace.rs
+# instead so there is a single source of truth.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "env-filter", "std", "registry"] }
+tracing-log = "0.2"
+tracing-appender = "0.2"
 
 # Integration test deps (behind `integration-tests` feature to avoid resolution conflicts)
-tokio-postgres = "0.7"
-testcontainers = { version = "0.27", optional = true }
+# `tokio-postgres` is a TEST-ONLY driver client: the production app must never
+# link a database driver (see tests/no_provider_sql_test.rs). It is optional
+# here so it is absent from the production graph, and pulled in by the
+# test-only features plus the dev-dependencies section below.
+tokio-postgres = { version = "0.7", optional = true }
+testcontainers = { version = "0.27", features = ["watchdog"], optional = true }
 testcontainers-modules = { version = "0.15", features = ["postgres"], optional = true }
 
 # Re-use workspace dependencies for common crates
@@ -55,3 +70,10 @@ dirs = "6"
 # Tauri plugins
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
+
+[dev-dependencies]
+# Test-only Postgres client for the eval harness (evals.rs compiles under
+# plain `cargo test` via `#[cfg(any(test, feature = "evals"))]`) and for the
+# feature-gated integration tests. Dev-dependencies are never part of the
+# production binary.
+tokio-postgres = "0.7"

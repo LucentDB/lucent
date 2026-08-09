@@ -10,6 +10,7 @@
     testingIds,
     onSelect,
     onTest,
+    onEdit,
     onDelete,
     onDuplicate,
     onNewConnection,
@@ -21,6 +22,7 @@
     testingIds: Set<string>;
     onSelect?: (id: string) => void;
     onTest?: (id: string) => void;
+    onEdit?: (profile: ConnectionProfile) => void;
     onDelete?: (id: string) => void;
     onDuplicate?: (id: string) => void;
     onNewConnection?: () => void;
@@ -37,9 +39,9 @@
     return profiles.filter(
       (p) =>
         p.name.toLowerCase().includes(q) ||
-        p.host.toLowerCase().includes(q) ||
-        p.user.toLowerCase().includes(q) ||
-        p.database.toLowerCase().includes(q) ||
+        (p.params['host'] ?? '').toLowerCase().includes(q) ||
+        (p.params['user'] ?? '').toLowerCase().includes(q) ||
+        (p.params['database'] ?? '').toLowerCase().includes(q) ||
         (p.group ?? '').toLowerCase().includes(q),
     );
   });
@@ -194,8 +196,10 @@
             {profile}
             active={profile.id === activeProfileId}
             testing={testingIds.has(profile.id)}
+            viewMode="grid"
             {onSelect}
             {onTest}
+            {onEdit}
             {onDelete}
             {onDuplicate}
           />
@@ -215,8 +219,10 @@
               {profile}
               active={profile.id === activeProfileId}
               testing={testingIds.has(profile.id)}
+              viewMode="list"
               {onSelect}
               {onTest}
+              {onEdit}
               {onDelete}
               {onDuplicate}
             />
@@ -231,14 +237,13 @@
   .connection-list {
     display: flex;
     flex-direction: column;
-    height: 100%;
-    overflow: hidden;
+    gap: 8px;
   }
   .list-toolbar {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 12px 16px;
+    padding: 4px 0 12px;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
@@ -306,9 +311,7 @@
     background: var(--accent-hover);
   }
   .list-content {
-    flex: 1;
-    overflow-y: auto;
-    padding: 12px 16px;
+    padding: 8px 0;
   }
   .loading-state {
     display: flex;
@@ -366,7 +369,7 @@
   .list-view {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
   }
   .group-header {
     display: flex;

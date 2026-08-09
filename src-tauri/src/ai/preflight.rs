@@ -2,6 +2,7 @@
 //! first LLM call of a chat turn. Converts the model's schema-exploration
 //! round trips (~3–4s of LLM latency each) into a <300ms local pre-step.
 
+use lucent_protocol::ConnectionId;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -225,26 +226,50 @@ pub fn assemble_block(cluster_section: Option<String>, value_hints: &[String]) -
 
 /// Probe live data for literals that sample matching couldn't ground.
 /// Best-effort: bounded by a 500ms statement timeout, fails silently.
+///
+/// `capabilities` decides whether probing is safe at all: with no known way
+/// to open a bounded read-only scope the probes would run unprotected, so we
+/// skip them entirely instead.
 async fn probe_literals(
+    connection_id: ConnectionId,
     db: &Arc<Mutex<Option<ConnectorClient>>>,
     graph: &crate::ai::schema_graph::SchemaGraph,
     literals: &[String],
+    capabilities: Option<&lucent_protocol::DriverCapabilities>,
 ) -> Vec<String> {
     let mut hints: Vec<String> = Vec::new();
-    let mut guard = db.lock().await;
-    let Some(client) = guard.as_mut() else {
+    let Some(capabilities) = capabilities else {
+        return hints;
+    };
+    let client = db.lock().await.clone();
+    let Some(client) = client else {
         return hints;
     };
 
-    let _ = client
-        .execute(&format!("SET statement_timeout = {PROBE_TIMEOUT_MS}"))
-        .await;
+    // The strongest read-only scope this connection supports, bounded by
+    // PROBE_TIMEOUT_MS. Dropping this session — including when the outer 2s
+    // timeout cancels the probe future mid-flight — spawns the teardown, so a
+    // probe can never leak a transaction or a session-level statement_timeout.
+    let _readonly = match crate::readonly::ReadOnlySession::begin(
+        &client,
+        connection_id,
+        capabilities,
+        PROBE_TIMEOUT_MS,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            log::debug!("Pre-flight value probe could not open a read-only scope: {e}");
+            return hints;
+        }
+    };
     for lit in literals {
         let candidates = probe_candidates(graph, lit);
         let Some(sql) = build_probe_sql(&candidates, lit) else {
             continue;
         };
-        match client.execute(&sql).await {
+        match client.execute(connection_id, &sql).await {
             Ok(res) => {
                 if let Some(row) = res.rows.first() {
                     if let (Some(col), Some(val)) = (row[0].as_str(), row[1].as_str()) {
@@ -262,7 +287,6 @@ async fn probe_literals(
             break;
         }
     }
-    let _ = client.execute("SET statement_timeout = 0").await;
     hints
 }
 
@@ -270,13 +294,16 @@ async fn probe_literals(
 /// cluster retrieval only when the schema was NOT fully injected (Push tier
 /// already carries everything, so retrieval would be pure duplication).
 /// `db` is the shared database handle for live probing of high-cardinality
-/// literals that sample matching can't cover.
+/// literals that sample matching can't cover. `capabilities` decides whether
+/// live probing runs at all — `None` skips it rather than probing unprotected.
 pub async fn run_preflight(
+    connection_id: Option<ConnectionId>,
     db: Option<&Arc<Mutex<Option<ConnectorClient>>>>,
     graph: Option<&SchemaGraph>,
     embedder: Option<&Embedder>,
     tier: &ContextTier,
     question: &str,
+    capabilities: Option<&lucent_protocol::DriverCapabilities>,
 ) -> Option<String> {
     let graph = graph?;
     let start = std::time::Instant::now();
@@ -286,7 +313,7 @@ pub async fn run_preflight(
 
     // Live probes for literals the samples couldn't ground (high-cardinality
     // lookups: ticket numbers, names, codes).
-    if let Some(db) = db {
+    if let (Some(db), Some(capabilities)) = (db, capabilities) {
         let covered: Vec<String> = value_hints.clone();
         let uncovered: Vec<String> = literals
             .iter()
@@ -296,7 +323,13 @@ pub async fn run_preflight(
         if !uncovered.is_empty() {
             // Bound probe time: even with 500ms per literal, 8 literals × 500ms = 4s.
             // If it exceeds 2s total, skip the rest — sample hints are still available.
-            let probe_fut = probe_literals(db, graph, &uncovered);
+            let probe_fut = probe_literals(
+                connection_id.unwrap_or(ConnectionId(uuid::Uuid::nil())),
+                db,
+                graph,
+                &uncovered,
+                Some(capabilities),
+            );
             match tokio::time::timeout(std::time::Duration::from_secs(2), probe_fut).await {
                 Ok(h) => value_hints.extend(h),
                 Err(_) => log::warn!("Pre-flight value probing timed out after 2s"),
@@ -491,7 +524,16 @@ mod tests {
     #[tokio::test]
     async fn preflight_without_db_handle_behaves_as_before() {
         let g = graph_with_values();
-        let out = run_preflight(None, Some(&g), None, &ContextTier::Push, "flights from CAN").await;
+        let out = run_preflight(
+            None,
+            None,
+            Some(&g),
+            None,
+            &ContextTier::Push,
+            "flights from CAN",
+            None,
+        )
+        .await;
         assert!(out
             .expect("sample hint still fires")
             .contains("airport_code"));
@@ -631,7 +673,16 @@ mod tests {
     #[tokio::test]
     async fn preflight_push_tier_returns_value_hints_without_embedder() {
         let g = graph_with_values();
-        let out = run_preflight(None, Some(&g), None, &ContextTier::Push, "flights from CAN").await;
+        let out = run_preflight(
+            None,
+            None,
+            Some(&g),
+            None,
+            &ContextTier::Push,
+            "flights from CAN",
+            None,
+        )
+        .await;
         let block = out.expect("value hint present");
         assert!(block.contains("airport_code"));
         assert!(
@@ -643,7 +694,7 @@ mod tests {
     #[tokio::test]
     async fn preflight_none_without_graph() {
         assert!(
-            run_preflight(None, None, None, &ContextTier::Pull, "anything")
+            run_preflight(None, None, None, None, &ContextTier::Pull, "anything", None)
                 .await
                 .is_none()
         );

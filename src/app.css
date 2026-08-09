@@ -30,6 +30,9 @@
   --accent: #6366f1;
   --accent-hover: #4f46e5;
   --accent-soft: #eef2ff;
+  --accent-muted: #c7d2fe;
+  --accent-active-line: rgba(99, 102, 241, 0.07);
+  --accent-selection: #c7d2fe;
 
   /* Semantic feedback */
   --success: #10b981;
@@ -40,6 +43,16 @@
   --error: var(--danger);
   --error-bg: var(--danger-bg);
   --warning: #f59e0b;
+
+  /* Syntax colours for statically highlighted SQL. Kept to CodeMirror's default
+     light palette so read-only SQL matches the live editor exactly. */
+  --syn-keyword: #7708a8;
+  --syn-string: #a11f1f;
+  --syn-number: #116644;
+  --syn-comment: #8a6d3b;
+  --syn-type: #00857a;
+  --syn-variable: #1f4fd8;
+  --syn-operator: #52525b;
 
   /* Typography stacks */
   --font-sans: ui-sans-serif, system-ui, sans-serif;
@@ -95,34 +108,48 @@
 }
 
 :root.dark {
-  --bg: #09090b;
-  --bg-surface: #18181b;
-  --bg-elevated: #1f1f23;
-  --bg-subtle: #202024;
-  --bg-hover: #27272a;
-  --bg-header: #0f0f17;
-  --bg-input: #27272a;
-  --text: #fafafa;
+  --bg: #121214;
+  --bg-surface: #18181c;
+  --bg-elevated: #202025;
+  --bg-subtle: #27272e;
+  --bg-hover: #2f2f38;
+  --bg-header: #121218;
+  --bg-input: #202025;
+  --text: #f4f4f6;
   --text-secondary: #a1a1aa;
   --text-muted: #71717a;
-  --text-on-header: #a1a1aa;
-  --border: #27272a;
-  --border-light: #1c1c1f;
+  --text-on-header: #d4d4d8;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-light: rgba(255, 255, 255, 0.04);
+  --border-active: rgba(129, 140, 248, 0.4);
   --accent: #818cf8;
   --accent-hover: #6366f1;
-  --accent-soft: #1e1b4b;
+  --accent-soft: rgba(99, 102, 241, 0.15);
+  --accent-muted: rgba(129, 140, 248, 0.3);
+  --accent-active-line: rgba(129, 140, 248, 0.08);
+  --accent-selection: rgba(99, 102, 241, 0.3);
   --success: #34d399;
-  --success-bg: #064e3b;
+  --success-bg: rgba(52, 211, 153, 0.12);
   --danger: #f87171;
-  --danger-bg: #7f1d1d;
+  --danger-bg: rgba(248, 113, 113, 0.12);
   --error: var(--danger);
   --error-bg: var(--danger-bg);
   --warning: #fbbf24;
-  --grid-line: #2e2e35;
-  --grid-header-border: #3a3a42;
+  /* One Dark, matching the editor's dark theme. */
+  --syn-keyword: #c678dd;
+  --syn-string: #98c379;
+  --syn-number: #d19a66;
+  --syn-comment: #7d8799;
+  --syn-type: #e5c07b;
+  --syn-variable: #e06c75;
+  --syn-operator: #56b6c2;
+  --grid-line: rgba(255, 255, 255, 0.06);
+  --grid-header-border: rgba(255, 255, 255, 0.12);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 10px 25px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.5);
+  --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.25);
+  --ring-focus: 0 0 0 2px rgba(129, 140, 248, 0.35);
 }
 
 html,

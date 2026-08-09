@@ -1,6 +1,17 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { chat, createConversation, addMessage } from '../stores/chat.svelte.ts';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import {
+  chat,
+  createConversation,
+  addMessage,
+  formatUsageLine,
+} from '../stores/chat.svelte.ts';
 import { handleAiEvent } from './ai.ts';
+
+const invokeMock = vi.fn().mockResolvedValue(undefined);
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (...args: unknown[]) => invokeMock(...args),
+  Channel: class {},
+}));
 
 function seedActiveConversationWithMessage(messageId: string) {
   const conv = createConversation('conn_1');
@@ -25,6 +36,7 @@ describe('handleAiEvent', () => {
   beforeEach(() => {
     chat.conversations = [];
     chat.activeConversationId = null;
+    invokeMock.mockReset();
   });
 
   it('accumulates multiple thinking deltas onto one segment on the same message', () => {
@@ -101,6 +113,7 @@ describe('handleAiEvent', () => {
         prompt_tokens: 10,
         completion_tokens: 5,
         estimated_cost_usd: null,
+        cached_prompt_tokens: 0,
       },
     });
     const c = getConv(conv.id);
@@ -108,6 +121,65 @@ describe('handleAiEvent', () => {
     expect(msg.content).toBe('Here is the answer');
     expect(msg.session!.active).toBe(false);
     expect(typeof msg.session!.durationMs).toBe('number');
+    expect(msg.usage).toEqual({
+      promptTokens: 10,
+      completionTokens: 5,
+      estimatedCostUsd: null,
+      cachedPromptTokens: 0,
+    });
+  });
+
+  it('fetches accumulated usage once on done and stores it on the conversation', async () => {
+    const conv = seedActiveConversationWithMessage('m1');
+    invokeMock.mockResolvedValue({
+      prompt_tokens: 120,
+      completion_tokens: 45,
+      estimated_cost_usd: 0.1234,
+      cached_prompt_tokens: 30,
+    });
+    handleAiEvent(conv.id, {
+      type: 'done',
+      conversation_id: conv.id,
+      final_message: 'ok',
+      usage: {
+        prompt_tokens: 120,
+        completion_tokens: 45,
+        estimated_cost_usd: 0.1234,
+        cached_prompt_tokens: 30,
+      },
+    });
+    await vi.waitFor(() => {
+      expect(getConv(conv.id).usage).toEqual({
+        promptTokens: 120,
+        completionTokens: 45,
+        estimatedCostUsd: 0.1234,
+        cachedPromptTokens: 30,
+      });
+    });
+    expect(invokeMock).toHaveBeenCalledWith('get_ai_usage', {
+      conversationId: conv.id,
+    });
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the previous usage when the get_ai_usage fetch fails', async () => {
+    const conv = seedActiveConversationWithMessage('m1');
+    invokeMock.mockRejectedValue(new Error('nope'));
+    handleAiEvent(conv.id, {
+      type: 'done',
+      conversation_id: conv.id,
+      final_message: 'ok',
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        estimated_cost_usd: null,
+        cached_prompt_tokens: 0,
+      },
+    });
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledTimes(1);
+    });
+    expect(getConv(conv.id).usage).toBeNull();
   });
 
   it('updates the correct tool_call segment by id on tool_result', () => {
@@ -148,5 +220,29 @@ describe('handleAiEvent', () => {
       handleAiEvent(conv.id, { type: 'thinking', content: 'x' }),
     ).not.toThrow();
     expect(conv.messages).toHaveLength(0);
+  });
+});
+
+describe('formatUsageLine', () => {
+  it('renders in/out tokens without cost when the provider reports none', () => {
+    expect(
+      formatUsageLine({
+        promptTokens: 120,
+        completionTokens: 45,
+        estimatedCostUsd: null,
+        cachedPromptTokens: 0,
+      }),
+    ).toBe('120 in / 45 out tokens');
+  });
+
+  it('appends the cost with 4-decimal precision when present', () => {
+    expect(
+      formatUsageLine({
+        promptTokens: 120,
+        completionTokens: 45,
+        estimatedCostUsd: 0.1234,
+        cachedPromptTokens: 0,
+      }),
+    ).toBe('120 in / 45 out tokens · $0.1234');
   });
 });

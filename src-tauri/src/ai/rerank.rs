@@ -50,13 +50,13 @@ impl Reranker {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_reranker_creation() {
         let r = Reranker::new();
         assert!(r.is_ok(), "reranker should initialize: {:?}", r.err());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_rerank_orders_relevant_document_first() {
         let r = Reranker::new().unwrap();
         let candidates = vec![

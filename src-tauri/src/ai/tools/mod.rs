@@ -2,6 +2,7 @@ pub mod execute;
 pub mod objects;
 pub mod search_schema;
 
+use lucent_protocol::ConnectionId;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
@@ -12,6 +13,10 @@ use crate::client::ConnectorClient;
 /// Shared context passed to all tools at call time.
 pub struct AiToolContext {
     pub db: Arc<Mutex<Option<ConnectorClient>>>,
+    pub connection_id: Option<ConnectionId>,
+    /// Capabilities of the connection these tools run against. `None` when
+    /// disconnected; every tool already errors with `NotConnected` first.
+    pub capabilities: Option<lucent_protocol::DriverCapabilities>,
     pub config: crate::ai::config::AiConfig,
     pub schema_graph: Arc<Mutex<Option<crate::ai::schema_graph::SchemaGraph>>>,
     pub embedder: Arc<Mutex<Option<crate::ai::embed::Embedder>>>,
@@ -22,6 +27,8 @@ impl Clone for AiToolContext {
     fn clone(&self) -> Self {
         Self {
             db: Arc::clone(&self.db),
+            connection_id: self.connection_id,
+            capabilities: self.capabilities.clone(),
             config: self.config.clone(),
             schema_graph: Arc::clone(&self.schema_graph),
             embedder: Arc::clone(&self.embedder),

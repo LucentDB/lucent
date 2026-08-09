@@ -1,6 +1,8 @@
+use lucent_protocol::ConnectionId;
 use std::collections::HashMap;
 
 use crate::ai::embed::Embedder;
+use crate::ai::truncate_utf8;
 use crate::client::ConnectorClient;
 
 /// Raw per-column tuple gathered while building the graph:
@@ -29,7 +31,7 @@ pub struct TableEntry {
     pub id: usize,
     pub schema: String,
     pub name: String,
-    /// pg_class.reltuples estimate; 0 when unknown. -1 (never analyzed) is clamped to 0.
+    /// Estimated row count from the driver's catalog; 0 when unknown.
     pub row_count_estimate: i64,
     /// "PARTITIONED BY RANGE (created_at) — 84 partitions" for partitioned parents.
     pub partition_info: Option<String>,
@@ -57,6 +59,66 @@ pub struct SchemaGraph {
 }
 
 pub struct SchemaIndexer;
+
+/// Turn normalized catalog results into the indexer's working structures.
+///
+/// Pure: no I/O, no async. Everything provider-specific already happened below
+/// the `Connector` seam.
+pub(crate) fn harvest_to_entries(
+    objects: Vec<lucent_protocol::ObjectSummary>,
+    details: Vec<lucent_protocol::ObjectDetail>,
+) -> (Vec<TableEntry>, TableColumns) {
+    let mut tables: Vec<TableEntry> = Vec::new();
+    let mut table_map: HashMap<(String, String), usize> = HashMap::new();
+
+    for object in objects {
+        // Partition children are collapsed into the parent: indexing 84
+        // near-identical partitions poisons retrieval and blows the context
+        // budget while adding zero schema information.
+        if object.is_partition_child {
+            continue;
+        }
+        let schema = object.reference.namespace.join(".");
+        let name = object.reference.name;
+        let id = tables.len();
+        table_map.insert((schema.clone(), name.clone()), id);
+        tables.push(TableEntry {
+            id,
+            schema,
+            name,
+            // The field is an i64 with a "0 when unknown" contract; the
+            // Option is where the real fidelity lives if this ever widens.
+            row_count_estimate: object.est_rows.unwrap_or(0) as i64,
+            partition_info: object
+                .partition
+                .as_ref()
+                .map(|p| partition_annotation(p.key.as_deref(), p.child_count as i64))
+                .unwrap_or(None),
+        });
+    }
+
+    let mut table_columns: TableColumns = HashMap::new();
+    for detail in details {
+        let schema = detail.reference.namespace.join(".");
+        let table = detail.reference.name;
+        // A detail for a table the listing excluded (a partition child) must
+        // not conjure a phantom table entry.
+        let Some(&tid) = table_map.get(&(schema.clone(), table.clone())) else {
+            continue;
+        };
+        for c in detail.columns {
+            table_columns.entry(tid).or_default().push((
+                c.name,
+                c.type_name,
+                schema.clone(),
+                table.clone(),
+                c.is_primary_key,
+            ));
+        }
+    }
+
+    (tables, table_columns)
+}
 
 pub(crate) const RANGE_TYPES: &[&str] = &[
     "tstzrange",
@@ -106,13 +168,18 @@ const UNSAMPLEABLE_TYPES: &[&str] = &[
 ///   (SELECT {tid}, '{col}', val FROM (bounded scan of 1000 non-null values) GROUP BY val LIMIT 20)
 /// The inner LIMIT bounds the scan so a 100M-row table costs a 1000-row read,
 /// not a full-table hash aggregate.
-fn build_sampling_sql(tables: &[TableEntry], table_columns: &TableColumns) -> Option<String> {
+fn build_sampling_sql(
+    tables: &[TableEntry],
+    table_columns: &TableColumns,
+    builder: &dyn crate::sql_builder::SqlBuilder,
+    driver_id: &str,
+) -> Option<String> {
     let mut subqueries: Vec<String> = Vec::new();
     for table_entry in tables {
         let qualified = format!(
-            "\"{}\".\"{}\"",
-            table_entry.schema.replace('"', "\"\""),
-            table_entry.name.replace('"', "\"\"")
+            "{}.{}",
+            builder.quote_identifier(&table_entry.schema),
+            builder.quote_identifier(&table_entry.name)
         );
         let Some(cols) = table_columns.get(&table_entry.id) else {
             continue;
@@ -123,16 +190,18 @@ fn build_sampling_sql(tables: &[TableEntry], table_columns: &TableColumns) -> Op
                 // domain (aircraft models, airport/city names). Extract their
                 // scalar string values via jsonb_each_text — guarded by
                 // jsonb_typeof, which would otherwise error on arrays/scalars
-                // and kill the whole batch.
-                if data_type == "jsonb" {
-                    let quoted_col = name.replace('"', "\"\"");
+                // and kill the whole batch. These are PostgreSQL functions: a
+                // driver without JSON sampling simply gets fewer sample values,
+                // which degrades retrieval quality without breaking it.
+                if data_type == "jsonb" && driver_id == "postgres" {
+                    let quoted_col = builder.quote_identifier(name);
                     let literal_col = name.replace('\'', "''");
                     subqueries.push(format!(
                         "(SELECT {tid} AS tid, '{literal_col}' AS col, val FROM \
                           (SELECT DISTINCT v.value AS val \
-                           FROM (SELECT \"{quoted_col}\" AS j FROM {qualified} \
-                                 WHERE \"{quoted_col}\" IS NOT NULL \
-                                   AND jsonb_typeof(\"{quoted_col}\") = 'object' \
+                           FROM (SELECT {quoted_col} AS j FROM {qualified} \
+                                 WHERE {quoted_col} IS NOT NULL \
+                                   AND jsonb_typeof({quoted_col}) = 'object' \
                                  LIMIT 200) _src, \
                                 LATERAL jsonb_each_text(_src.j) v \
                            WHERE length(v.value) BETWEEN 2 AND 60 \
@@ -142,12 +211,13 @@ fn build_sampling_sql(tables: &[TableEntry], table_columns: &TableColumns) -> Op
                 }
                 continue;
             }
-            let quoted_col = name.replace('"', "\"\"");
+            let quoted_col = builder.quote_identifier(name);
             let literal_col = name.replace('\'', "''");
+            let cast_col = builder.cast_to_text(&quoted_col);
             subqueries.push(format!(
                 "(SELECT {tid} AS tid, '{literal_col}' AS col, val \
-                  FROM (SELECT CAST(\"{quoted_col}\" AS text) AS val FROM {qualified} \
-                        WHERE \"{quoted_col}\" IS NOT NULL LIMIT 1000) _bounded \
+                  FROM (SELECT {cast_col} AS val FROM {qualified} \
+                        WHERE {quoted_col} IS NOT NULL LIMIT 1000) _bounded \
                   GROUP BY val LIMIT 20)",
                 tid = table_entry.id,
             ));
@@ -160,122 +230,50 @@ fn build_sampling_sql(tables: &[TableEntry], table_columns: &TableColumns) -> Op
     }
 }
 
+/// Cap a sampled column value at 197 bytes plus an ellipsis suffix.
+fn truncate_sample_value(val_str: &str) -> String {
+    if val_str.len() > 200 {
+        format!("{}...", truncate_utf8(val_str, 197))
+    } else {
+        val_str.to_string()
+    }
+}
+
 impl SchemaIndexer {
     pub async fn build_index(
-        client: &mut ConnectorClient,
+        connection_id: ConnectionId,
+        client: &ConnectorClient,
         embedder: &Embedder,
         include_sample_values: bool,
+        capabilities: &lucent_protocol::DriverCapabilities,
     ) -> Result<SchemaGraph, String> {
         let start = std::time::Instant::now();
 
-        // Step 0: physical table metadata — row estimates, partitioning, and which
-        // relations are partition children (those are collapsed into their parent:
-        // indexing 84 near-identical partitions poisons retrieval and blows the
-        // context budget while adding zero schema information).
-        struct TableMeta {
-            row_estimate: i64,
-            is_partition_child: bool,
-            partition_info: Option<String>,
-        }
-        let meta_result = client
-            .execute(
-                "SELECT n.nspname, c.relname, GREATEST(c.reltuples::bigint, 0) AS row_estimate, \
-                        (i.inhrelid IS NOT NULL) AS is_partition_child, \
-                        (SELECT count(*) FROM pg_inherits pi WHERE pi.inhparent = c.oid) AS partition_count, \
-                        CASE WHEN c.relkind = 'p' THEN pg_get_partkeydef(c.oid) END AS partkey \
-                 FROM pg_class c \
-                 JOIN pg_namespace n ON n.oid = c.relnamespace \
-                 LEFT JOIN pg_inherits i ON i.inhrelid = c.oid \
-                 WHERE c.relkind IN ('r', 'p') \
-                   AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')",
-            )
+        // Step 0-2: harvest tables and columns through the catalog seam. Two
+        // requests replace two hand-written Postgres queries; the FK edges come
+        // from a third and are applied after embedding, as before.
+        let objects = client
+            .list_all_objects(connection_id, vec![lucent_protocol::ObjectKind::Table])
             .await
-            .map_err(|e| format!("table metadata query: {e}"))?;
+            .map_err(|e| format!("table metadata: {e}"))?;
 
-        let mut table_meta: std::collections::HashMap<(String, String), TableMeta> =
-            std::collections::HashMap::new();
-        for r in &meta_result.rows {
-            let schema = r[0].as_str().unwrap_or("public").to_string();
-            let name = r[1].as_str().unwrap_or("?").to_string();
-            table_meta.insert(
-                (schema, name),
-                TableMeta {
-                    row_estimate: r[2].as_i64().unwrap_or(0),
-                    is_partition_child: r[3].as_bool().unwrap_or(false),
-                    partition_info: partition_annotation(r[5].as_str(), r[4].as_i64().unwrap_or(0)),
-                },
-            );
-        }
+        let refs: Vec<lucent_protocol::ObjectRef> = objects
+            .iter()
+            .filter(|o| !o.is_partition_child)
+            .map(|o| o.reference.clone())
+            .collect();
 
-        // Step 1: fetch all columns across all user schemas
-        // NOTE: we use EXISTS (a boolean semi-join) instead of a LEFT JOIN on
-        // key_column_usage because the latter produces one outer row per matching
-        // constraint row, which duplicates columns that appear in both a composite PK
-        // AND as an individual FK reference (e.g. line_items.org_id is part of the
-        // composite PK AND individually FK-referenced → 2 rows instead of 1).
-        // EXISTS can only contribute 0 or 1 to the row count regardless of how many
-        // constraints reference the column.
-        let col_result = client
-            .execute(
-                "SELECT c.table_schema, c.table_name, c.column_name, c.data_type, \
-                        EXISTS ( \
-                            SELECT 1 FROM information_schema.key_column_usage kcu \
-                            JOIN information_schema.table_constraints tc \
-                              ON tc.constraint_name = kcu.constraint_name \
-                             AND tc.table_schema = kcu.table_schema \
-                             AND tc.constraint_type = 'PRIMARY KEY' \
-                            WHERE kcu.column_name = c.column_name \
-                              AND kcu.table_name = c.table_name \
-                              AND kcu.table_schema = c.table_schema \
-                        ) AS is_primary_key \
-                 FROM information_schema.columns c \
-                 WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast') \
-                 ORDER BY c.table_schema, c.table_name, c.ordinal_position",
-            )
+        let details = client
+            .describe_objects(connection_id, refs)
             .await
-            .map_err(|e| format!("columns query: {e}"))?;
+            .map_err(|e| format!("columns: {e}"))?;
 
-        // Step 2: build TableEntry list (deduplicate by schema+name)
-        let mut table_map: HashMap<(String, String), usize> = HashMap::new();
-        let mut tables: Vec<TableEntry> = Vec::new();
-        let mut table_columns: TableColumns = HashMap::new();
-
-        for r in &col_result.rows {
-            let schema = r[0].as_str().unwrap_or("public").to_string();
-            let table = r[1].as_str().unwrap_or("?").to_string();
-            let key = (schema.clone(), table.clone());
-            if table_meta
-                .get(&key)
-                .map(|m| m.is_partition_child)
-                .unwrap_or(false)
-            {
-                continue; // collapsed into the partitioned parent
-            }
-            let tid = *table_map.entry(key.clone()).or_insert_with(|| {
-                let id = tables.len();
-                let meta = table_meta.get(&key);
-                tables.push(TableEntry {
-                    id,
-                    schema: schema.clone(),
-                    name: table.clone(),
-                    row_count_estimate: meta.map(|m| m.row_estimate).unwrap_or(0),
-                    partition_info: meta.and_then(|m| m.partition_info.clone()),
-                });
-                id
-            });
-            let col_name = r[2].as_str().unwrap_or("?").to_string();
-            let data_type = r[3].as_str().unwrap_or("text").to_string();
-            let is_pk = r[4].as_bool().unwrap_or(false);
-            table_columns
-                .entry(tid)
-                .or_default()
-                .push((col_name, data_type, schema, table, is_pk));
-        }
+        let (tables, table_columns) = harvest_to_entries(objects, details);
 
         log::info!(
-            "SchemaIndexer: {} tables, {} columns from metadata query",
+            "SchemaIndexer: {} tables, {} columns from the catalog",
             tables.len(),
-            col_result.rows.len()
+            table_columns.values().map(Vec::len).sum::<usize>()
         );
 
         // Step 3: fetch sample values — collapsed into ONE combined query across all
@@ -288,23 +286,26 @@ impl SchemaIndexer {
         // and capped at 20 values per column.
         let mut sample_values: HashMap<(usize, String), Vec<String>> = HashMap::new();
         if include_sample_values {
-            if let Some(sql) = build_sampling_sql(&tables, &table_columns) {
+            let builder = crate::sql_builder::for_driver(capabilities);
+            if let Some(sql) =
+                build_sampling_sql(&tables, &table_columns, builder.as_ref(), &capabilities.id)
+            {
                 // Session-level timeout as its own statement (SET LOCAL needs a
                 // transaction and multi-statement strings are rejected outright).
-                let _ = client.execute("SET statement_timeout = 3000").await;
-                let query_result = client.execute(&sql).await;
-                let _ = client.execute("SET statement_timeout = 0").await;
+                let _ = client
+                    .execute(connection_id, "SET statement_timeout = 3000")
+                    .await;
+                let query_result = client.execute(connection_id, &sql).await;
+                let _ = client
+                    .execute(connection_id, "SET statement_timeout = 0")
+                    .await;
                 match query_result {
                     Ok(res) => {
                         for row in &res.rows {
                             if let (Some(tid_f), Some(col_str), Some(val_str)) =
                                 (row[0].as_i64(), row[1].as_str(), row[2].as_str())
                             {
-                                let truncated = if val_str.len() > 200 {
-                                    format!("{}...", &val_str[..197])
-                                } else {
-                                    val_str.to_string()
-                                };
+                                let truncated = truncate_sample_value(val_str);
                                 sample_values
                                     .entry((tid_f as usize, col_str.to_string()))
                                     .or_default()
@@ -357,14 +358,25 @@ impl SchemaIndexer {
             }
         }
 
-        // Step 5: fetch FK constraints using the corrected shared helper
-        let fk_rows = crate::ai::tools::objects::fetch_all_fk_constraints(client).await?;
+        // Step 5: fetch FK constraints through the catalog seam — the driver
+        // answers with normalized ForeignKey { from: ColumnPath, to: ColumnPath }.
+        let fk_rows = client.list_foreign_keys(connection_id).await?;
         let mut fk_edges: Vec<FkEdge> = Vec::new();
         let mut table_adjacency: HashMap<usize, Vec<usize>> = HashMap::new();
 
-        for (fs, ft, fc, ts, tt, tc) in &fk_rows {
-            if let Some(&from_cid) = col_lookup.get(&(fs.clone(), ft.clone(), fc.clone())) {
-                if let Some(&to_cid) = col_lookup.get(&(ts.clone(), tt.clone(), tc.clone())) {
+        for fk in &fk_rows {
+            let from_key = (
+                fk.from.namespace.join("."),
+                fk.from.table.clone(),
+                fk.from.column.clone(),
+            );
+            let to_key = (
+                fk.to.namespace.join("."),
+                fk.to.table.clone(),
+                fk.to.column.clone(),
+            );
+            if let Some(&from_cid) = col_lookup.get(&from_key) {
+                if let Some(&to_cid) = col_lookup.get(&to_key) {
                     let from_tid = columns[from_cid].table_id;
                     let to_tid = columns[to_cid].table_id;
                     fk_edges.push(FkEdge {
@@ -450,8 +462,14 @@ impl SchemaIndexer {
 
 #[cfg(test)]
 mod sampling_sql_tests {
+    use crate::sql_builder::PostgresSqlBuilder;
+
     use super::*;
     use std::collections::HashMap;
+
+    fn pg() -> PostgresSqlBuilder {
+        PostgresSqlBuilder
+    }
 
     fn fixture() -> (Vec<TableEntry>, TableColumns) {
         let tables = vec![TableEntry {
@@ -501,7 +519,8 @@ mod sampling_sql_tests {
     #[test]
     fn sampling_sql_is_a_single_statement() {
         let (tables, cols) = fixture();
-        let sql = build_sampling_sql(&tables, &cols).expect("has sampleable columns");
+        let sql =
+            build_sampling_sql(&tables, &cols, &pg(), "postgres").expect("has sampleable columns");
         assert!(
             !sql.contains(';'),
             "must be ONE statement — multi-statement strings \
@@ -516,7 +535,7 @@ mod sampling_sql_tests {
     #[test]
     fn sampling_sql_bounds_the_scan_before_grouping() {
         let (tables, cols) = fixture();
-        let sql = build_sampling_sql(&tables, &cols).unwrap();
+        let sql = build_sampling_sql(&tables, &cols, &pg(), "postgres").unwrap();
         assert!(
             sql.contains("LIMIT 1000"),
             "inner scan must be bounded so huge tables \
@@ -531,7 +550,7 @@ mod sampling_sql_tests {
     #[test]
     fn sampling_sql_skips_pk_and_unsampleable_types() {
         let (tables, cols) = fixture();
-        let sql = build_sampling_sql(&tables, &cols).unwrap();
+        let sql = build_sampling_sql(&tables, &cols, &pg(), "postgres").unwrap();
         assert!(sql.contains("\"status\""), "text column is sampleable");
         assert!(!sql.contains("\"id\""), "PK columns are skipped");
         assert!(!sql.contains("\"blob\""), "bytea columns are skipped");
@@ -540,7 +559,7 @@ mod sampling_sql_tests {
     #[test]
     fn jsonb_object_columns_are_sampled_via_each_text() {
         let (tables, cols) = fixture();
-        let sql = build_sampling_sql(&tables, &cols).unwrap();
+        let sql = build_sampling_sql(&tables, &cols, &pg(), "postgres").unwrap();
         assert!(
             sql.contains("jsonb_each_text"),
             "jsonb values must be grounded: {sql}"
@@ -550,6 +569,25 @@ mod sampling_sql_tests {
             "non-object jsonb would crash jsonb_each_text — must be guarded: {sql}"
         );
         assert!(!sql.contains(';'), "still a single statement");
+    }
+
+    #[test]
+    fn jsonb_sampling_is_skipped_for_non_postgres_drivers() {
+        // jsonb_each_text / jsonb_typeof are PostgreSQL functions. A driver
+        // without them must not emit them — it simply gets fewer sample values,
+        // which degrades retrieval quality without breaking it.
+        let (tables, cols) = fixture();
+        let sql = build_sampling_sql(&tables, &cols, &pg(), "duckdb")
+            .expect("non-jsonb columns are still sampleable");
+        assert!(
+            !sql.contains("jsonb_each_text"),
+            "jsonb functions must not be emitted for a non-postgres driver: {sql}"
+        );
+        assert!(!sql.contains("jsonb_typeof"), "{sql}");
+        assert!(
+            sql.contains("\"status\""),
+            "text columns still sampled: {sql}"
+        );
     }
 
     #[test]
@@ -572,7 +610,7 @@ mod sampling_sql_tests {
                 false,
             )],
         );
-        assert!(build_sampling_sql(&tables, &cols).is_none());
+        assert!(build_sampling_sql(&tables, &cols, &pg(), "postgres").is_none());
     }
 
     #[test]
@@ -595,7 +633,7 @@ mod sampling_sql_tests {
                 false,
             )],
         );
-        let sql = build_sampling_sql(&tables, &cols).unwrap();
+        let sql = build_sampling_sql(&tables, &cols, &pg(), "postgres").unwrap();
         assert!(
             sql.contains("weird\"\"tbl"),
             "double quotes doubled in identifiers"
@@ -641,6 +679,19 @@ mod partition_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_multibyte_sample_value_never_panics() {
+        let val = "é".repeat(3000);
+        let cut = truncate_sample_value(&val);
+        assert!(std::str::from_utf8(cut.as_bytes()).is_ok());
+        assert!(cut.len() <= 200, "197 bytes plus '...' suffix: {cut}");
+    }
+
+    #[test]
+    fn short_sample_value_passes_through_untouched() {
+        assert_eq!(truncate_sample_value("CAN"), "CAN");
+    }
 
     fn make_col_graph(columns: Vec<ColumnEntry>, fk_edges: Vec<FkEdge>) -> SchemaGraph {
         let mut tables = Vec::new();
@@ -887,5 +938,120 @@ mod tests {
              This proves join_all-style concurrency is available and fast in this codebase's \
              async runtime; Step 3 applies the same pattern to the real per-table queries."
         );
+    }
+
+    use lucent_protocol::{
+        ColumnDetail, ForeignKeyTarget, ObjectDetail, ObjectKind, ObjectRef, ObjectSummary,
+        PartitionInfo,
+    };
+
+    fn summary(name: &str, est: Option<u64>) -> ObjectSummary {
+        ObjectSummary {
+            reference: ObjectRef {
+                namespace: vec!["public".into()],
+                name: name.into(),
+                kind: ObjectKind::Table,
+            },
+            est_rows: est,
+            comment: None,
+            partition: None,
+            is_partition_child: false,
+        }
+    }
+
+    fn detail(name: &str, columns: Vec<ColumnDetail>) -> ObjectDetail {
+        ObjectDetail {
+            reference: ObjectRef {
+                namespace: vec!["public".into()],
+                name: name.into(),
+                kind: ObjectKind::Table,
+            },
+            columns,
+            comment: None,
+        }
+    }
+
+    fn column(name: &str, ty: &str, pk: bool) -> ColumnDetail {
+        ColumnDetail {
+            name: name.into(),
+            type_name: ty.into(),
+            nullable: !pk,
+            is_primary_key: pk,
+            ordinal: 1,
+            default: None,
+            comment: None,
+            foreign_key: None,
+        }
+    }
+
+    #[test]
+    fn builds_table_entries_from_summaries_preserving_estimates() {
+        let (tables, _) = super::harvest_to_entries(
+            vec![summary("users", Some(4200)), summary("orders", None)],
+            vec![],
+        );
+        let users = tables.iter().find(|t| t.name == "users").unwrap();
+        assert_eq!(users.row_count_estimate, 4200);
+        // Unknown collapses to 0 for this field's existing i64 contract.
+        let orders = tables.iter().find(|t| t.name == "orders").unwrap();
+        assert_eq!(orders.row_count_estimate, 0);
+    }
+
+    #[test]
+    fn partition_children_are_excluded_and_parents_keep_their_annotation() {
+        let parent = ObjectSummary {
+            partition: Some(PartitionInfo {
+                key: Some("RANGE (created_at)".into()),
+                child_count: 84,
+            }),
+            ..summary("events", Some(1))
+        };
+        let child = ObjectSummary {
+            is_partition_child: true,
+            ..summary("events_2026", Some(1))
+        };
+        let (tables, _) = super::harvest_to_entries(vec![parent, child], vec![]);
+        assert_eq!(tables.len(), 1, "children must not be indexed: {tables:?}");
+        assert_eq!(
+            tables[0].partition_info.as_deref(),
+            Some("PARTITIONED BY RANGE (created_at) — 84 partitions")
+        );
+    }
+
+    #[test]
+    fn columns_attach_to_their_table_with_pk_and_fk_intact() {
+        let mut user_id = column("user_id", "bigint", false);
+        user_id.foreign_key = Some(ForeignKeyTarget {
+            namespace: vec!["public".into()],
+            table: "users".into(),
+            column: "id".into(),
+        });
+
+        let (tables, columns) = super::harvest_to_entries(
+            vec![summary("orders", Some(1))],
+            vec![detail(
+                "orders",
+                vec![column("id", "bigint", true), user_id],
+            )],
+        );
+
+        assert_eq!(tables.len(), 1);
+        let cols = columns.get(&tables[0].id).expect("orders has columns");
+        assert_eq!(cols.len(), 2);
+        // (name, data_type, schema, table, is_pk)
+        assert!(cols.iter().any(|c| c.0 == "id" && c.4));
+        assert!(cols.iter().any(|c| c.0 == "user_id" && !c.4));
+    }
+
+    #[test]
+    fn a_column_whose_table_was_filtered_out_is_dropped_not_orphaned() {
+        // DescribeObjects could return a table that ListAllObjects excluded
+        // (a partition child). Its columns must not create a phantom table.
+        let (tables, columns) = super::harvest_to_entries(
+            vec![],
+            vec![detail("ghost", vec![column("x", "int", false)])],
+        );
+        assert!(tables.is_empty());
+        assert!(columns.is_empty());
     }
 }

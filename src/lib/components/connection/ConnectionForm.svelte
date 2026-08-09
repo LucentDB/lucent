@@ -17,51 +17,37 @@
   // ─── Form state ───────────────────────────────────────────────────────
 
   let name = $state(profile?.name ?? '');
-  let host = $state(profile?.host ?? '127.0.0.1');
-  let port = $state(String(profile?.port ?? 5432));
-  let user = $state(profile?.user ?? 'postgres');
+  let driver = $state(profile?.driver ?? 'postgres');
+  let params = $state<Record<string, string>>({ ...(profile?.params ?? {}) });
+  let alias = $state(profile?.alias ?? '');
   let password = $state('');
-  let database = $state(profile?.database ?? 'postgres');
-  let sslMode = $state(profile?.sslMode ?? 'prefer');
   let group = $state(profile?.group ?? '');
   let color = $state(profile?.color ?? '#3b82f6');
+  let showPassword = $state(false);
 
   let isNew = $derived(!profile);
   let saving = $state(false);
+  let testing = $state(false);
 
-  // ─── SSH tunnel fields ───────────────────────────────────────────────
-
-  // SSH tunneling is configured here but never wired into connect() on the
-  // backend, so the UI is hidden to avoid asserting an unhonored capability.
-  // Re-enable once the tunnel is actually implemented.
-  // See docs/superpowers/specs/2026-07-19-lucent-trust-quality-pass-design.md
-  const SSH_TUNNEL_ENABLED = false;
-
-  let useSsh = $state(!!profile?.sshTunnelId);
-  let sshHost = $state('');
-  let sshPort = $state('22');
-  let sshUser = $state('');
-  let sshAuthMethod = $state<'password' | 'key'>('password');
-  let sshKeyPath = $state('');
-  let sshPassword = $state('');
-
-  // ─── Sync form fields when profile changes ───────────────────────────
-  $effect(() => {
-    if (profile) {
-      name = profile.name ?? '';
-      host = profile.host ?? '127.0.0.1';
-      port = String(profile.port ?? 5432);
-      user = profile.user ?? 'postgres';
-      database = profile.database ?? 'postgres';
-      sslMode = profile.sslMode ?? 'prefer';
-      group = profile.group ?? '';
-      color = profile.color ?? '#3b82f6';
-      useSsh = !!profile.sshTunnelId;
-      // SSH config will be loaded separately when editing
-    }
-  });
   let testResult = $state<string | null>(null);
   let testError = $state<string | null>(null);
+
+  /** Field descriptors for the selected driver — drives the form's fields. */
+  const descriptor = $derived(connections.driverFor(driver));
+
+  /** Seed defaults for fields this driver defines but the profile lacks. */
+  $effect(() => {
+    if (!descriptor) return;
+    const next = { ...params };
+    let changed = false;
+    for (const field of descriptor.fields) {
+      if (next[field.key] === undefined && field.default !== null) {
+        next[field.key] = field.default;
+        changed = true;
+      }
+    }
+    if (changed) params = next;
+  });
 
   // ─── Color palette ────────────────────────────────────────────────────
 
@@ -80,56 +66,30 @@
     '#64748b',
   ];
 
-  // ─── Derived ─────────────────────────────────────────────────────────
-
-  let sshLabel = $derived(`Tunnel to ${host}`);
-  let sshConfigId = $derived(
-    profile?.sshTunnelId ?? (useSsh ? `ssh-${profile?.id ?? 'new'}` : null),
-  );
+  // ─── Sync form fields when profile changes ───────────────────────────
+  $effect(() => {
+    if (profile) {
+      name = profile.name ?? '';
+      driver = profile.driver ?? 'postgres';
+      params = { ...(profile.params ?? {}) };
+      alias = profile.alias ?? '';
+      group = profile.group ?? '';
+      color = profile.color ?? '#3b82f6';
+    }
+  });
 
   // ─── Actions ──────────────────────────────────────────────────────────
 
   async function handleSave() {
     saving = true;
     try {
-      // Handle SSH config save first. Preserve any stored sshTunnelId on a
-      // round-trip even while the UI is disabled, so existing profiles aren't
-      // silently stripped of their tunnel reference.
-      let sshTunnelId = profile?.sshTunnelId ?? null;
-      if (useSsh && SSH_TUNNEL_ENABLED) {
-        const sshId =
-          sshTunnelId ?? `ssh-${profile?.id ?? crypto.randomUUID()}`;
-        const sshConfig = {
-          id: sshId,
-          label: sshLabel,
-          host: sshHost || host,
-          port: parseInt(sshPort, 10) || 22,
-          user: sshUser || user,
-          authMethod:
-            sshAuthMethod === 'key'
-              ? { method: 'key', keyPath: sshKeyPath }
-              : { method: 'password' },
-        };
-        // Save SSH config via IPC (best-effort)
-        try {
-          const { saveSshConfig } = await import('../../ipc/client.js');
-          await saveSshConfig(sshConfig, sshPassword || null);
-        } catch (e) {
-          console.warn('Failed to save SSH config:', e);
-        }
-        sshTunnelId = sshId;
-      }
-
       const p: ConnectionProfile = {
         id: profile?.id ?? crypto.randomUUID(),
         name: name || 'Untitled',
-        driver: 'postgres',
-        host,
-        port: parseInt(port, 10) || 5432,
-        user,
-        database,
-        sslMode: sslMode as ConnectionProfile['sslMode'],
-        sshTunnelId,
+        driver,
+        alias: alias.trim() || null,
+        params: { ...params },
+        sshTunnelId: profile?.sshTunnelId ?? null,
         group: group || null,
         color: color || null,
         icon: profile?.icon ?? null,
@@ -144,22 +104,60 @@
   }
 
   async function handleTest() {
-    if (!profile?.id) return;
+    testing = true;
     testResult = null;
     testError = null;
     try {
-      const result = await connections.testConnection(profile.id);
-      if (result.success) {
-        testResult = result.message;
+      if (profile?.id) {
+        const result = await connections.testConnection(profile.id);
+        if (result.success) {
+          testResult = result.message || 'Connection successful';
+        } else {
+          testError = result.message;
+        }
       } else {
-        testError = result.message;
+        const tempId = `temp-test-${crypto.randomUUID()}`;
+        const tempProfile: ConnectionProfile = {
+          id: tempId,
+          name: name || 'Test',
+          driver,
+          alias: null,
+          params: { ...params },
+          sshTunnelId: null,
+          group: group || null,
+          color: color || null,
+          icon: null,
+          lastUsed: null,
+          createdAt: '',
+          updatedAt: '',
+        };
+        // Use direct invoke so connections.profiles store is NOT mutated and NO card flashes at top of UI
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('save_connection', {
+          profile: tempProfile,
+          password: password || null,
+        });
+        try {
+          const result = await invoke<{ success: boolean; message: string }>(
+            'test_connection',
+            { id: tempId },
+          );
+          if (result.success) {
+            testResult = 'Connection successful';
+          } else {
+            testError = result.message;
+          }
+        } finally {
+          await invoke('delete_connection', { id: tempId });
+        }
       }
     } catch (e: any) {
       testError = typeof e === 'string' ? e : (e?.message ?? 'Test failed');
+    } finally {
+      testing = false;
     }
   }
 
-  // Reset test state when profile changes
   $effect(() => {
     if (profile?.id) {
       testResult = null;
@@ -175,178 +173,222 @@
     handleSave();
   }}
 >
-  <!-- Name -->
-  <label class="field">
-    <span class="label-text">Name</span>
-    <input type="text" bind:value={name} placeholder="My Database" required />
-  </label>
+  <div class="form-card">
+    <div class="card-section">
+      <h3 class="section-title">Database Credentials</h3>
 
-  <div class="field-row">
-    <label class="field flex-1">
-      <span class="label-text">Host</span>
-      <input type="text" bind:value={host} placeholder="localhost" />
-    </label>
-    <label class="field port-field">
-      <span class="label-text">Port</span>
-      <input
-        type="number"
-        bind:value={port}
-        placeholder="5432"
-        min="1"
-        max="65535"
-      />
-    </label>
-  </div>
-
-  <div class="field-row">
-    <label class="field flex-1">
-      <span class="label-text">User</span>
-      <input type="text" bind:value={user} placeholder="postgres" />
-    </label>
-    <label class="field flex-1">
-      <span class="label-text">Password</span>
-      <input
-        type="password"
-        bind:value={password}
-        placeholder={isNew ? '' : 'Leave blank to keep current'}
-      />
-    </label>
-  </div>
-
-  <div class="field-row">
-    <label class="field flex-2">
-      <span class="label-text">Database</span>
-      <input type="text" bind:value={database} placeholder="postgres" />
-    </label>
-    <label class="field">
-      <span class="label-text">SSL Mode</span>
-      <select bind:value={sslMode}>
-        <option value="disable">Disable</option>
-        <option value="prefer">Prefer</option>
-        <option value="require">Require</option>
-      </select>
-    </label>
-  </div>
-
-  <!-- Group -->
-  <label class="field">
-    <span class="label-text">Group</span>
-    <input
-      type="text"
-      bind:value={group}
-      placeholder="e.g. Production, Development"
-    />
-  </label>
-
-  <!-- Color -->
-  <label class="field">
-    <span class="label-text">Color</span>
-    <div class="color-picker">
-      {#each colorPalette as c}
-        <button
-          type="button"
-          class="color-swatch"
-          class:selected={color === c}
-          style="background: {c}"
-          onclick={() => (color = c)}
-          title={c}
-        ></button>
-      {/each}
-    </div>
-  </label>
-
-  <!-- SSH Tunnel — hidden until the backend actually wires the tunnel. -->
-  {#if SSH_TUNNEL_ENABLED}
-    <div class="ssh-section">
-      <label class="toggle-field">
-        <input type="checkbox" bind:checked={useSsh} />
-        <span class="toggle-label">Use SSH Tunnel</span>
+      <!-- Name -->
+      <label class="field">
+        <span class="label-text">Connection Name</span>
+        <div class="input-wrapper">
+          <svg
+            class="field-icon"
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <path
+              d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"
+            />
+            <line x1="7" y1="7" x2="7.01" y2="7" />
+          </svg>
+          <input
+            type="text"
+            bind:value={name}
+            placeholder="My Database"
+            required
+          />
+        </div>
       </label>
 
-      {#if useSsh}
-        <div class="ssh-fields">
-          <div class="field-row">
-            <label class="field flex-1">
-              <span class="label-text">SSH Host</span>
-              <input type="text" bind:value={sshHost} placeholder={host} />
-            </label>
-            <label class="field port-field">
-              <span class="label-text">SSH Port</span>
-              <input
-                type="number"
-                bind:value={sshPort}
-                placeholder="22"
-                min="1"
-                max="65535"
-              />
-            </label>
-          </div>
-          <div class="field-row">
-            <label class="field flex-1">
-              <span class="label-text">SSH User</span>
-              <input type="text" bind:value={sshUser} placeholder={user} />
-            </label>
-            <label class="field flex-1">
-              <span class="label-text">Auth Method</span>
-              <select bind:value={sshAuthMethod}>
-                <option value="password">Password</option>
-                <option value="key">Key File</option>
+      <!-- Driver -->
+      <label class="field">
+        <span class="label-text">Driver</span>
+        <select bind:value={driver} class="styled-select">
+          {#each connections.drivers as d (d.id)}
+            <option value={d.id}>{d.displayName}</option>
+          {/each}
+        </select>
+      </label>
+
+      <!-- Driver-defined connection parameters -->
+      {#if descriptor}
+        {#each descriptor.fields as field (field.key)}
+          <label class="field" for={`field-${field.key}`}>
+            <span class="label-text">{field.label}</span>
+            {#if field.kind === 'select'}
+              <select
+                id={`field-${field.key}`}
+                class="styled-select"
+                bind:value={params[field.key]}
+              >
+                {#each field.options as option (option)}
+                  <option value={option}>{option}</option>
+                {/each}
               </select>
-            </label>
-          </div>
-          {#if sshAuthMethod === 'password'}
-            <label class="field">
-              <span class="label-text">SSH Password</span>
+            {:else}
               <input
-                type="password"
-                bind:value={sshPassword}
-                placeholder="SSH password"
+                id={`field-${field.key}`}
+                class="plain-input"
+                type={field.kind === 'number' ? 'number' : 'text'}
+                placeholder={field.placeholder ?? ''}
+                required={field.required}
+                bind:value={params[field.key]}
               />
-            </label>
-          {:else}
-            <label class="field">
-              <span class="label-text">Key File Path</span>
-              <input
-                type="text"
-                bind:value={sshKeyPath}
-                placeholder="/home/user/.ssh/id_rsa"
-              />
-            </label>
-            <label class="field">
-              <span class="label-text">Passphrase (optional)</span>
-              <input
-                type="password"
-                bind:value={sshPassword}
-                placeholder="Key passphrase"
-              />
-            </label>
-          {/if}
-        </div>
+            {/if}
+          </label>
+        {/each}
       {/if}
+
+      <!-- Password (keychain secret — only drivers that use one) -->
+      {#if descriptor?.hasSecret}
+        <label class="field">
+          <span class="label-text">Password</span>
+          <div class="input-wrapper">
+            <input
+              type={showPassword ? 'text' : 'password'}
+              bind:value={password}
+              placeholder={isNew ? 'Password' : 'Leave blank to keep'}
+            />
+            <button
+              type="button"
+              class="eye-btn"
+              onclick={() => (showPassword = !showPassword)}
+              title={showPassword ? 'Hide password' : 'Show password'}
+            >
+              {#if showPassword}
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <path
+                    d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"
+                  />
+                  <line x1="1" y1="1" x2="23" y2="23" />
+                </svg>
+              {:else}
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              {/if}
+            </button>
+          </div>
+        </label>
+      {/if}
+
+      <!-- Alias — the @mention handle the AI uses to address this connection -->
+      <label class="field">
+        <span class="label-text">Alias (@mention)</span>
+        <input
+          type="text"
+          class="plain-input"
+          bind:value={alias}
+          placeholder="e.g. prod-warehouse"
+        />
+      </label>
     </div>
-  {/if}
+
+    <div class="card-section border-top">
+      <h3 class="section-title">Environment & Tag</h3>
+      <div class="field-row align-center">
+        <label class="field flex-1">
+          <span class="label-text">Group Tag</span>
+          <input
+            type="text"
+            bind:value={group}
+            placeholder="e.g. Production, Development"
+            class="plain-input"
+          />
+        </label>
+        <label class="field flex-1">
+          <span class="label-text">Badge Color</span>
+          <div class="color-picker">
+            {#each colorPalette as c}
+              <button
+                type="button"
+                class="color-swatch"
+                class:selected={color === c}
+                style="background: {c}"
+                onclick={() => (color = c)}
+                title={c}
+              ></button>
+            {/each}
+          </div>
+        </label>
+      </div>
+    </div>
+  </div>
 
   <!-- Actions -->
   <div class="form-actions">
     <div class="test-area">
-      {#if profile?.id}
-        <button type="button" class="test-btn" onclick={handleTest}>
+      <button
+        type="button"
+        class="test-btn"
+        class:loading={testing}
+        onclick={handleTest}
+        disabled={testing}
+      >
+        {#if testing}
+          <span class="spinner-sm"></span>
+          Testing...
+        {:else}
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+            <polyline points="22 4 12 14.01 9 11.01" />
+          </svg>
           Test Connection
-        </button>
-      {/if}
+        {/if}
+      </button>
       {#if testResult}
-        <span class="test-success">{testResult}</span>
+        <span class="test-badge test-success">
+          ✓ {testResult}
+        </span>
       {/if}
       {#if testError}
-        <span class="test-error">{testError}</span>
+        <span class="test-badge test-error">
+          ✕ {testError}
+        </span>
       {/if}
     </div>
+
     <div class="save-area">
-      <button type="button" class="cancel-btn" onclick={() => onCancel?.()}
-        >Cancel</button
-      >
+      {#if onCancel}
+        <button type="button" class="cancel-btn" onclick={() => onCancel?.()}>
+          Cancel
+        </button>
+      {/if}
       <button type="submit" class="save-btn" disabled={saving}>
-        {saving ? 'Saving...' : isNew ? 'Create' : 'Save'}
+        <span
+          >{saving
+            ? 'Saving...'
+            : isNew
+              ? 'Connect & Save'
+              : 'Save Connection'}</span
+        >
+        <span class="btn-shortcut">⌘↵</span>
       </button>
     </div>
   </div>
@@ -356,106 +398,146 @@
   .connection-form {
     display: flex;
     flex-direction: column;
+    gap: 16px;
+  }
+  .form-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-card, 0 2px 8px rgba(0, 0, 0, 0.06));
+    overflow: hidden;
+  }
+  .card-section {
+    padding: 18px 20px;
+    display: flex;
+    flex-direction: column;
     gap: 14px;
+  }
+  .card-section.border-top {
+    border-top: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg-surface) 95%, var(--bg-elevated));
+  }
+  .section-title {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    margin: 0 0 2px 0;
   }
   .field {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 5px;
   }
   .field-row {
     display: flex;
     gap: 12px;
+    align-items: flex-start;
+  }
+  .field-row.align-center {
+    align-items: center;
   }
   .flex-1 {
     flex: 1;
-  }
-  .flex-2 {
-    flex: 2;
-  }
-  .port-field {
-    width: 100px;
   }
   .label-text {
     font-size: 12px;
     font-weight: 500;
     color: var(--text-secondary);
   }
-  .field input,
-  .field select {
+  .input-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
     width: 100%;
-    padding: 7px 10px;
+  }
+  .field-icon {
+    position: absolute;
+    left: 10px;
+    color: var(--text-muted);
+    pointer-events: none;
+    flex-shrink: 0;
+  }
+
+  /* Consistent 36px control height across all inputs & dropdowns */
+  .input-wrapper input,
+  .plain-input,
+  .styled-select {
+    width: 100%;
+    height: 36px;
+    padding: 0 10px 0 32px;
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: var(--bg-input);
     color: var(--text);
     font-size: 13px;
     outline: none;
-    transition: border-color 0.12s;
+    transition:
+      border-color 0.15s ease,
+      box-shadow 0.15s ease;
     box-sizing: border-box;
+    display: flex;
+    align-items: center;
   }
-  .field input:focus,
-  .field select:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px var(--accent-soft);
+  .plain-input {
+    padding: 0 10px;
   }
-  .field select {
+  .styled-select {
+    padding: 0 10px;
     cursor: pointer;
+  }
+  .input-wrapper input:focus,
+  .plain-input:focus,
+  .styled-select:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent);
+  }
+  .eye-btn {
+    position: absolute;
+    right: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    padding: 0;
+    transition: color 0.12s;
+  }
+  .eye-btn:hover {
+    color: var(--text);
   }
   .color-picker {
     display: flex;
     gap: 6px;
     flex-wrap: wrap;
-    padding: 4px 0;
+    align-items: center;
+    height: 36px;
+    padding: 0;
   }
   .color-swatch {
-    width: 28px;
-    height: 28px;
+    width: 22px;
+    height: 22px;
     border-radius: 50%;
     border: 2px solid transparent;
     cursor: pointer;
     transition:
-      transform 0.1s,
-      border-color 0.1s;
+      transform 0.12s ease,
+      border-color 0.12s ease;
     padding: 0;
   }
   .color-swatch:hover {
-    transform: scale(1.15);
+    transform: scale(1.2);
   }
   .color-swatch.selected {
     border-color: var(--text);
-    transform: scale(1.15);
-    box-shadow: 0 0 0 2px white;
-  }
-
-  /* ── SSH Tunnel ───────────────────────────── */
-  .ssh-section {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    padding: 12px;
-    background: var(--bg-surface);
-  }
-  .toggle-field {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    cursor: pointer;
-  }
-  .toggle-field input[type='checkbox'] {
-    accent-color: var(--accent);
-  }
-  .toggle-label {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text);
-  }
-  .ssh-fields {
-    margin-top: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    padding-top: 12px;
-    border-top: 1px solid var(--border);
+    transform: scale(1.2);
+    box-shadow: 0 0 0 2px var(--bg-surface);
   }
 
   .form-actions {
@@ -463,8 +545,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding-top: 8px;
-    border-top: 1px solid var(--border);
+    padding-top: 4px;
   }
   .test-area {
     display: flex;
@@ -472,58 +553,113 @@
     gap: 10px;
     flex-wrap: wrap;
   }
-  .test-btn {
-    padding: 6px 14px;
-    border: 1px solid var(--border);
+
+  /* Consistent 36px height across all buttons & status badges */
+  .test-btn,
+  .cancel-btn,
+  .save-btn,
+  .test-badge {
+    height: 36px;
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     border-radius: var(--radius-md);
-    background: var(--bg-surface);
-    color: var(--text);
     font-size: 13px;
-    cursor: pointer;
+    font-weight: 500;
   }
-  .test-btn:hover {
+
+  .test-btn {
+    gap: 6px;
+    padding: 0 14px;
+    border: 1px solid var(--border);
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition:
+      background 0.12s,
+      color 0.12s,
+      border-color 0.12s;
+  }
+  .test-btn:hover:not(:disabled) {
     background: var(--bg-hover);
+    color: var(--text);
+    border-color: var(--border-hover, var(--border));
+  }
+  .test-btn:disabled {
+    opacity: 0.6;
+  }
+  .spinner-sm {
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .test-badge {
+    padding: 0 12px;
   }
   .test-success {
-    font-size: 12px;
     color: var(--success, #22c55e);
+    background: color-mix(in srgb, var(--success, #22c55e) 12%, transparent);
   }
   .test-error {
-    font-size: 12px;
     color: var(--error, #ef4444);
+    background: color-mix(in srgb, var(--error, #ef4444) 12%, transparent);
   }
   .save-area {
     display: flex;
-    gap: 8px;
+    gap: 10px;
     align-items: center;
   }
   .cancel-btn {
-    padding: 7px 14px;
+    padding: 0 16px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-md);
     background: var(--bg-surface);
-    color: var(--text);
-    font-size: 13px;
+    color: var(--text-secondary);
     cursor: pointer;
   }
   .cancel-btn:hover {
     background: var(--bg-hover);
+    color: var(--text);
   }
   .save-btn {
-    padding: 7px 20px;
+    gap: 8px;
+    padding: 0 18px;
     border: none;
-    border-radius: var(--radius-md);
     background: var(--accent);
     color: #fff;
-    font-size: 13px;
     font-weight: 600;
     cursor: pointer;
-    transition: background 0.12s;
+    transition:
+      background 0.15s ease,
+      transform 0.1s ease;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
   }
   .save-btn:hover:not(:disabled) {
     background: var(--accent-hover);
   }
   .save-btn:disabled {
     opacity: 0.6;
+  }
+
+  /* Clean readymade text badge for keyboard shortcut */
+  .btn-shortcut {
+    font-size: 11px;
+    font-family:
+      -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: rgba(255, 255, 255, 0.2);
+    color: #fff;
+    padding: 2px 6px;
+    border-radius: 4px;
+    line-height: 1;
+    font-weight: 500;
+    letter-spacing: 0.02em;
   }
 </style>

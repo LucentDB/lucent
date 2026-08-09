@@ -22,3 +22,25 @@ export function renderMarkdown(text: string): string {
       .replace(/>/g, '&gt;');
   }
 }
+
+/**
+ * Matches a GFM task marker only at the start of a list item, so a literal "[x]"
+ * in prose is never mistaken for a checkbox. Kept in source order, which is the
+ * order `marked` emits the corresponding inputs.
+ */
+const TASK_MARKER_RE = /^([ \t]*(?:[-*+]|\d+[.)])[ \t]+)\[([ xX])\]/gm;
+
+/** Flips the Nth task marker in `source`. Returns source unchanged if N is out of range. */
+export function toggleTaskAtIndex(
+  source: string,
+  index: number,
+  checked: boolean,
+): string {
+  let seen = 0;
+  return source.replace(TASK_MARKER_RE, (match, prefix) => {
+    const isTarget = seen === index;
+    seen += 1;
+    if (!isTarget) return match;
+    return `${prefix}[${checked ? 'x' : ' '}]`;
+  });
+}

@@ -3,6 +3,22 @@ use std::time::Instant;
 
 use super::{AiToolContext, ToolError, ToolOutput};
 use crate::ai::guard;
+use crate::ai::truncate_utf8;
+
+/// Append the read-only enforcement notice to a model-visible tool summary.
+///
+/// Only when the guarantee is weakened. Adding "read-only is enforced" text to
+/// the strong case would train the model to expect a sentence that is normally
+/// absent, and its absence is exactly the signal we want to preserve.
+pub(crate) fn append_enforcement_notice(
+    summary: String,
+    readonly: lucent_protocol::ReadOnlyMode,
+) -> String {
+    match readonly.disclosure() {
+        Some(note) => format!("{summary}\n\n⚠️ {note}"),
+        None => summary,
+    }
+}
 
 /// Extract the existing LIMIT value from a SQL statement, if present and trailing.
 /// Returns `Some(n)` if a trailing `LIMIT n` (optionally followed by `OFFSET m`)
@@ -78,7 +94,7 @@ fn build_text_summary(
     truncated: bool,
 ) -> String {
     let sql_preview = if sql.len() > 120 {
-        format!("{}...", &sql[..117])
+        format!("{}...", truncate_utf8(sql, 117))
     } else {
         sql.to_string()
     };
@@ -166,44 +182,47 @@ impl RunReadonlyQuery {
 
         log::info!("Tool 'run_readonly_query' called — sql={sql:?}");
 
-        // Layer 1: syntactic guard
-        guard::validate_readonly(sql).map_err(|e| {
+        let capabilities = self
+            .ctx
+            .capabilities
+            .as_ref()
+            .ok_or(ToolError::NotConnected)?;
+
+        // Layer 1: syntactic guard, in the connection's own dialect.
+        guard::validate_readonly(sql, capabilities.sql_dialect).map_err(|e| {
             log::warn!("Read-only guard rejected: {e}");
             ToolError::SqlValidation(e.to_string())
         })?;
 
         let row_limit = self.ctx.config.row_limit as usize;
-
-        let mut db = self.ctx.db.lock().await;
-        let client = db.as_mut().ok_or(ToolError::NotConnected)?;
-
-        // Layer 2: READ ONLY transaction — guards against stored-function side effects
-        client
-            .execute("BEGIN")
+        let conn_id = self.ctx.connection_id.ok_or(ToolError::NotConnected)?;
+        let client = self
+            .ctx
+            .db
+            .lock()
             .await
-            .map_err(ToolError::Execution)?;
-        client
-            .execute("SET TRANSACTION READ ONLY")
-            .await
-            .map_err(ToolError::Execution)?;
+            .clone()
+            .ok_or(ToolError::NotConnected)?;
 
-        // Bound runaway queries. SET LOCAL is valid here — we are inside an
-        // explicit transaction — and reverts automatically at ROLLBACK.
+        // Layer 2: the strongest read-only scope this engine supports. May be
+        // nothing at all — see the disclosure appended to the summary below.
         let timeout_ms = self.ctx.config.ai_query_timeout_secs.saturating_mul(1000);
-        if timeout_ms > 0 {
-            let _ = client
-                .execute(&format!("SET LOCAL statement_timeout = {timeout_ms}"))
-                .await;
+        let _readonly =
+            crate::readonly::ReadOnlySession::begin(&client, conn_id, capabilities, timeout_ms)
+                .await
+                .map_err(ToolError::Execution)?;
+
+        if let Some(note) = capabilities.readonly.disclosure() {
+            log::warn!(
+                "run_readonly_query on a connection with no engine-enforced read-only: {note}"
+            );
         }
 
         // Apply row cap: keep LLM's LIMIT if it's ≤ limit, cap it otherwise, or add one.
         let limited_sql = apply_limit(sql.trim_end_matches(';'), row_limit);
         log::debug!("Executing (limited): {limited_sql}");
         let start = Instant::now();
-        let query_result = client.execute(&limited_sql).await;
-
-        // Always ROLLBACK — never commit read-only queries
-        let _ = client.execute("ROLLBACK").await;
+        let query_result = client.execute(conn_id, &limited_sql).await;
 
         let result = query_result.map_err(|e| {
             log::error!("Query failed: {e}");
@@ -224,8 +243,13 @@ impl RunReadonlyQuery {
             .collect();
 
         // Build AI-facing summary with readable Markdown preview
-        let mut text_summary =
+        let text_summary =
             build_text_summary(sql, &columns, &result.rows, row_count, elapsed, truncated);
+
+        // Make the model-visible summary disclose a weakened read-only
+        // guarantee. UI-only disclosure leaves the model blind: it would keep
+        // offering to "safely run" queries whose safety it cannot vouch for.
+        let mut text_summary = append_enforcement_notice(text_summary, capabilities.readonly);
 
         // Join lint: warn on non-FK equijoins and time-versioned fan-out —
         // wrong joins return plausible-looking numbers, so the warning matters
@@ -233,7 +257,7 @@ impl RunReadonlyQuery {
         {
             let graph_guard = self.ctx.schema_graph.lock().await;
             if let Some(graph) = graph_guard.as_ref() {
-                for w in crate::ai::sql_lint::lint_sql(graph, sql) {
+                for w in crate::ai::sql_lint::lint_sql(graph, sql, capabilities.sql_dialect) {
                     text_summary.push_str("\n\n");
                     text_summary.push_str(&w);
                 }
@@ -292,26 +316,47 @@ impl PreviewDml {
             return Err(ToolError::SqlValidation("Not a DML statement".into()));
         };
 
-        let table = guard::extract_table_name(sql).unwrap_or_else(|| "unknown".into());
+        let capabilities = self
+            .ctx
+            .capabilities
+            .as_ref()
+            .ok_or(ToolError::NotConnected)?;
+
+        let table = guard::extract_table_name(sql, capabilities.sql_dialect)
+            .unwrap_or_else(|| "unknown".into());
 
         // Blast-radius preflight
         let estimated = if self.ctx.config.enable_blast_radius_check {
-            if let Some(where_clause) = guard::extract_where_for_count(sql) {
+            if let Some(where_clause) =
+                guard::extract_where_for_count(sql, capabilities.sql_dialect)
+            {
                 let count_sql = format!("SELECT count(*) FROM {} WHERE {}", table, where_clause);
-                let mut db = self.ctx.db.lock().await;
-                if let Some(client) = db.as_mut() {
-                    let _ = client.execute("BEGIN").await;
-                    let _ = client.execute("SET TRANSACTION READ ONLY").await;
-                    let result = client.execute(&count_sql).await;
-                    let _ = client.execute("ROLLBACK").await;
-                    result
-                        .ok()
-                        .and_then(|r| {
-                            r.rows
-                                .first()
-                                .and_then(|row| row.first().and_then(|v| v.as_i64()))
-                        })
-                        .map(|n| n as u64)
+                let conn_id = match self.ctx.connection_id {
+                    Some(c) => c,
+                    None => return Err(ToolError::NotConnected),
+                };
+                let client = self.ctx.db.lock().await.clone();
+                if let Some(client) = client {
+                    // The same read-only scope as run_readonly_query. A zero
+                    // timeout emits no timeout statement, and the count is
+                    // best-effort — a failure to open the scope means no
+                    // estimate, not an error.
+                    if let Ok(_readonly) =
+                        crate::readonly::ReadOnlySession::begin(&client, conn_id, capabilities, 0)
+                            .await
+                    {
+                        let result = client.execute(conn_id, &count_sql).await;
+                        result
+                            .ok()
+                            .and_then(|r| {
+                                r.rows
+                                    .first()
+                                    .and_then(|row| row.first().and_then(|v| v.as_i64()))
+                            })
+                            .map(|n| n as u64)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -481,6 +526,50 @@ mod tests {
         assert!(result.contains("LIMIT 500"), "must cap at 500");
         assert!(!result.contains(";"), "must not have trailing semicolons");
     }
+
+    #[test]
+    fn ai_preview_renders_typed_values_as_plain_text() {
+        let columns = vec![
+            crate::ai::events::ColumnMeta {
+                name: "i".into(),
+                data_type: "int8".into(),
+            },
+            crate::ai::events::ColumnMeta {
+                name: "n".into(),
+                data_type: "numeric".into(),
+            },
+        ];
+        let rows = vec![vec![serde_json::json!(42), serde_json::json!("1234.56")]];
+        let summary = build_text_summary("SELECT 1", &columns, &rows, 1, 5, false);
+        assert!(summary.contains("| 42 | 1234.56 |"), "got: {summary}");
+    }
+
+    use lucent_protocol::ReadOnlyMode;
+
+    #[test]
+    fn a_guard_only_connection_warns_inside_the_model_visible_summary() {
+        // UI-only disclosure leaves the model blind: it would keep offering to
+        // "safely run" queries whose safety it cannot vouch for.
+        let summary = super::append_enforcement_notice("2 rows".into(), ReadOnlyMode::GuardOnly);
+        assert!(
+            summary.starts_with("2 rows"),
+            "original summary must survive"
+        );
+        assert!(
+            summary.to_lowercase().contains("not enforced"),
+            "the model must be told plainly: {summary}"
+        );
+    }
+
+    #[test]
+    fn an_engine_enforced_connection_adds_nothing() {
+        let summary =
+            super::append_enforcement_notice("2 rows".into(), ReadOnlyMode::TransactionScoped);
+        assert_eq!(
+            summary, "2 rows",
+            "never add reassuring text — silence is the signal that all is well"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -551,5 +640,13 @@ mod summary_tests {
         let rows = vec![vec![serde_json::json!("CAN")]];
         let s = build_text_summary("SELECT 1", &cols(), &rows, 1, 40, false);
         assert!(!s.contains("Avoid re-running"), "{s}");
+    }
+
+    #[test]
+    fn long_multibyte_sql_never_panics_in_summary() {
+        let sql = format!("SELECT '{}'", "é".repeat(3000));
+        let s = build_text_summary(&sql, &cols(), &[], 0, 3, false);
+        assert!(std::str::from_utf8(s.as_bytes()).is_ok());
+        assert!(s.starts_with("Query: SELECT '"), "{s}");
     }
 }

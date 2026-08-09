@@ -67,21 +67,21 @@ mod tests {
 
         let request = WorkerRequest::Connect {
             connection_id: ConnectionId(Uuid::new_v4()),
-            config: ConnectionConfig {
-                host: "localhost".to_string(),
-                port: 5432,
-                user: "postgres".to_string(),
-                password: "postgres".to_string(),
-                database: "postgres".to_string(),
-                ssl_mode: "prefer".to_string(),
-            },
+            config: ConnectionConfig::new("postgres")
+                .with("host", "localhost")
+                .with("port", "5432")
+                .with("user", "postgres")
+                .with("database", "postgres")
+                .with("ssl_mode", "prefer"),
         };
 
         write_message(&mut client, &request).await.unwrap();
         let received: WorkerRequest = read_message(&mut server).await.unwrap().unwrap();
 
         match received {
-            WorkerRequest::Connect { config, .. } => assert_eq!(config.host, "localhost"),
+            WorkerRequest::Connect { config, .. } => {
+                assert_eq!(config.get("host"), Some("localhost"))
+            }
             _ => panic!("expected Connect variant"),
         }
     }

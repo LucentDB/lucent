@@ -37,14 +37,13 @@ async fn connects_to_a_real_postgres_instance_and_reads_its_version() {
     let server_info = connect_with_retry(
         &connector,
         connection_id,
-        ConnectionConfig {
-            host: "127.0.0.1".to_string(),
-            port,
-            user: "postgres".to_string(),
-            password: "postgres".to_string(),
-            database: "postgres".to_string(),
-            ssl_mode: "prefer".to_string(),
-        },
+        ConnectionConfig::new("postgres")
+            .with("host", "127.0.0.1")
+            .with("port", port.to_string())
+            .with("user", "postgres")
+            .with("database", "postgres")
+            .with("ssl_mode", "prefer")
+            .with_secret("postgres"),
     )
     .await
     .unwrap();
@@ -62,14 +61,13 @@ async fn connect_fails_with_connection_refused_for_a_closed_port() {
     let result = connector
         .connect(
             connection_id,
-            ConnectionConfig {
-                host: "127.0.0.1".to_string(),
-                port: 1,
-                user: "postgres".to_string(),
-                password: "postgres".to_string(),
-                database: "postgres".to_string(),
-                ssl_mode: "prefer".to_string(),
-            },
+            ConnectionConfig::new("postgres")
+                .with("host", "127.0.0.1")
+                .with("port", "1")
+                .with("user", "postgres")
+                .with("database", "postgres")
+                .with("ssl_mode", "prefer")
+                .with_secret("postgres"),
         )
         .await;
 
