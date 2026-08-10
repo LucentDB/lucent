@@ -6,17 +6,28 @@
   let selectedIndex = $state(0);
   let inputEl;
 
-  // Normalize the query once per change, not once per filtered command —
-  // toLowerCase() inside the filter loop allocates per item.
+  // Pre-compute lowercased strings in a parallel array to avoid reallocation
+  // during filtering without mutating or cloning the original objects.
+  let searchCache = $derived(
+    commands.map((c) => ({
+      item: c,
+      labelLower: c.label.toLowerCase(),
+      searchLower: (c.searchText || '').toLowerCase(),
+    }))
+  );
+
+  // Normalize the query once per change, not once per filtered command
   let queryLower = $derived(query.toLowerCase());
 
   let filtered = $derived(
-    commands.filter(
-      (c) =>
-        !query ||
-        c.label.toLowerCase().includes(queryLower) ||
-        (c.searchText || '').toLowerCase().includes(queryLower),
-    ),
+    searchCache
+      .filter(
+        (c) =>
+          !query ||
+          c.labelLower.includes(queryLower) ||
+          c.searchLower.includes(queryLower),
+      )
+      .map((c) => c.item),
   );
 
   $effect(() => {

@@ -26,12 +26,22 @@
   let placed = $state(false);
   let optionEls = {};
 
-  // Normalize the query once per change, not once per filtered column —
-  // toLowerCase() inside the filter loop allocates per item.
+  // Pre-compute lowercased strings in a parallel array to avoid reallocation
+  // during filtering without mutating or cloning the original objects.
+  let searchCache = $derived(
+    columns.map((c) => ({
+      item: c,
+      nameLower: c.name.toLowerCase(),
+    }))
+  );
+
+  // Normalize the query once per change, not once per filtered column
   let queryLower = $derived(query.trim().toLowerCase());
 
   let matches = $derived(
-    columns.filter((c) => c.name.toLowerCase().includes(queryLower)),
+    searchCache
+      .filter((c) => c.nameLower.includes(queryLower))
+      .map((c) => c.item),
   );
 
   // A narrowed list can be shorter than the previous active index.
