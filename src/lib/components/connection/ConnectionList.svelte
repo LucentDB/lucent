@@ -32,18 +32,33 @@
   let viewMode = $state<'list' | 'grid'>('list');
   let searchInput: HTMLInputElement | undefined = $state();
 
+  // Pre-compute lowercased strings in a parallel array to avoid reallocation
+  // during filtering without mutating or cloning the original objects.
+  let searchCache = $derived(
+    profiles.map((p) => ({
+      item: p,
+      nameLower: p.name.toLowerCase(),
+      hostLower: (p.params['host'] ?? '').toLowerCase(),
+      userLower: (p.params['user'] ?? '').toLowerCase(),
+      dbLower: (p.params['database'] ?? '').toLowerCase(),
+      groupLower: (p.group ?? '').toLowerCase(),
+    }))
+  );
+
   // Filtered profiles based on search query
   let filteredProfiles = $derived.by(() => {
     if (!searchQuery.trim()) return profiles;
     const q = searchQuery.toLowerCase();
-    return profiles.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        (p.params['host'] ?? '').toLowerCase().includes(q) ||
-        (p.params['user'] ?? '').toLowerCase().includes(q) ||
-        (p.params['database'] ?? '').toLowerCase().includes(q) ||
-        (p.group ?? '').toLowerCase().includes(q),
-    );
+    return searchCache
+      .filter(
+        (p) =>
+          p.nameLower.includes(q) ||
+          p.hostLower.includes(q) ||
+          p.userLower.includes(q) ||
+          p.dbLower.includes(q) ||
+          p.groupLower.includes(q),
+      )
+      .map((p) => p.item);
   });
 
   // Filtered groups (only groups with matching profiles)
