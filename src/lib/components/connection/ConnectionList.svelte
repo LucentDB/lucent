@@ -32,18 +32,23 @@
   let viewMode = $state<'list' | 'grid'>('list');
   let searchInput: HTMLInputElement | undefined = $state();
 
+  // Cache the lowercased search strings for each profile outside the filter loop
+  // to avoid repeated string allocations when searchQuery changes.
+  let searchableProfiles = $derived(
+    profiles.map((p) => ({
+      p,
+      searchString:
+        `${p.name} ${p.params['host'] ?? ''} ${p.params['user'] ?? ''} ${p.params['database'] ?? ''} ${p.group ?? ''}`.toLowerCase(),
+    })),
+  );
+
   // Filtered profiles based on search query
   let filteredProfiles = $derived.by(() => {
     if (!searchQuery.trim()) return profiles;
     const q = searchQuery.toLowerCase();
-    return profiles.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        (p.params['host'] ?? '').toLowerCase().includes(q) ||
-        (p.params['user'] ?? '').toLowerCase().includes(q) ||
-        (p.params['database'] ?? '').toLowerCase().includes(q) ||
-        (p.group ?? '').toLowerCase().includes(q),
-    );
+    return searchableProfiles
+      .filter((item) => item.searchString.includes(q))
+      .map((item) => item.p);
   });
 
   // Filtered groups (only groups with matching profiles)

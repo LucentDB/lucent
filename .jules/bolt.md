@@ -1,3 +1,3 @@
-## 2025-02-12 - Prevent Repeated String Allocation in Loops
-**Learning:** In a Svelte application with hierarchical trees mapping large underlying datasets (e.g., PostgreSQL databases, schemas, objects), rendering loops using `filter` / `map` can trigger massive numbers of `String.prototype.toLowerCase()` calls if the query normalization occurs inside the iteration block. This introduces a heavy toll (measurably up to ~5x overhead on large arrays).
-**Action:** When filtering across large arrays (or loops iterating heavily nested components), always lift `query.toLowerCase()` (or `new RegExp`) outside the iteration loop. Using Svelte `$derived(searchQuery.toLowerCase())` is ideal.
+## 2024-05-24 - Svelte 5 Reactive Loop Performance Pattern
+**Learning:** Calling string allocations like `toLowerCase()` inside reactive loops (e.g., `filter`) causes O(N) string allocations every time the loop runs (which can be often in a reactive context). Svelte's memory tells me to cache the computed string outside the loop using `$derived`. However, I must NOT use object cloning/spread syntax (`...item`) when caching, as this breaks Svelte's object identity and causes reactivity bugs.
+**Action:** Use a parallel cache pattern or wrap the item in a new object without spreading the original. E.g., `map(item => ({ item, lowerName: item.name.toLowerCase() }))`.
