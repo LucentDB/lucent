@@ -33,17 +33,30 @@
   let searchInput: HTMLInputElement | undefined = $state();
 
   // Filtered profiles based on search query
+  let cachedProfiles = $derived(
+    profiles.map((p) => ({
+      item: p,
+      lowerName: p.name.toLowerCase(),
+      lowerHost: (p.params['host'] ?? '').toLowerCase(),
+      lowerUser: (p.params['user'] ?? '').toLowerCase(),
+      lowerDatabase: (p.params['database'] ?? '').toLowerCase(),
+      lowerGroup: (p.group ?? '').toLowerCase(),
+    })),
+  );
+
   let filteredProfiles = $derived.by(() => {
     if (!searchQuery.trim()) return profiles;
     const q = searchQuery.toLowerCase();
-    return profiles.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        (p.params['host'] ?? '').toLowerCase().includes(q) ||
-        (p.params['user'] ?? '').toLowerCase().includes(q) ||
-        (p.params['database'] ?? '').toLowerCase().includes(q) ||
-        (p.group ?? '').toLowerCase().includes(q),
-    );
+    return cachedProfiles
+      .filter(
+        (p) =>
+          p.lowerName.includes(q) ||
+          p.lowerHost.includes(q) ||
+          p.lowerUser.includes(q) ||
+          p.lowerDatabase.includes(q) ||
+          p.lowerGroup.includes(q),
+      )
+      .map((p) => p.item);
   });
 
   // Filtered groups (only groups with matching profiles)

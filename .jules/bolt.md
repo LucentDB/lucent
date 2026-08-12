@@ -1,3 +1,6 @@
 ## 2025-02-12 - Prevent Repeated String Allocation in Loops
 **Learning:** In a Svelte application with hierarchical trees mapping large underlying datasets (e.g., PostgreSQL databases, schemas, objects), rendering loops using `filter` / `map` can trigger massive numbers of `String.prototype.toLowerCase()` calls if the query normalization occurs inside the iteration block. This introduces a heavy toll (measurably up to ~5x overhead on large arrays).
 **Action:** When filtering across large arrays (or loops iterating heavily nested components), always lift `query.toLowerCase()` (or `new RegExp`) outside the iteration loop. Using Svelte `$derived(searchQuery.toLowerCase())` is ideal.
+## 2025-02-12 - Prevent Repeated String Allocation in UI Filters
+**Learning:** In Svelte components with reactive list filters driven by keystrokes, running `toLowerCase()` on multiple properties of every list item during the filter phase causes massive unnecessary string allocations per keystroke. The parallel cache pattern (`item`, `lowerName`, etc.) effectively eliminates these allocations.
+**Action:** When implementing search filters over arrays of objects in Svelte, use a `$derived` parallel cache to store lowercased strings if they are computed from the data, and filter against the cache, mapping back to `item` to preserve object identity.

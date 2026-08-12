@@ -10,13 +10,23 @@
   // toLowerCase() inside the filter loop allocates per item.
   let queryLower = $derived(query.toLowerCase());
 
+  let cachedCommands = $derived(
+    commands.map((c) => ({
+      item: c,
+      lowerLabel: c.label.toLowerCase(),
+      lowerSearchText: (c.searchText || '').toLowerCase(),
+    })),
+  );
+
   let filtered = $derived(
-    commands.filter(
-      (c) =>
-        !query ||
-        c.label.toLowerCase().includes(queryLower) ||
-        (c.searchText || '').toLowerCase().includes(queryLower),
-    ),
+    cachedCommands
+      .filter(
+        (c) =>
+          !query ||
+          c.lowerLabel.includes(queryLower) ||
+          c.lowerSearchText.includes(queryLower),
+      )
+      .map((c) => c.item),
   );
 
   $effect(() => {
