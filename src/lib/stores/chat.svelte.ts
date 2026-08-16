@@ -1,10 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { ToolOutputPayload } from '../ipc/ai.ts';
+import type { ToolOutputPayload, AgentPermissionPayload } from '../ipc/ai.ts';
 
 export interface TokenUsage {
   promptTokens: number;
   completionTokens: number;
-  estimatedCostUsd: number | null;
   /** Prompt tokens served from the provider's prefix cache (0 = no cache hit). */
   cachedPromptTokens: number;
 }
@@ -46,6 +45,8 @@ export interface ChatMessage {
     description: string;
     estimatedRowsAffected: number | null;
   };
+  /** The agent's tool-permission request awaiting an answer (ACP mode, E4). */
+  permissionRequest?: AgentPermissionPayload;
   usage?: TokenUsage;
   createdAt: number;
 }
@@ -60,6 +61,8 @@ export interface Conversation {
     description: string;
     estimatedRowsAffected: number | null;
   } | null;
+  /** The agent's tool-permission request awaiting an answer (ACP mode, E4). */
+  pendingPermission: AgentPermissionPayload | null;
   /** Real affected row count from the executed DML (C1), shown on the card. */
   dmlResult: number | null;
   /** Error from the DML execution attempt (C1), shown on the card. */
@@ -111,6 +114,7 @@ export function createConversation(connectionId: string): Conversation {
     messages: [],
     isPaused: false,
     pausedDml: null,
+    pendingPermission: null,
     dmlResult: null,
     dmlError: null,
     usage: null,
@@ -218,6 +222,18 @@ export function demoteContentToNote(convId: string, messageId: string) {
   msg.content = '';
 }
 
+/**
+ * Appends a system note segment to the message's work session (rendered as
+ * a note, not as agent text). Used for Lucent-originated notices such as
+ * "database tools unavailable for this agent".
+ */
+export function addNote(convId: string, messageId: string, content: string) {
+  const msg = findMessage(convId, messageId);
+  if (!msg) return;
+  const session = ensureSession(msg);
+  session.segments.push({ type: 'note', content });
+}
+
 export function addToolCallSegments(
   convId: string,
   messageId: string,
@@ -276,6 +292,43 @@ export function updateLast(convId: string, update: Partial<ChatMessage>) {
     Object.assign(c.messages[c.messages.length - 1], update);
 }
 
+/** Pauses the conversation for an agent tool-permission request (E4): marks
+ *  the pause, records the payload, and stamps the card on the last message. */
+export function pauseForPermission(
+  convId: string,
+  payload: AgentPermissionPayload,
+) {
+  const conv = chat.conversations.find((c) => c.id === convId);
+  if (!conv) return;
+  conv.isPaused = true;
+  conv.pendingPermission = payload;
+  updateLast(convId, { permissionRequest: payload });
+}
+
+/** Clears the permission pause once the user answered (allow or reject). */
+export function resumeFromPermission(convId: string) {
+  const conv = chat.conversations.find((c) => c.id === convId);
+  if (!conv) return;
+  conv.isPaused = false;
+  conv.pendingPermission = null;
+  updateLast(convId, { permissionRequest: undefined });
+}
+
+/**
+ * Clears a rejected DML preview: unpauses and drops the card (E5). Driven by
+ * the `dml:rejected` event listener in ACP mode; the rig path clears inline
+ * in App.svelte's cancel handler instead.
+ */
+export function clearRejectedDml(convId: string) {
+  const conv = chat.conversations.find((c) => c.id === convId);
+  if (!conv) return;
+  conv.isPaused = false;
+  conv.pausedDml = null;
+  conv.dmlResult = null;
+  conv.dmlError = null;
+  updateLast(convId, { dmlApproval: undefined });
+}
+
 export function getConversationTitle(conv: Conversation): string {
   const firstUserMsg = conv.messages.find((m) => m.role === 'user');
   if (firstUserMsg) {
@@ -287,9 +340,7 @@ export function getConversationTitle(conv: Conversation): string {
   return 'New Chat';
 }
 
-/** One-line usage summary for the panel header, e.g. `120 in / 45 out tokens · $0.1234`. */
+/** One-line usage summary for the panel header, e.g. `120 in / 45 out tokens`. */
 export function formatUsageLine(usage: TokenUsage): string {
-  const line = `${usage.promptTokens} in / ${usage.completionTokens} out tokens`;
-  if (usage.estimatedCostUsd === null) return line;
-  return `${line} · $${usage.estimatedCostUsd.toFixed(4)}`;
+  return `${usage.promptTokens} in / ${usage.completionTokens} out tokens`;
 }

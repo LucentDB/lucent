@@ -1,10 +1,12 @@
-pub mod activity;
+pub mod acp;
 pub mod agent;
+pub mod cache_store;
 pub mod config;
 pub mod context;
 pub mod embed;
 pub mod events;
 pub mod guard;
+pub mod indexer;
 pub mod mschema;
 pub mod preflight;
 pub mod provider;
@@ -12,6 +14,7 @@ pub mod providers;
 pub mod rerank;
 pub mod retrieval;
 pub mod schema_graph;
+pub mod single_flight;
 pub mod sql_lint;
 pub mod tools;
 

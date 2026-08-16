@@ -5,18 +5,66 @@ use lucent_protocol::{ConnectionId, QueryId};
 use tauri::State;
 use uuid::Uuid;
 
-use crate::ai::agent::{AgentSink, ConversationState, DatabaseAgent};
+use crate::ai::agent::{AgentSink, AgentState, ConversationState, DatabaseAgent};
 use crate::ai::events::{AiEvent, DmlApprovalPayload};
 use crate::ai::provider::LlmProvider;
 use crate::ai::providers::rig::RigProvider;
 use crate::ai::tools::AiToolContext;
-use crate::commands::{cached_api_key, cached_password, load_api_key, AppState, CommandError};
+use crate::commands::{
+    cached_api_key, cached_password, load_api_key, validate_approved, AppState, CommandError,
+};
 use crate::notebook::events::NotebookEvent;
 use crate::notebook::file::{self, NotebookFileV2};
 use crate::notebook::paging::{build_page_sql, is_pageable, PageRequest, DEFAULT_CELL_PAGE_SIZE};
 use crate::notebook::rewrite;
 use crate::notebook::session::NotebookSession;
 use crate::notebook::types::*;
+
+enum CancelTarget {
+    None,
+    Query(QueryId),
+    AiCell {
+        cell_id: String,
+        token: tokio_util::sync::CancellationToken,
+    },
+}
+
+/// What the notebook Stop button should cancel right now: the running SQL
+/// query if one is registered, otherwise the running AI cell's agent loop.
+/// A SQL query wins when both are somehow set (a cell run registers exactly
+/// one of the two) (E2).
+fn resolve_cancel_target(
+    active_query_id: Option<QueryId>,
+    active_ai_cell: &Option<(String, tokio_util::sync::CancellationToken)>,
+) -> CancelTarget {
+    if let Some(qid) = active_query_id {
+        return CancelTarget::Query(qid);
+    }
+    match active_ai_cell {
+        Some((cell_id, token)) => CancelTarget::AiCell {
+            cell_id: cell_id.clone(),
+            token: token.clone(),
+        },
+        None => CancelTarget::None,
+    }
+}
+
+/// D3: clear the active AI cell registration only when it still names
+/// `cell_id`. Two overlapping runs mean an older run's completion (or a
+/// stale cancel) must not wipe a NEWER run's registration — that would
+/// silently make the newer run uncancellable.
+fn clear_active_ai_cell_if_same(
+    active: &mut Option<(String, tokio_util::sync::CancellationToken)>,
+    cell_id: &str,
+) {
+    if active
+        .as_ref()
+        .map(|(id, _)| id == cell_id)
+        .unwrap_or(false)
+    {
+        *active = None;
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ResolvedQuery {
@@ -25,14 +73,31 @@ pub struct ResolvedQuery {
     pub errors: Vec<CellError>,
 }
 
+/// Read a notebook file ONLY if the frontend-supplied path was chosen in a
+/// native dialog (approved-path set). Mirrors the `notebook_save` gate: the
+/// renderer is untrusted, and an ungated read is a local-file disclosure
+/// primitive (S3).
+fn read_notebook_file(
+    path: &std::path::Path,
+    approved: &std::collections::HashSet<std::path::PathBuf>,
+) -> Result<String, CommandError> {
+    let canonical = validate_approved(path, approved)?;
+    std::fs::read_to_string(&canonical).map_err(|e| {
+        CommandError::new(
+            "FileError",
+            format!("cannot read {}: {e}", canonical.display()),
+        )
+    })
+}
+
 #[tauri::command]
 pub async fn notebook_open(
     path: String,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<NotebookFileV2, CommandError> {
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| CommandError::new("FileError", format!("cannot read {path}: {e}")))?;
-    file::parse(&content).map_err(|e| CommandError::new("ParseError", e))
+    let approved = state.approved_save_paths.lock().await.clone();
+    let content = read_notebook_file(std::path::Path::new(&path), &approved)?;
+    file::parse_file(&path, &content).map_err(|e| CommandError::new("ParseError", e))
 }
 
 #[tauri::command]
@@ -43,13 +108,18 @@ pub async fn notebook_save(
     cells: Vec<CellModel>,
     state: State<'_, AppState>,
 ) -> Result<String, CommandError> {
+    // The frontend is an untrusted boundary: a write path must have been
+    // chosen by the user in a native save dialog (approved-path set). Raw IPC
+    // paths are never written directly — same gate as save_sql_file/export.
+    let approved = state.approved_save_paths.lock().await.clone();
+    let canonical = validate_approved(std::path::Path::new(&path), &approved)?;
+    let canonical_str = canonical.to_string_lossy().to_string();
+
     let json =
         file::to_json(&metadata, &cells).map_err(|e| CommandError::new("SerializeError", e))?;
-    std::fs::write(&path, &json)
-        .map_err(|e| CommandError::new("FileError", format!("cannot write {path}: {e}")))?;
-
-    let canonical = std::path::Path::new(&path).to_path_buf();
-    let canonical_str = canonical.to_string_lossy().to_string();
+    std::fs::write(&canonical, &json).map_err(|e| {
+        CommandError::new("FileError", format!("cannot write {canonical_str}: {e}"))
+    })?;
 
     // Re-key the session so an untitled notebook's temp-UUID key becomes its path.
     if session_key != canonical_str {
@@ -461,6 +531,10 @@ impl AgentSink for NotebookAgentSink {
                 // Internal — the agent loop routes results back to the model.
                 // The frontend receives the final aggregated state via CellDone.
             }
+            AiEvent::Notice { .. } => {
+                // System notice (e.g. DB tools unavailable): notebook cells
+                // don't render notes — the cell simply continues.
+            }
             AiEvent::Done { final_message, .. } => {
                 // Capture the final text response
                 let mut msg = self.final_message.lock().unwrap();
@@ -479,6 +553,16 @@ impl AgentSink for NotebookAgentSink {
 
 // ── AI cell execution ─────────────────────────────────────────────────────
 
+/// The error a notebook AI cell produces when its agent tries to run DML.
+/// The notebook sink cannot approve DML (its `dml_approval` is a log-only
+/// refusal), so the cell must fail loudly instead of silently "succeeding"
+/// with a dead preview card (E3).
+fn ai_cell_dml_refusal_error() -> String {
+    "The assistant wanted to run a DML statement, which isn't supported in \
+     AI cells. Use a SQL cell instead."
+        .into()
+}
+
 async fn run_ai_cell(
     cell: &CellModel,
     cells: &[CellModel],
@@ -489,7 +573,6 @@ async fn run_ai_cell(
 ) -> Result<CellOutput, CommandError> {
     let start = std::time::Instant::now();
     let cell_id = cell.id.clone();
-
     log::info!("AI cell '{cell_id}': starting agent loop");
 
     // ── Build notebook-context system prompt ──────────────────────────────
@@ -514,7 +597,6 @@ async fn run_ai_cell(
             crate::ai::context::build_system_prompt(
                 &tree,
                 graph_guard.as_ref(),
-                config.send_results_to_ai,
                 capabilities.as_ref(),
             )
         } else if let Some(g) = graph_guard.as_ref() {
@@ -525,12 +607,7 @@ async fn run_ai_cell(
                 .to_string();
             let tree = crate::ai::context::tree_from_graph(db_name, g);
             let capabilities = state.capabilities().await;
-            crate::ai::context::build_system_prompt(
-                &tree,
-                Some(g),
-                config.send_results_to_ai,
-                capabilities.as_ref(),
-            )
+            crate::ai::context::build_system_prompt(&tree, Some(g), capabilities.as_ref())
         } else {
             "Database context not yet loaded.".to_string()
         };
@@ -609,6 +686,11 @@ async fn run_ai_cell(
 
     // ── Set up cancellation and conversation state ────────────────────────
     let cancel = tokio_util::sync::CancellationToken::new();
+    // E2: register the cell run so notebook_cancel_cell (the Stop button)
+    // can stop the agent loop. Cleared on every exit path below.
+    if let Some(mut s) = state.notebook_sessions.get_mut(session_key) {
+        s.active_ai_cell = Some((cell_id.clone(), cancel.clone()));
+    }
     let conv = Arc::new(tokio::sync::Mutex::new(ConversationState::new(
         cell_id.clone(),
     )));
@@ -643,12 +725,21 @@ async fn run_ai_cell(
             augmented_message,
             &config,
             full_prompt,
-            conv,
+            conv.clone(),
             sink.clone(),
             cancel,
         ),
     )
     .await;
+
+    // E2: the run is over (success, error, or timeout) — unregister the cell
+    // so the Stop button stops targeting it. Must happen before the match
+    // below because every arm of it is a terminal exit path. Guarded by cell
+    // id: a newer overlapping run may have replaced this registration, and
+    // wiping it would silently make that run uncancellable (D3).
+    if let Some(mut s) = state.notebook_sessions.get_mut(session_key) {
+        clear_active_ai_cell_if_same(&mut s.active_ai_cell, &cell_id);
+    }
 
     let duration_ms = start.elapsed().as_millis() as u64;
     log::info!("AI cell '{cell_id}': agent loop completed in {duration_ms}ms");
@@ -660,7 +751,27 @@ async fn run_ai_cell(
 
     // Handle agent errors / timeouts
     match chat_result {
-        Ok(Ok(())) => { /* success */ }
+        Ok(Ok(())) => {
+            // E3: if the agent paused for DML approval, refuse loudly. The
+            // conversation is per-cell and discarded anyway — reset the
+            // leaked PausedForDml state so nothing downstream misreads it.
+            let paused_for_dml = matches!(conv.lock().await.state, AgentState::PausedForDml { .. });
+            if paused_for_dml {
+                conv.lock().await.state = AgentState::Idle;
+                let error = CellError::QueryError {
+                    message: ai_cell_dml_refusal_error(),
+                    sql_error: String::new(),
+                };
+                let _ = channel.send(NotebookEvent::CellError {
+                    cell_id: cell_id.clone(),
+                    error,
+                });
+                return Err(CommandError::new(
+                    "dml_not_supported",
+                    ai_cell_dml_refusal_error(),
+                ));
+            }
+        }
         Ok(Err(e)) => {
             log::error!("AI cell '{cell_id}' agent error: {e}");
             let error = CellError::QueryError {
@@ -742,28 +853,45 @@ pub async fn notebook_cancel_cell(
         .notebook_sessions
         .get(&session_key)
         .ok_or_else(|| CommandError::new("not_found", "notebook session not found"))?;
-
-    let query_id = session.active_query_id.ok_or_else(|| {
-        CommandError::new("no_active_query", "no query is running for this notebook")
-    })?;
     let conn_id = session.connection_id;
+    let target = resolve_cancel_target(session.active_query_id, &session.active_ai_cell);
+    // Drop the session read guard before any branch runs: the shard's RwLock
+    // is not reentrant, and the branches below take a write lock via
+    // get_mut on the same key (parking_lot would otherwise deadlock here).
     drop(session);
 
-    let client = state
-        .client_handle()
-        .await
-        .ok_or_else(|| CommandError::new("not_connected", "no active connection"))?;
-
-    client
-        .cancel(conn_id, query_id)
-        .await
-        .map_err(|e| CommandError::new("cancel_failed", e))?;
-
-    if let Some(mut s) = state.notebook_sessions.get_mut(&session_key) {
-        s.active_query_id = None;
+    match target {
+        CancelTarget::None => Err(CommandError::new(
+            "no_active_query",
+            "no query or AI cell is running for this notebook",
+        )),
+        CancelTarget::Query(query_id) => {
+            let client = state
+                .client_handle()
+                .await
+                .ok_or_else(|| CommandError::new("not_connected", "no active connection"))?;
+            client
+                .cancel(conn_id, query_id)
+                .await
+                .map_err(|e| CommandError::new("cancel_failed", e))?;
+            if let Some(mut s) = state.notebook_sessions.get_mut(&session_key) {
+                s.active_query_id = None;
+            }
+            Ok(())
+        }
+        CancelTarget::AiCell { cell_id, token } => {
+            token.cancel();
+            log::info!("notebook_cancel_cell: cancelled AI cell '{cell_id}'");
+            if let Some(mut s) = state.notebook_sessions.get_mut(&session_key) {
+                // D3: clear only the registration that was actually cancelled —
+                // a newer overlapping run may have replaced it since the cancel
+                // target was resolved, and wiping it would make that run
+                // uncancellable.
+                clear_active_ai_cell_if_same(&mut s.active_ai_cell, &cell_id);
+            }
+            Ok(())
+        }
     }
-
-    Ok(())
 }
 
 #[tauri::command]
@@ -982,5 +1110,98 @@ mod ai_context_tests {
         let ctx = assemble_ai_context(&[cell], "current", 5, 4000);
         assert!(ctx.contains("— 0 rows,"), "got {ctx}");
         assert!(!ctx.contains("showing"), "got {ctx}");
+    }
+}
+
+#[cfg(test)]
+mod notebook_open_tests {
+    use super::read_notebook_file;
+
+    #[test]
+    fn unapproved_paths_are_rejected_before_any_read() {
+        // S3: an ungated read is a local-file disclosure primitive from a
+        // compromised renderer. Any path not chosen in a native dialog must
+        // be refused with the same error the save path uses.
+        let approved = std::collections::HashSet::new();
+        let err = read_notebook_file(std::path::Path::new("/etc/hostname"), &approved)
+            .expect_err("unapproved paths must be rejected");
+        assert!(
+            err.message.contains("native"),
+            "error must name the dialog gate: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn approved_paths_are_read() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("nb.ln");
+        std::fs::write(&path, "[]").unwrap();
+        let mut approved = std::collections::HashSet::new();
+        approved.insert(path.canonicalize().unwrap());
+        let content = read_notebook_file(&path, &approved).expect("approved read must succeed");
+        assert_eq!(content, "[]");
+    }
+
+    #[test]
+    fn cancel_prefers_the_active_db_query_then_the_ai_cell() {
+        use super::{resolve_cancel_target, CancelTarget};
+        use lucent_protocol::QueryId;
+        use uuid::Uuid;
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        // A SQL query is running: it wins.
+        let qid = QueryId(Uuid::new_v4());
+        assert!(matches!(
+            resolve_cancel_target(Some(qid), &Some(("c1".into(), cancel.clone()))),
+            CancelTarget::Query(got) if got == qid
+        ));
+        // Only an AI cell is running: the token comes back.
+        assert!(matches!(
+            resolve_cancel_target(None, &Some(("c1".into(), cancel.clone()))),
+            CancelTarget::AiCell { ref cell_id, .. } if cell_id == "c1"
+        ));
+        // Nothing running.
+        assert!(matches!(
+            resolve_cancel_target(None, &None),
+            CancelTarget::None
+        ));
+    }
+
+    #[test]
+    fn clear_active_ai_cell_only_when_it_names_this_cell() {
+        // D3: an older run finishing (or a stale cancel) must never wipe a
+        // NEWER overlapping run's registration — that would silently make the
+        // newer run uncancellable.
+        use super::clear_active_ai_cell_if_same;
+
+        let token = tokio_util::sync::CancellationToken::new();
+        let mut active = Some(("cell_a".to_string(), token.clone()));
+        // A different cell's completion: the newer registration survives.
+        clear_active_ai_cell_if_same(&mut active, "cell_b");
+        assert!(
+            active.is_some(),
+            "a different cell's run must not wipe this registration"
+        );
+        // This cell's own completion: cleared.
+        clear_active_ai_cell_if_same(&mut active, "cell_a");
+        assert!(
+            active.is_none(),
+            "this cell's own run clears its registration"
+        );
+        // No registration: no-op, no panic.
+        clear_active_ai_cell_if_same(&mut active, "cell_a");
+        assert!(active.is_none());
+    }
+
+    #[test]
+    fn dml_refusal_error_names_the_fix() {
+        use super::ai_cell_dml_refusal_error;
+        // E3: the notebook sink cannot approve DML, so a cell whose agent
+        // paused for approval must fail with a message that tells the user
+        // what to do — never a silent "success" with a dead preview card.
+        let err = ai_cell_dml_refusal_error();
+        assert!(err.contains("SQL cell"), "{err}");
+        assert!(err.contains("DML"), "{err}");
     }
 }

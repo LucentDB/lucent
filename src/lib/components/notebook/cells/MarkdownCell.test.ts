@@ -63,4 +63,16 @@ describe('MarkdownCell', () => {
       screen.getByText('Empty markdown cell — click to edit'),
     ).toBeTruthy();
   });
+
+  it('follows notebook-controlled edit mode', async () => {
+    const { container, rerender } = render(MarkdownCell, {
+      props: { source: '# Hello', status: 'ok', editing: false },
+    });
+
+    await rerender({ source: '# Hello', status: 'ok', editing: true });
+    expect(container.querySelector('textarea')).toBeTruthy();
+
+    await rerender({ source: '# Hello', status: 'ok', editing: false });
+    expect(container.querySelector('.display')).toBeTruthy();
+  });
 });

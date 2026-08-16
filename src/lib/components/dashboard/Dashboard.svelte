@@ -78,7 +78,10 @@
     <div class="metrics-row">
       <div class="metric-card">
         <div class="metric-icon-wrap">
-          <span class="metric-icon">⚙</span>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14" />
+          </svg>
         </div>
         <div class="metric-body">
           <div class="metric-value">{metrics.activeCount}</div>
@@ -88,7 +91,11 @@
 
       <div class="metric-card">
         <div class="metric-icon-wrap">
-          <span class="metric-icon">⌬</span>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <ellipse cx="12" cy="5" rx="9" ry="3" />
+            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+          </svg>
         </div>
         <div class="metric-body">
           <div class="metric-value">{metrics.dbSize}</div>
@@ -98,7 +105,9 @@
 
       <div class="metric-card">
         <div class="metric-icon-wrap">
-          <span class="metric-icon">◎</span>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+          </svg>
         </div>
         <div class="metric-body">
           <div class="metric-value">{metrics.cacheHit}%</div>
@@ -108,7 +117,10 @@
 
       <div class="metric-card">
         <div class="metric-icon-wrap">
-          <span class="metric-icon">◷</span>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <polyline points="12 6 12 12 16 14" />
+          </svg>
         </div>
         <div class="metric-body">
           <div class="metric-value">86 ms</div>
@@ -121,10 +133,10 @@
       <div class="panel">
         <div class="panel-header">
           <h3>Slowest queries</h3>
-          <span class="panel-arrow">→</span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="panel-icon"><line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" /></svg>
         </div>
         {#if metrics.slowQueries.length === 0}
-          <div class="panel-empty">No slow queries</div>
+          <div class="panel-empty">No slow queries detected</div>
         {:else}
           <div class="query-list">
             {#each metrics.slowQueries as q}
@@ -145,6 +157,7 @@
         <div class="table-list">
           {#each metrics.tables as t}
             <div class="table-item">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="table-icon"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></svg>
               <span class="table-name">{t[0]}</span>
               <span class="table-rows">{formatCount(t[1])} rows</span>
             </div>
@@ -155,15 +168,15 @@
 
     <div class="actions-row">
       <button class="action-btn primary" onclick={onNewQuery}>
-        <span class="action-icon">▸</span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/></svg>
         New Query
       </button>
       <button class="action-btn" onclick={loadMetrics}>
-        <span class="action-icon">↻</span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
         Refresh
       </button>
       <button class="action-btn danger" onclick={onDisconnect}>
-        <span class="action-icon">✕</span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         Disconnect
       </button>
     </div>
@@ -258,31 +271,30 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     padding: var(--space-5);
-    box-shadow: var(--shadow-sm);
+    box-shadow: var(--shadow-card);
     display: flex;
     align-items: flex-start;
     gap: var(--space-3);
     transition:
       box-shadow var(--transition-normal),
-      border-color var(--transition-normal);
+      border-color var(--transition-normal),
+      transform var(--transition-normal);
   }
   .metric-card:hover {
     box-shadow: var(--shadow-md);
-    border-color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    transform: translateY(-2px);
   }
   .metric-icon-wrap {
-    width: 32px;
-    height: 32px;
+    width: 36px;
+    height: 36px;
     display: flex;
     align-items: center;
     justify-content: center;
     border-radius: var(--radius-md);
     background: var(--accent-soft);
-    flex-shrink: 0;
-  }
-  .metric-icon {
-    font-size: var(--text-md);
     color: var(--accent);
+    flex-shrink: 0;
   }
   .metric-body {
     display: flex;
@@ -295,14 +307,15 @@
     color: var(--text);
     font-variant-numeric: tabular-nums;
     line-height: 1.1;
-    margin-bottom: 2px;
+    margin-bottom: 3px;
+    letter-spacing: -0.02em;
   }
   .metric-label {
-    font-size: var(--text-sm);
-    font-weight: var(--weight-medium);
-    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: var(--weight-semibold);
+    color: var(--text-muted);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.06em;
   }
 
   /* Panels */
@@ -317,31 +330,41 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     padding: var(--space-5);
-    box-shadow: var(--shadow-sm);
+    box-shadow: var(--shadow-card);
   }
   .panel-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     margin-bottom: var(--space-4);
+    padding-bottom: var(--space-3);
+    border-bottom: 1px solid var(--border-light);
   }
   .panel-header h3 {
-    font-size: var(--text-md);
+    font-size: var(--text-base);
     font-weight: var(--weight-semibold);
     color: var(--text);
+    letter-spacing: -0.01em;
   }
-  .panel-arrow {
-    font-size: var(--text-lg);
+  .panel-icon {
     color: var(--text-muted);
+    opacity: 0.7;
   }
   .panel-count {
     font-size: var(--text-sm);
     color: var(--text-muted);
+    background: var(--bg-subtle);
+    padding: 2px 8px;
+    border-radius: 99px;
+    border: 1px solid var(--border);
+    font-weight: 500;
   }
   .panel-empty {
     font-size: var(--text-base);
     color: var(--text-muted);
-    font-style: italic;
+    text-align: center;
+    padding: var(--space-5) 0;
+    opacity: 0.75;
   }
   .query-list {
     display: flex;
@@ -352,43 +375,51 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: var(--space-3);
-    background: var(--bg);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-subtle);
     border-radius: var(--radius-md);
-    border: 1px solid var(--border-light);
+    gap: var(--space-3);
   }
   .query-text {
     font-family: var(--font-mono);
-    font-size: var(--text-sm);
-    color: var(--text);
+    font-size: 11.5px;
+    color: var(--text-secondary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     flex: 1;
-    margin-right: var(--space-3);
   }
   .query-time {
     font-size: var(--text-sm);
     font-weight: var(--weight-semibold);
     color: var(--danger);
     font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+    padding: 1px 6px;
+    border-radius: 4px;
   }
   .table-list {
     display: flex;
     flex-direction: column;
-    gap: var(--space-1);
+    gap: 2px;
   }
   .table-item {
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
+    padding: 7px var(--space-3);
     border-radius: var(--radius-md);
     cursor: pointer;
     transition: background var(--transition-fast);
   }
   .table-item:hover {
     background: var(--bg-hover);
+  }
+  .table-icon {
+    color: var(--text-muted);
+    opacity: 0.7;
+    flex-shrink: 0;
   }
   .table-name {
     flex: 1;
@@ -411,16 +442,18 @@
   .action-btn {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: var(--space-2) var(--space-4);
+    gap: 7px;
+    padding: 9px var(--space-4);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
-    background: transparent;
+    background: var(--bg-surface);
     color: var(--text-secondary);
-    font-size: var(--text-md);
+    font-size: var(--text-base);
     font-weight: var(--weight-medium);
     cursor: pointer;
-    transition: all var(--transition-fast);
+    transition:
+      all var(--transition-fast);
+    box-shadow: var(--shadow-sm);
   }
   .action-btn:hover {
     background: var(--bg-hover);
@@ -430,19 +463,19 @@
   .action-btn.primary {
     background: var(--accent);
     color: #fff;
-    border-color: var(--accent);
+    border-color: transparent;
+    box-shadow: 0 1px 3px color-mix(in srgb, var(--accent) 40%, transparent),
+                0 4px 12px color-mix(in srgb, var(--accent) 20%, transparent);
   }
   .action-btn.primary:hover {
     background: var(--accent-hover);
+    transform: translateY(-1px);
   }
   .action-btn.danger {
     color: var(--danger);
   }
   .action-btn.danger:hover {
     background: var(--danger-bg);
-    border-color: var(--danger);
-  }
-  .action-icon {
-    font-size: var(--text-md);
+    border-color: color-mix(in srgb, var(--danger) 40%, transparent);
   }
 </style>

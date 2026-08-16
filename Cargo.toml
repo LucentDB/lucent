@@ -1,10 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/lucent-protocol",
-    "crates/lucent-worker-host",
-    "crates/lucent-driver-postgres",
-    "src-tauri",
+  "crates/lucent-protocol",
+  "crates/lucent-worker-host",
+  "crates/lucent-driver-postgres",
+  "crates/lucent-driver-duckdb",
+  "crates/lucent-driver-conformance",
+  "src-tauri",
 ]
 
 [workspace.dependencies]
@@ -17,6 +19,11 @@ async-trait = "0.1"
 tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"
 dashmap = { version = "6" }
-sqlparser = { version = "0.55", features = ["visitor"] }
 keyring = { version = "3", features = ["apple-native"] }
 rig-core = { version = "=0.39.0" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+flate2 = "1"
+bzip2 = "0.5"
+tar = "0.4"
+zip = "2"
+agent-client-protocol = "1"

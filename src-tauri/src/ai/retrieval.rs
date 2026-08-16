@@ -245,7 +245,8 @@ mod tests {
             columns_by_table,
             fk_edges,
             table_adjacency,
-            built_at: std::time::Instant::now(),
+            built_at_unix: 0,
+            tier: crate::ai::schema_graph::IndexingTier::MetadataOnly,
         }
     }
 

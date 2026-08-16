@@ -6,9 +6,25 @@
     NotebookModel,
   } from '../../../stores/notebook.svelte.ts';
 
-  let { cell, model }: { cell: CellModel; model: NotebookModel } = $props();
+  let {
+    cell,
+    model,
+    editing: controlledEditing,
+    onEnterEdit,
+    onExitEdit,
+  }: {
+    cell: CellModel;
+    model: NotebookModel;
+    /** When supplied, notebook mode owns whether this cell is being edited. */
+    editing?: boolean;
+    onEnterEdit?: () => void;
+    onExitEdit?: () => void;
+  } = $props();
 
-  let editing = $state(false);
+  let localEditing = $state(false);
+  let isEditing = $derived(
+    controlledEditing === undefined ? localEditing : controlledEditing,
+  );
   let isRunning = $derived(cell.status === 'running');
   let hasOutput = $derived(
     isRunning ||
@@ -34,18 +50,23 @@
 <div class="ai-cell">
   <TextCellEditor
     source={cell.source}
-    editing={editing && !isRunning}
+    editing={isEditing && !isRunning}
     placeholder="Ask a question about your data…"
     renderMode="auto"
     onSourceChange={(v) => model.setCellSource(cell.id, v)}
     onRun={() => model.runCell(cell.id)}
     onRunAndAdvance={() => model.runAndAdvance(cell.id)}
     onEnterEdit={() => {
-      if (!isRunning) editing = true;
+      if (isRunning) return;
+      if (controlledEditing === undefined) localEditing = true;
+      onEnterEdit?.();
     }}
     onExitEdit={() => {
-      editing = false;
-      model.enterCommandMode();
+      if (controlledEditing === undefined) {
+        localEditing = false;
+        model.enterCommandMode();
+      }
+      onExitEdit?.();
     }}
   />
 

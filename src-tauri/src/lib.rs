@@ -2,11 +2,13 @@ pub mod ai;
 pub mod client;
 mod commands;
 pub use commands::probe_connection;
+pub use commands::namespaces_to_schema_info;
 pub mod dialect;
 pub mod drivers;
 pub use commands::AppState;
 pub mod connections;
 pub mod export;
+mod ipc_stream;
 pub mod notebook;
 pub mod query_history;
 mod query_paging;
@@ -19,8 +21,21 @@ pub mod ssh;
 pub mod supervisor;
 pub mod trace;
 
+use std::sync::Arc;
+
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
+
+/// Adapter that routes indexing telemetry payloads to the Tauri event bus
+/// (`indexing:progress` / `indexing:error`), which the frontend store listens
+/// to. Kept out of ai/events.rs so that module needs no Tauri runtime.
+struct TauriEmit(tauri::AppHandle);
+
+impl crate::ai::events::Emit for TauriEmit {
+    fn emit_json(&self, event: &str, payload: serde_json::Value) {
+        let _ = self.0.emit(event, payload);
+    }
+}
 
 pub fn run() {
     // Installs the global tracing subscriber (EnvFilter from RUST_LOG,
@@ -36,9 +51,16 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(commands::AppState::new())
         .setup(|app| {
             let handle = app.handle();
+
+            // Background indexing telemetry goes to the frontend through the
+            // Tauri event bus (the manager was constructed in AppState::new
+            // with the logging sink; production replaces it with the emitter).
+            let sink: Arc<dyn crate::ai::indexer::IndexingEventSink> = Arc::new(
+                crate::ai::events::IndexingEmitter::new(Arc::new(TauriEmit(handle.clone()))),
+            );
+            app.manage(commands::AppState::with_indexing_sink(sink));
 
             let new_notebook = MenuItem::with_id(
                 handle,
@@ -125,6 +147,7 @@ pub fn run() {
             commands::get_databases,
             commands::get_schemas,
             commands::get_schema_objects,
+            commands::get_editor_schema,
             commands::get_function_source,
             commands::get_view_source,
             commands::get_sequence_info,
@@ -137,9 +160,17 @@ pub fn run() {
             commands::ai_cancel,
             commands::close_conversation,
             commands::execute_dml,
+            commands::reject_dml,
+            commands::respond_agent_permission,
             commands::get_ai_settings,
             commands::save_ai_settings,
+            commands::list_ai_models,
             commands::get_ai_usage,
+            // ACP agent registry commands
+            commands::list_registry_agents,
+            commands::install_acp_agent,
+            commands::uninstall_acp_agent,
+            commands::list_installed_acp_agents,
             // Connection profile commands
             commands::list_connections,
             commands::get_connection,
@@ -161,6 +192,10 @@ pub fn run() {
             // Export commands
             commands::export_results,
             commands::copy_results,
+            commands::save_sql_file,
+            commands::choose_save_path,
+            commands::choose_export_path,
+            commands::choose_open_path,
             // Notebook commands
             crate::notebook::commands::notebook_open,
             crate::notebook::commands::notebook_save,
@@ -174,6 +209,14 @@ pub fn run() {
             crate::notebook::paging::notebook_fetch_page,
             crate::notebook::paging::notebook_count_rows,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Abort every background indexing task on app exit so no
+                // indexer outlives the process (sampling queries, ONNX runs).
+                let state = app_handle.state::<commands::AppState>();
+                tauri::async_runtime::block_on(state.indexing.stop_all());
+            }
+        });
 }

@@ -7,6 +7,7 @@
     switchTab as switchChatTab,
   } from '../stores/chat.svelte.ts';
   import { connections } from '../stores/connections.svelte';
+  import { indexing } from '../stores/indexing.svelte';
   import ReadOnlyBadge from './connection/ReadOnlyBadge.svelte';
 
   let {
@@ -346,6 +347,25 @@
       {/if}
     </div>
 
+    {#if indexing.visible}
+      <div
+        class="indexing-indicator"
+        title="Semantic schema index (background)"
+      >
+        <span class="spinner" aria-hidden="true"></span>
+        <span class="indexing-text">
+          {#if indexing.connections > 1}
+            Indexing {indexing.connections} connections…{indexing.text}
+          {:else}
+            {indexing.text}
+          {/if}
+        </span>
+        <span class="indexing-bar"
+          ><span style="width: {indexing.percent}%"></span></span
+        >
+      </div>
+    {/if}
+
     <div class="actions">
       <button class="icon-btn ai-btn" onclick={onToggleAi} title="AI Settings">
         <svg
@@ -479,7 +499,7 @@
       style="left:{cm.x}px; top:{cm.y}px"
       onclick={(e) => e.stopPropagation()}
     >
-      {#if cm.kind === 'notebook'}
+      {#if cm.kind === 'notebook' || cm.kind === 'query'}
         <button
           class="menu-item"
           onclick={() => {
@@ -532,31 +552,33 @@
           Save As…
           <span class="menu-shortcut">⇧⌘S</span>
         </button>
-        <button
-          class="menu-item"
-          onclick={() => {
-            onNotebookOpen?.();
-            closeContextMenu();
-          }}
-        >
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
+        {#if cm.kind === 'notebook'}
+          <button
+            class="menu-item"
+            onclick={() => {
+              onNotebookOpen?.();
+              closeContextMenu();
+            }}
           >
-            <path
-              d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
-            />
-          </svg>
-          Open Notebook…
-          <span class="menu-shortcut">⌘O</span>
-        </button>
-        <div class="menu-separator"></div>
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path
+                d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+              />
+            </svg>
+            Open Notebook…
+            <span class="menu-shortcut">⌘O</span>
+          </button>
+          <div class="menu-separator"></div>
+        {/if}
       {/if}
       <button class="menu-item" onclick={() => closeTab(cm.tabId, cm.isChat)}>
         <svg
@@ -669,14 +691,14 @@
     user-select: none;
   }
   header {
-    height: 44px;
-    padding: 0 12px 0 0;
+    height: 46px;
+    padding: 0 14px 0 0;
     display: flex;
     align-items: center;
     gap: 12px;
-    background: rgba(255, 255, 255, 0.72);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
+    background: rgba(255, 255, 255, 0.82);
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
     border-bottom: 1px solid rgba(0, 0, 0, 0.08);
     user-select: none;
     flex-shrink: 0;
@@ -684,7 +706,7 @@
     transition: background var(--transition-normal);
   }
   :global(.dark) header {
-    background: rgba(15, 15, 23, 0.78);
+    background: rgba(13, 13, 18, 0.85);
     border-bottom-color: rgba(255, 255, 255, 0.06);
   }
 
@@ -777,7 +799,10 @@
     color: var(--text);
     background: var(--bg-elevated);
     border-color: var(--border);
-    box-shadow: var(--shadow-sm);
+    box-shadow:
+      var(--shadow-sm),
+      0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent);
+    font-weight: 550;
   }
   .tab-icon {
     flex-shrink: 0;
@@ -897,44 +922,54 @@
   .search-btn {
     display: flex;
     align-items: center;
-    gap: 6px;
-    background: var(--bg-hover);
+    gap: 7px;
+    background: var(--bg-surface);
     border: 1px solid var(--border);
     color: var(--text-secondary);
-    padding: 5px 10px;
+    padding: 6px 14px;
     border-radius: 20px;
     font-size: 12px;
+    font-weight: 500;
     cursor: pointer;
-    transition: all var(--transition-fast);
+    transition: all var(--transition-normal);
     white-space: nowrap;
+    box-shadow: var(--shadow-sm);
   }
   .search-btn:hover {
-    background: var(--bg-subtle);
+    background: var(--bg-hover);
     color: var(--text);
-    border-color: var(--accent);
-    transform: scale(1.02);
+    border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+    box-shadow:
+      var(--shadow-md),
+      0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
+    transform: scale(1.03);
   }
   .search-btn svg {
     flex-shrink: 0;
-    opacity: 0.7;
+    opacity: 0.6;
+  }
+  .search-btn:hover svg {
+    opacity: 1;
+    color: var(--accent);
   }
   .kbd {
     font-size: 10px;
     font-weight: 600;
     color: var(--text-muted);
-    background: var(--bg);
-    padding: 1px 5px;
+    background: var(--bg-subtle);
+    padding: 2px 6px;
     border-radius: 4px;
     border: 1px solid var(--border);
-    font-family: var(--font-sans);
+    font-family: var(--font-mono);
+    box-shadow: 0 1px 0 var(--border);
   }
 
   .icon-btn {
     background: none;
     border: 1px solid transparent;
     color: var(--text-secondary);
-    width: 32px;
-    height: 32px;
+    width: 34px;
+    height: 34px;
     border-radius: var(--radius-md);
     cursor: pointer;
     font-size: 15px;
@@ -942,43 +977,61 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: all var(--transition-fast);
+    transition: all var(--transition-normal);
     flex-shrink: 0;
   }
   .icon-btn:hover {
     background: var(--bg-hover);
     color: var(--text);
-    transform: scale(1.05);
+    transform: scale(1.1);
   }
   .icon-btn.ai-btn:hover {
     color: var(--accent);
     background: var(--accent-soft);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
   }
   .icon-btn.logs-toggle.active {
     background: var(--accent-soft);
     color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   }
   .icon-btn.chat-toggle.active {
     background: var(--accent-soft);
     color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   }
 
   /* ── Context menu ───────────────────────────── */
   .context-menu {
     position: fixed;
     z-index: 9999;
-    min-width: 180px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
+    min-width: 200px;
+    background: rgba(255, 255, 255, 0.96);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border: 1px solid rgba(0, 0, 0, 0.08);
     border-radius: var(--radius-lg);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
-    padding: 4px;
+    box-shadow: var(--shadow-float);
+    padding: 5px;
     display: flex;
     flex-direction: column;
     gap: 1px;
+    animation: menu-in 0.1s ease-out;
+  }
+  @keyframes menu-in {
+    from {
+      opacity: 0;
+      transform: scale(0.95);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
   }
   :global(.dark) .context-menu {
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    background: rgba(22, 22, 30, 0.96);
+    border-color: rgba(255, 255, 255, 0.08);
+    box-shadow: var(--shadow-float);
   }
   .menu-shortcut {
     margin-left: auto;
@@ -1031,5 +1084,44 @@
     height: 1px;
     background: var(--border);
     margin: 4px 8px;
+  }
+
+  .indexing-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.25rem 0.6rem;
+    border-radius: 999px;
+    background: var(--accent-soft, rgba(127, 127, 255, 0.12));
+    color: var(--text-secondary, inherit);
+    font-size: 0.75rem;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .spinner {
+    width: 0.75rem;
+    height: 0.75rem;
+    border-radius: 50%;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    animation: indexing-spin 0.8s linear infinite;
+  }
+  @keyframes indexing-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .indexing-bar {
+    width: 4rem;
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(127, 127, 127, 0.25);
+    overflow: hidden;
+  }
+  .indexing-bar span {
+    display: block;
+    height: 100%;
+    background: currentColor;
+    transition: width 0.2s ease;
   }
 </style>

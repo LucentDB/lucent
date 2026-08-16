@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ConnectionProfile } from '../../stores/connections.svelte';
+  import { connectionSubtitle } from '../../connection-format';
 
   let {
     profile,
@@ -22,11 +23,6 @@
     onDelete?: (id: string) => void;
     onDuplicate?: (id: string) => void;
   } = $props();
-
-  const puser = $derived(profile.params['user'] ?? 'postgres');
-  const phost = $derived(profile.params['host'] ?? '');
-  const pport = $derived(profile.params['port'] ?? '5432');
-  const pdb = $derived(profile.params['database'] ?? '');
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Enter') {
@@ -65,8 +61,6 @@
   onclick={() => onSelect?.(profile.id)}
   onkeydown={handleKeydown}
 >
-  <div class="card-indicator" style="background: {cardColor}"></div>
-
   {#if active}
     <span class="card-active-badge">
       <span class="active-dot"></span>
@@ -81,8 +75,8 @@
           <span class="icon">{profile.icon}</span>
         {:else}
           <svg
-            width="18"
-            height="18"
+            width="20"
+            height="20"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -99,7 +93,7 @@
         <span class="card-name">{profile.name}</span>
         <div class="card-details">
           <span class="card-host">
-            {puser}@{phost}:{pport}/{pdb}
+            {connectionSubtitle(profile)}
           </span>
           <span class="card-separator">·</span>
           <span class="card-time">{formatLastUsed(profile.lastUsed)}</span>
@@ -116,8 +110,8 @@
           }}
         >
           <svg
-            width="14"
-            height="14"
+            width="15"
+            height="15"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -136,8 +130,8 @@
           }}
         >
           <svg
-            width="14"
-            height="14"
+            width="15"
+            height="15"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -158,8 +152,8 @@
           }}
         >
           <svg
-            width="14"
-            height="14"
+            width="15"
+            height="15"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -178,8 +172,8 @@
           }}
         >
           <svg
-            width="14"
-            height="14"
+            width="15"
+            height="15"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -205,76 +199,81 @@
 <style>
   .connection-card {
     display: flex;
-    gap: 12px;
-    padding: 12px 14px;
+    padding: 16px 16px;
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     background: var(--bg-surface);
     cursor: pointer;
     transition:
-      border-color 0.15s ease,
-      box-shadow 0.15s ease;
+      transform 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275),
+      border-color var(--transition-normal),
+      box-shadow var(--transition-normal),
+      background var(--transition-normal);
     position: relative;
     outline: none;
     box-sizing: border-box;
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
   }
+
   .connection-card:hover,
   .connection-card:focus-visible {
-    border-color: var(--card-color, var(--accent));
-    box-shadow: 0 0 0 2px
-      color-mix(in srgb, var(--card-color, var(--accent)) 20%, transparent);
+    box-shadow: 0 4px 12px -4px rgba(0, 0, 0, 0.1);
+    transform: translateY(-2px);
   }
+
   .connection-card.active {
-    border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 6%, var(--bg-surface));
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    background: color-mix(in srgb, var(--accent) 3%, var(--bg-surface));
+    box-shadow:
+      0 4px 12px -2px color-mix(in srgb, var(--accent) 12%, transparent),
+      0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
   }
+
   .connection-card.testing {
-    opacity: 0.7;
+    opacity: 0.65;
     pointer-events: none;
   }
-  .card-indicator {
-    width: 4px;
-    border-radius: 4px;
-    flex-shrink: 0;
-    align-self: stretch;
-  }
+
   .card-content {
     flex: 1;
     display: flex;
     flex-direction: column;
     min-width: 0;
+    z-index: 2;
   }
+
   .card-main-row {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 14px;
     width: 100%;
   }
+
   .card-icon {
-    width: 32px;
-    height: 32px;
+    width: 40px;
+    height: 40px;
     display: flex;
     align-items: center;
     justify-content: center;
     color: var(--card-color, var(--accent));
     flex-shrink: 0;
-    background: color-mix(
-      in srgb,
-      var(--card-color, var(--accent)) 10%,
-      transparent
-    );
+    background: var(--bg-subtle);
     border-radius: var(--radius-md);
   }
+
   .card-icon .icon {
-    font-size: 18px;
+    font-size: 20px;
   }
+
   .card-info {
     flex: 1;
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 4px;
   }
+
   .card-name {
     font-size: 14px;
     font-weight: 600;
@@ -282,151 +281,178 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    letter-spacing: -0.015em;
   }
+
   .card-active-badge {
     position: absolute;
-    top: 10px;
+    top: 12px;
     right: 12px;
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
     font-size: 11px;
-    font-weight: 600;
-    color: var(--success, #22c55e);
-    background: color-mix(in srgb, var(--success, #22c55e) 10%, transparent);
-    padding: 3px 8px;
+    font-weight: 700;
+    color: var(--success, #10b981);
+    background: color-mix(in srgb, var(--success, #10b981) 10%, transparent);
+    padding: 4px 10px 4px 8px;
     border-radius: 99px;
     line-height: 1.2;
+    border: 1px solid color-mix(in srgb, var(--success, #10b981) 30%, transparent);
+    z-index: 2;
   }
+
   .active-dot {
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: var(--success, #22c55e);
-    box-shadow: 0 0 6px var(--success, #22c55e);
+    background: var(--success, #10b981);
+    box-shadow: 0 0 8px 1px var(--success, #10b981);
+    animation: pulse-connected 1.5s ease-in-out infinite;
   }
+
+  @keyframes pulse-connected {
+    0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 8px 1px var(--success, #10b981); }
+    50% { opacity: 0.5; transform: scale(0.85); box-shadow: 0 0 3px 0 var(--success, #10b981); }
+  }
+
   .card-details {
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: 11.5px;
     color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
   }
+
   .card-host {
     font-family: var(--font-mono);
     overflow: hidden;
     text-overflow: ellipsis;
+    font-size: 11px;
   }
+
   .card-separator {
     color: var(--border);
     flex-shrink: 0;
+    opacity: 0.6;
   }
+
   .card-time {
     flex-shrink: 0;
   }
+
   .card-testing {
     position: absolute;
-    top: 12px;
-    right: 12px;
+    top: 13px;
+    right: 13px;
     display: flex;
     align-items: center;
+    z-index: 2;
   }
+
   .spinner {
-    width: 16px;
-    height: 16px;
+    width: 15px;
+    height: 15px;
     border: 2px solid var(--border);
     border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin 0.6s linear infinite;
   }
+
   @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
+    to { transform: rotate(360deg); }
   }
+
   .card-actions {
     display: flex;
     align-items: center;
     gap: 2px;
-    opacity: 0.65;
-    transition: opacity 0.12s;
+    opacity: 0;
+    transform: translateX(10px);
+    transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
     flex-shrink: 0;
+    z-index: 2;
   }
+
   .connection-card:hover .card-actions,
   .connection-card:focus-within .card-actions {
     opacity: 1;
+    transform: translateX(0);
   }
+
   .action-btn {
-    width: 28px;
-    height: 28px;
+    width: 30px;
+    height: 30px;
     display: flex;
     align-items: center;
     justify-content: center;
     border: none;
     border-radius: var(--radius-sm);
     background: transparent;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     cursor: pointer;
     transition:
-      background 0.1s,
-      color 0.1s;
+      background var(--transition-fast),
+      color var(--transition-fast),
+      transform var(--transition-fast);
   }
+
   .action-btn:hover {
     background: var(--bg-hover);
     color: var(--text);
+    transform: scale(1.1);
   }
+
   .action-btn.danger:hover {
-    background: color-mix(in srgb, var(--error) 15%, transparent);
+    background: color-mix(in srgb, var(--error) 12%, transparent);
     color: var(--error);
   }
 
   /* Grid mode adjustments */
   .connection-card.grid-mode {
     flex-direction: column;
-    padding: 16px;
+    padding: 20px;
   }
-  .connection-card.grid-mode .card-indicator {
-    width: 100%;
-    height: 4px;
-    align-self: auto;
-    border-radius: 4px 4px 0 0;
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-  }
+
   .connection-card.grid-mode .card-active-badge {
-    top: 14px;
-    right: 14px;
+    top: 16px;
+    right: 16px;
   }
+
   .connection-card.grid-mode .card-main-row {
     flex-direction: column;
     align-items: flex-start;
-    gap: 10px;
-    margin-top: 8px;
+    gap: 12px;
   }
+
   .connection-card.grid-mode .card-icon {
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
   }
+
   .connection-card.grid-mode .card-icon svg {
-    width: 22px;
-    height: 22px;
+    width: 24px;
+    height: 24px;
   }
+
   .connection-card.grid-mode .card-info {
     width: 100%;
   }
+
   .connection-card.grid-mode .card-details {
     flex-wrap: wrap;
     white-space: normal;
   }
+
   .connection-card.grid-mode .card-actions {
     width: 100%;
     justify-content: flex-end;
-    margin-top: 8px;
-    padding-top: 8px;
+    margin-top: 12px;
+    padding-top: 12px;
     border-top: 1px solid var(--border);
+    opacity: 1;
+    transform: none;
   }
 </style>

@@ -16,14 +16,6 @@ pub enum NotebookEvent {
         cell_id: String,
         tool: serde_json::Value,
     },
-    #[serde(rename = "sql_preview")]
-    SqlPreview { cell_id: String, sql: String },
-    #[serde(rename = "rows_streamed")]
-    RowsStreamed {
-        cell_id: String,
-        rows: Vec<Vec<serde_json::Value>>,
-        is_end: bool,
-    },
     #[serde(rename = "cell_done")]
     CellDone {
         cell_id: String,

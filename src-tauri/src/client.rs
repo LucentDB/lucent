@@ -3,18 +3,19 @@ use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
 use lucent_protocol::{
-    new_framed, read_message, write_message, CatalogRequest, CatalogResult, ColumnMeta,
+    new_codec, new_framed, read_message, write_message, CatalogRequest, CatalogResult, ColumnMeta,
     ConnectionConfig, ConnectionId, ForeignKey, Namespace, NamespacePath, ObjectDetail, ObjectKind,
     ObjectProperty, ObjectRef, ObjectSummary, QueryId, SearchHit, ServerInfo, Value, WorkerRequest,
     WorkerResponse,
 };
 use serde::Serialize;
 use tokio::io::WriteHalf;
-use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::Instrument;
 use uuid::Uuid;
+
+use crate::ipc_stream::ClientStream;
 
 /// Hard ceiling on the rows materialized by a single `execute_with_id` call.
 ///
@@ -45,26 +46,42 @@ pub struct ExecuteResult {
 
 #[derive(Clone)]
 pub struct ConnectorClient {
-    writer: Arc<Mutex<FramedWrite<WriteHalf<UnixStream>, LengthDelimitedCodec>>>,
-    pending: Arc<Mutex<HashMap<QueryId, mpsc::UnboundedSender<WorkerResponse>>>>,
+    writer: Arc<Mutex<FramedWrite<WriteHalf<ClientStream>, LengthDelimitedCodec>>>,
+    pending: Arc<std::sync::Mutex<HashMap<QueryId, mpsc::UnboundedSender<WorkerResponse>>>>,
     sync_pending: Arc<Mutex<HashMap<ConnectionId, oneshot::Sender<WorkerResponse>>>>,
     reader_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     pub server_info: Option<ServerInfo>,
 }
 
+/// Removes the pending-map entry when the execute/catalog future is dropped
+/// (cancelled or aborted), so the map cannot grow until socket EOF (C9).
+/// Normal completion paths remove the entry explicitly; Drop's removal is
+/// then a harmless no-op. The map is a `std::sync::Mutex` (never held across
+/// an await) precisely so this synchronous `Drop` can lock it.
+struct PendingGuard {
+    pending: Arc<std::sync::Mutex<HashMap<QueryId, mpsc::UnboundedSender<WorkerResponse>>>>,
+    query_id: QueryId,
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.query_id);
+    }
+}
+
 impl ConnectorClient {
     pub async fn connect(
-        socket_path: &std::path::Path,
+        endpoint: &str,
         token: &str,
         config: ConnectionConfig,
     ) -> Result<(Self, ConnectionId), String> {
-        let stream = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            UnixStream::connect(socket_path),
-        )
-        .await
-        .map_err(|_| "connect to worker socket timed out after 15s".to_string())?
-        .map_err(|e| format!("failed to connect to worker socket: {e}"))?;
+        let stream =
+            tokio::time::timeout(std::time::Duration::from_secs(15), connect_stream(endpoint))
+                .await
+                .map_err(|_| "connect to worker endpoint timed out after 15s".to_string())??;
 
         let mut framed = new_framed(stream);
 
@@ -74,6 +91,22 @@ impl ConnectorClient {
         write_message(&mut framed, &token.to_string())
             .await
             .map_err(|e| format!("handshake failed: {e}"))?;
+
+        // Await the worker's handshake ack so version/token mismatches surface
+        // as a typed error instead of a generic EOF on the connect read.
+        let ack: WorkerResponse =
+            tokio::time::timeout(std::time::Duration::from_secs(5), read_message(&mut framed))
+                .await
+                .map_err(|_| "handshake ack timed out after 5s".to_string())?
+                .map_err(|e| format!("handshake ack failed: {e}"))?
+                .ok_or("worker closed connection during handshake")?;
+        match ack {
+            WorkerResponse::HandshakeAccepted => {}
+            WorkerResponse::Error { kind, message, .. } => {
+                return Err(format!("{kind}: {message}"));
+            }
+            other => return Err(format!("unexpected handshake response: {other:?}")),
+        }
 
         let connection_id = ConnectionId(Uuid::new_v4());
 
@@ -98,6 +131,9 @@ impl ConnectorClient {
 
         let server_info = match response {
             WorkerResponse::Connected { server_info, .. } => server_info,
+            WorkerResponse::ConnectionError { kind, message, .. } => {
+                return Err(format!("{kind}: {message}"));
+            }
             WorkerResponse::Error { kind, message, .. } => {
                 return Err(format!("{kind}: {message}"));
             }
@@ -107,14 +143,12 @@ impl ConnectorClient {
         // Split stream: reader owns read half (lock-free), writer is shared via Mutex
         let stream = framed.into_inner();
         let (read_half, write_half) = tokio::io::split(stream);
-        let mut framed_read = FramedRead::new(read_half, LengthDelimitedCodec::new());
-        let framed_write = Arc::new(Mutex::new(FramedWrite::new(
-            write_half,
-            LengthDelimitedCodec::new(),
-        )));
+        let mut framed_read = FramedRead::new(read_half, new_codec());
+        let framed_write = Arc::new(Mutex::new(FramedWrite::new(write_half, new_codec())));
 
-        let pending: Arc<Mutex<HashMap<QueryId, mpsc::UnboundedSender<WorkerResponse>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<
+            std::sync::Mutex<HashMap<QueryId, mpsc::UnboundedSender<WorkerResponse>>>,
+        > = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let pending_clone = pending.clone();
 
         let sync_pending: Arc<Mutex<HashMap<ConnectionId, oneshot::Sender<WorkerResponse>>>> =
@@ -134,7 +168,8 @@ impl ConnectorClient {
 
                         match &response {
                             WorkerResponse::Connected { connection_id, .. }
-                            | WorkerResponse::Disconnected { connection_id, .. } => {
+                            | WorkerResponse::Disconnected { connection_id, .. }
+                            | WorkerResponse::ConnectionError { connection_id, .. } => {
                                 let mut sp = sync_pending_clone.lock().await;
                                 if let Some(sender) = sp.remove(connection_id) {
                                     let _ = sender.send(response);
@@ -151,10 +186,16 @@ impl ConnectorClient {
                                         Some(*request_id)
                                     }
                                     WorkerResponse::Error { query_id, .. } => *query_id,
-                                    _ => None,
+                                    _ => {
+                                        log::warn!(
+                                            "reader: dropping unmatchable reply: {response:?}"
+                                        );
+                                        None
+                                    }
                                 };
                                 if let Some(qid) = query_id {
-                                    let pending_lock = pending_clone.lock().await;
+                                    let pending_lock =
+                                        pending_clone.lock().unwrap_or_else(|p| p.into_inner());
                                     if let Some(tx) = pending_lock.get(&qid) {
                                         // Buffered, never dropped: the caller
                                         // re-arms its receiver between batches,
@@ -174,8 +215,11 @@ impl ConnectorClient {
                         continue;
                     }
                     None => {
-                        let mut pending_lock = pending_clone.lock().await;
-                        pending_lock.clear();
+                        {
+                            let mut pending_lock =
+                                pending_clone.lock().unwrap_or_else(|p| p.into_inner());
+                            pending_lock.clear();
+                        }
                         let mut sp = sync_pending_clone.lock().await;
                         sp.clear();
                         break;
@@ -244,6 +288,9 @@ impl ConnectorClient {
 
         match response {
             WorkerResponse::Connected { server_info, .. } => Ok(server_info),
+            WorkerResponse::ConnectionError { kind, message, .. } => {
+                Err(format!("{kind}: {message}"))
+            }
             WorkerResponse::Error { kind, message, .. } => Err(format!("{kind}: {message}")),
             other => Err(format!("unexpected response: {other:?}")),
         }
@@ -294,9 +341,15 @@ impl ConnectorClient {
         let (tx, mut rx) = mpsc::unbounded_channel();
 
         {
-            let mut pending_lock = self.pending.lock().await;
+            let mut pending_lock = self.pending.lock().unwrap_or_else(|p| p.into_inner());
             pending_lock.insert(query_id, tx);
         }
+        // C9: if this future is dropped (caller aborts, truncation path,
+        // timeout), Drop removes the entry — the map cannot grow until EOF.
+        let _pending_guard = PendingGuard {
+            pending: Arc::clone(&self.pending),
+            query_id,
+        };
 
         if let Err(e) = self
             .write_request(&WorkerRequest::Execute {
@@ -310,7 +363,10 @@ impl ConnectorClient {
             // the orphaned sender so `pending` can't accumulate dead senders.
             // The reader's EOF path would also drain the map, but don't rely on
             // the socket dying to clean up after ourselves.
-            self.pending.lock().await.remove(&query_id);
+            self.pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&query_id);
             return Err(e);
         }
 
@@ -354,7 +410,10 @@ impl ConnectorClient {
                         if is_final || truncated {
                             // Query is done — drop the sender so a late reply
                             // can never be buffered and the map cannot grow.
-                            self.pending.lock().await.remove(&query_id);
+                            self.pending
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .remove(&query_id);
                             let row_count = all_rows.len();
                             let cols = all_columns.map(|c| (*c).clone()).unwrap_or_default();
                             return Ok((
@@ -382,22 +441,34 @@ impl ConnectorClient {
                             truncated: false,
                         };
                         if is_final {
-                            self.pending.lock().await.remove(&query_id);
+                            self.pending
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .remove(&query_id);
                             return Ok((result, query_id));
                         }
                     }
                     _ => return Err("unsupported result shape".into()),
                 },
                 WorkerResponse::Error { kind, message, .. } => {
-                    self.pending.lock().await.remove(&query_id);
+                    self.pending
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .remove(&query_id);
                     return Err(format!("{kind}: {message}"));
                 }
                 WorkerResponse::Cancelled { .. } => {
-                    self.pending.lock().await.remove(&query_id);
+                    self.pending
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .remove(&query_id);
                     return Err("query was cancelled".into());
                 }
                 other => {
-                    self.pending.lock().await.remove(&query_id);
+                    self.pending
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .remove(&query_id);
                     return Err(format!("unexpected response: {other:?}"));
                 }
             }
@@ -439,6 +510,9 @@ impl ConnectorClient {
 
         match response {
             WorkerResponse::Disconnected { .. } => Ok(()),
+            WorkerResponse::ConnectionError { kind, message, .. } => {
+                Err(format!("{kind}: {message}"))
+            }
             WorkerResponse::Error { kind, message, .. } => Err(format!("{kind}: {message}")),
             other => Err(format!("unexpected response during disconnect: {other:?}")),
         }
@@ -449,7 +523,7 @@ impl ConnectorClient {
             handle.abort();
         }
         {
-            let mut pending_lock = self.pending.lock().await;
+            let mut pending_lock = self.pending.lock().unwrap_or_else(|p| p.into_inner());
             pending_lock.clear();
         }
         {
@@ -473,9 +547,13 @@ impl ConnectorClient {
         let (tx, mut rx) = mpsc::unbounded_channel();
 
         {
-            let mut pending = self.pending.lock().await;
+            let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
             pending.insert(request_id, tx);
         }
+        let _pending_guard = PendingGuard {
+            pending: Arc::clone(&self.pending),
+            query_id: request_id,
+        };
 
         if let Err(e) = self
             .write_request(&WorkerRequest::Catalog {
@@ -485,20 +563,29 @@ impl ConnectorClient {
             })
             .await
         {
-            self.pending.lock().await.remove(&request_id);
+            self.pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&request_id);
             return Err(e);
         }
 
         let response = match tokio::time::timeout(CATALOG_TIMEOUT, rx.recv()).await {
             Ok(Some(r)) => r,
             Ok(None) => {
-                self.pending.lock().await.remove(&request_id);
+                self.pending
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(&request_id);
                 return Err("internal: catalog response channel closed".to_string());
             }
             Err(_) => {
                 // Drop the orphaned sender so a late reply cannot resolve a
                 // channel nobody holds, and `pending` cannot grow without bound.
-                self.pending.lock().await.remove(&request_id);
+                self.pending
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(&request_id);
                 return Err(format!(
                     "catalog request timed out after {CATALOG_TIMEOUT:?}"
                 ));
@@ -507,7 +594,10 @@ impl ConnectorClient {
 
         // The reply is in hand — drop the sender so a duplicate/late reply is
         // never buffered and the map cannot grow without bound.
-        self.pending.lock().await.remove(&request_id);
+        self.pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&request_id);
 
         match response {
             WorkerResponse::CatalogResult { result, .. } => Ok(result),
@@ -637,6 +727,26 @@ impl ConnectorClient {
             CatalogResult::Properties(v) => Ok(v),
             other => Err(driver_bug("Properties", &other)),
         }
+    }
+}
+
+/// cfg-split endpoint connect: socket file path on Unix, pipe name on Windows.
+async fn connect_stream(endpoint: &str) -> Result<ClientStream, String> {
+    #[cfg(unix)]
+    {
+        use tokio::net::UnixStream;
+        UnixStream::connect(endpoint)
+            .await
+            .map(ClientStream::Unix)
+            .map_err(|e| format!("connect to worker socket failed: {e}"))
+    }
+    #[cfg(windows)]
+    {
+        use tokio::net::windows::named_pipe::ClientOptions;
+        ClientOptions::new()
+            .open(endpoint)
+            .map(ClientStream::Pipe)
+            .map_err(|e| format!("connect to worker pipe failed: {e}"))
     }
 }
 
@@ -904,6 +1014,138 @@ mod catalog_client_tests {
         assert!(
             err.contains("Namespaces"),
             "error must name the expected variant: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod sync_routing_tests {
+    use super::*;
+    use lucent_protocol::{
+        new_framed, read_message, write_message, DriverCapabilities, ReadOnlyMode, ServerInfo,
+        TimeoutSupport, WorkerRequest,
+    };
+    use tokio::net::UnixListener;
+
+    fn fake_capabilities() -> DriverCapabilities {
+        DriverCapabilities {
+            id: "fake".into(),
+            display_name: "Fake".into(),
+            sql_dialect: lucent_protocol::SqlDialect::PostgreSql,
+            namespace_model: lucent_protocol::NamespaceModel::DbSchemaObject,
+            readonly: ReadOnlyMode::TransactionScoped,
+            statement_timeout: TimeoutSupport::Statement,
+            cancel: lucent_protocol::CancelMode::Native,
+            paging: lucent_protocol::PagingStyle::LimitOffset,
+            identifier_quote: '"',
+            string_literal: lucent_protocol::StringLiteralStyle::StandardConforming,
+            auth: lucent_protocol::AuthModel::UserPassword,
+        }
+    }
+
+    fn fake_server_info() -> ServerInfo {
+        ServerInfo {
+            version: "fake".into(),
+            capabilities: fake_capabilities(),
+        }
+    }
+
+    /// C1 regression: a failed Connect used to arrive as
+    /// `Error { query_id: None }`, which the reader dropped — the caller
+    /// burned its full 10s timeout and reported "connect response timed out".
+    /// The worker now replies `ConnectionError`, which must route to the sync
+    /// oneshot and surface as the real error.
+    #[tokio::test]
+    async fn connect_failure_surfaces_as_the_real_error_not_a_timeout() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket_path = dir.path().join("worker.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut framed = new_framed(stream);
+            let _version: u32 = read_message(&mut framed).await.unwrap().unwrap();
+            let _token: String = read_message(&mut framed).await.unwrap().unwrap();
+            write_message(&mut framed, &WorkerResponse::HandshakeAccepted)
+                .await
+                .unwrap();
+            // Connect #1 (the initial connect in ConnectorClient::connect):
+            // succeed.
+            let request: WorkerRequest = read_message(&mut framed).await.unwrap().unwrap();
+            let connection_id = match request {
+                WorkerRequest::Connect { connection_id, .. } => connection_id,
+                other => panic!("expected Connect, got {other:?}"),
+            };
+            write_message(
+                &mut framed,
+                &WorkerResponse::Connected {
+                    connection_id,
+                    server_info: fake_server_info(),
+                },
+            )
+            .await
+            .unwrap();
+            // Connect #2 (connect_with_id): fail with the typed error.
+            let request: WorkerRequest = read_message(&mut framed).await.unwrap().unwrap();
+            let connection_id = match request {
+                WorkerRequest::Connect { connection_id, .. } => connection_id,
+                other => panic!("expected Connect, got {other:?}"),
+            };
+            write_message(
+                &mut framed,
+                &WorkerResponse::ConnectionError {
+                    connection_id,
+                    kind: lucent_protocol::LucentErrorKind::AuthenticationFailed,
+                    message: "password authentication failed for user \"postgres\"".into(),
+                },
+            )
+            .await
+            .unwrap();
+        });
+
+        let (client, _conn_id) = ConnectorClient::connect(
+            socket_path.to_str().unwrap(),
+            "test-token",
+            ConnectionConfig::default(),
+        )
+        .await
+        .expect("handshake + initial connect must succeed");
+
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.connect_with_id(ConnectionId(Uuid::new_v4()), ConnectionConfig::default()),
+        )
+        .await
+        .expect("connect_with_id must NOT burn the full 10s timeout")
+        .expect_err("the failed connect must return an error");
+        assert!(
+            err.contains("password authentication failed"),
+            "the real error must surface, got: {err}"
+        );
+        assert!(
+            !err.contains("timed out"),
+            "no lying timeout message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn pending_guard_removes_the_entry_on_drop() {
+        // C9 regression: a dropped/cancelled execute future used to leave its
+        // pending-map entry in place until socket EOF. The guard must remove it.
+        let pending: Arc<
+            std::sync::Mutex<HashMap<QueryId, mpsc::UnboundedSender<WorkerResponse>>>,
+        > = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let qid = QueryId(Uuid::new_v4());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        pending.lock().unwrap().insert(qid, tx);
+        {
+            let _guard = PendingGuard {
+                pending: Arc::clone(&pending),
+                query_id: qid,
+            };
+        }
+        assert!(
+            pending.lock().unwrap().is_empty(),
+            "dropping the guard must remove the entry"
         );
     }
 }

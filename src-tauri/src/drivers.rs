@@ -86,12 +86,47 @@ const POSTGRES_FIELDS: &[DriverField] = &[
     },
 ];
 
-const DESCRIPTORS: &[DriverDescriptor] = &[DriverDescriptor {
-    id: "postgres",
-    display_name: "PostgreSQL",
-    fields: POSTGRES_FIELDS,
-    has_secret: true,
-}];
+const DUCKDB_FIELDS: &[DriverField] = &[
+    DriverField {
+        key: "path",
+        label: "Database file",
+        kind: FieldKind::Path,
+        required: true,
+        default: None,
+        options: &[],
+        placeholder: Some("/path/to/analytics.duckdb  (or :memory:)"),
+    },
+    DriverField {
+        // For DuckDB this is the ONLY way to get engine-enforced read-only:
+        // it has no read-only transaction mode (no SET TRANSACTION READ
+        // ONLY), so access_mode = READ_ONLY at open time is the only engine
+        // guarantee. It is stronger than Postgres's per-transaction mode but
+        // coarser — the editor cannot write either.
+        key: "read_only",
+        label: "Open read-only (engine-enforced)",
+        kind: FieldKind::Select,
+        required: false,
+        default: Some("false"),
+        options: &["false", "true"],
+        placeholder: None,
+    },
+];
+
+const DESCRIPTORS: &[DriverDescriptor] = &[
+    DriverDescriptor {
+        id: "postgres",
+        display_name: "PostgreSQL",
+        fields: POSTGRES_FIELDS,
+        has_secret: true,
+    },
+    DriverDescriptor {
+        id: "duckdb",
+        display_name: "DuckDB",
+        fields: DUCKDB_FIELDS,
+        // A file path, not a credential — nothing to put in the keychain.
+        has_secret: false,
+    },
+];
 
 pub fn descriptors() -> &'static [DriverDescriptor] {
     DESCRIPTORS

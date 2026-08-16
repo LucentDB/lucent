@@ -250,7 +250,7 @@ async fn probe_literals(
     // PROBE_TIMEOUT_MS. Dropping this session — including when the outer 2s
     // timeout cancels the probe future mid-flight — spawns the teardown, so a
     // probe can never leak a transaction or a session-level statement_timeout.
-    let _readonly = match crate::readonly::ReadOnlySession::begin(
+    let readonly = match crate::readonly::ReadOnlySession::begin(
         &client,
         connection_id,
         capabilities,
@@ -287,6 +287,8 @@ async fn probe_literals(
             break;
         }
     }
+    // C7: close the scope before the caller's next query begins.
+    readonly.close().await;
     hints
 }
 
@@ -412,7 +414,8 @@ mod tests {
             columns,
             fk_edges: vec![],
             table_adjacency: HashMap::new(),
-            built_at: std::time::Instant::now(),
+            built_at_unix: 0,
+            tier: crate::ai::schema_graph::IndexingTier::MetadataOnly,
         }
     }
 
@@ -464,7 +467,8 @@ mod tests {
             columns,
             fk_edges: vec![],
             table_adjacency: HashMap::new(),
-            built_at: std::time::Instant::now(),
+            built_at_unix: 0,
+            tier: crate::ai::schema_graph::IndexingTier::MetadataOnly,
         }
     }
 

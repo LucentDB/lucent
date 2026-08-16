@@ -68,6 +68,10 @@ export function createCommandKeymap(model: NotebookModel) {
       case 'Y':
         model.convertCell(id, 'sql');
         return true;
+      case 'i':
+      case 'I':
+        model.convertCell(id, 'ai');
+        return true;
       case 'm':
       case 'M':
         model.convertCell(id, 'markdown');

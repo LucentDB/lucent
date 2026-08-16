@@ -1,0 +1,14 @@
+# Minimal sshd_config fixture for the ssh_forward integration test.
+# The linuxserver image default ships `AllowTcpForwarding no`, which would
+# reject the direct-tcpip channel the tunnel needs. This file is copied to
+# /config/sshd/sshd_config, and the image's init script then applies its
+# env-driven settings (Port, PasswordAuthentication) on top of it.
+Port 2222
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+AllowTcpForwarding yes
+GatewayPorts no
+X11Forwarding no
+PidFile /config/sshd.pid
+AuthorizedKeysFile .ssh/authorized_keys
+Subsystem sftp internal-sftp

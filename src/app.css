@@ -6,13 +6,15 @@
   box-sizing: border-box;
 }
 
+@import url('https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,450;14..32,500;14..32,600;14..32,700&display=swap');
+
 :root {
   /* Backgrounds — three-layer depth */
-  --bg: #fafafa;
+  --bg: #f8f8fb;
   --bg-surface: #ffffff;
   --bg-elevated: #ffffff;
-  --bg-subtle: #f4f4f5;
-  --bg-hover: #f4f4f5;
+  --bg-subtle: #f2f2f6;
+  --bg-hover: #ebebf2;
   --bg-header: #1a1a2e;
   --bg-input: #ffffff;
 
@@ -23,8 +25,8 @@
   --text-on-header: #e0e0e0;
 
   /* Borders */
-  --border: #e4e4e7;
-  --border-light: #f4f4f5;
+  --border: #e2e2ea;
+  --border-light: #ededf2;
 
   /* Accent */
   --accent: #6366f1;
@@ -33,6 +35,7 @@
   --accent-muted: #c7d2fe;
   --accent-active-line: rgba(99, 102, 241, 0.07);
   --accent-selection: #c7d2fe;
+  --accent-foreground: #ffffff;
 
   /* Semantic feedback */
   --success: #10b981;
@@ -54,9 +57,16 @@
   --syn-variable: #1f4fd8;
   --syn-operator: #52525b;
 
-  /* Typography stacks */
-  --font-sans: ui-sans-serif, system-ui, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  /* Tokens emitted into read-only SQL blocks and Markdown responses. */
+  --syntax-keyword-weight: 600;
+
+  /* Typography stacks — Inter preferred */
+  --font-sans:
+    'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    sans-serif;
+  --font-mono:
+    'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    monospace;
 
   /* Spacing scale */
   --space-1: 4px;
@@ -84,40 +94,44 @@
   --weight-semibold: 600;
   --weight-bold: 700;
 
-  /* Radii */
-  --radius-sm: 4px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
+  /* Radii — increased for modern feel */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
   --radius-full: 9999px;
 
-  /* Shadows */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.07);
-  --shadow-lg: 0 10px 25px rgba(0, 0, 0, 0.1);
+  /* Shadows — more nuanced depth */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.12), 0 4px 8px rgba(0, 0, 0, 0.05);
+  --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-float:
+    0 20px 60px rgba(0, 0, 0, 0.14), 0 6px 20px rgba(0, 0, 0, 0.08);
 
   /* Transitions */
-  --transition-fast: 0.1s ease;
-  --transition-normal: 0.15s ease;
+  --transition-fast: 0.08s ease;
+  --transition-normal: 0.16s ease;
 
   /* Grid lines */
   --grid-line: #e2e2e6;
   --grid-header-border: #d4d4d8;
 
   /* Focus ring */
-  --ring: 0 0 0 2px var(--accent);
+  --ring: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
 }
 
 :root.dark {
-  --bg: #121214;
-  --bg-surface: #18181c;
-  --bg-elevated: #202025;
+  --bg: #111114;
+  --bg-surface: #18181f;
+  --bg-elevated: #21212b;
   --bg-subtle: #27272e;
-  --bg-hover: #2f2f38;
-  --bg-header: #121218;
-  --bg-input: #202025;
+  --bg-hover: #2e2e38;
+  --bg-header: #0d0d12;
+  --bg-input: #1e1e28;
   --text: #f4f4f6;
   --text-secondary: #a1a1aa;
-  --text-muted: #71717a;
+  --text-muted: #6b6b78;
   --text-on-header: #d4d4d8;
   --border: rgba(255, 255, 255, 0.08);
   --border-light: rgba(255, 255, 255, 0.04);
@@ -128,6 +142,7 @@
   --accent-muted: rgba(129, 140, 248, 0.3);
   --accent-active-line: rgba(129, 140, 248, 0.08);
   --accent-selection: rgba(99, 102, 241, 0.3);
+  --accent-foreground: #111114;
   --success: #34d399;
   --success-bg: rgba(52, 211, 153, 0.12);
   --danger: #f87171;
@@ -135,7 +150,7 @@
   --error: var(--danger);
   --error-bg: var(--danger-bg);
   --warning: #fbbf24;
-  /* One Dark, matching the editor's dark theme. */
+  /* High-contrast dark SQL palette shared by the editor and read-only blocks. */
   --syn-keyword: #c678dd;
   --syn-string: #98c379;
   --syn-number: #d19a66;
@@ -145,11 +160,13 @@
   --syn-operator: #56b6c2;
   --grid-line: rgba(255, 255, 255, 0.06);
   --grid-header-border: rgba(255, 255, 255, 0.12);
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.35);
-  --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.5);
-  --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.25);
-  --ring-focus: 0 0 0 2px rgba(129, 140, 248, 0.35);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.65), 0 6px 16px rgba(0, 0, 0, 0.45);
+  --shadow-card: 0 2px 10px rgba(0, 0, 0, 0.35), 0 1px 3px rgba(0, 0, 0, 0.25);
+  --shadow-float:
+    0 24px 72px rgba(0, 0, 0, 0.7), 0 8px 24px rgba(0, 0, 0, 0.45);
+  --ring-focus: 0 0 0 3px rgba(129, 140, 248, 0.35);
 }
 
 html,
@@ -158,12 +175,53 @@ body,
   height: 100%;
 }
 
+/* Lezer token classes are emitted by sanitized Markdown HTML as well as the
+   notebook SQL block, so keep their palette global instead of component-scoped. */
+.tok-keyword,
+.tok-modifier,
+.tok-operatorKeyword {
+  color: var(--syn-keyword);
+  font-weight: var(--syntax-keyword-weight);
+}
+.tok-string,
+.tok-string2,
+.tok-character {
+  color: var(--syn-string);
+}
+.tok-number,
+.tok-bool,
+.tok-null {
+  color: var(--syn-number);
+}
+.tok-comment,
+.tok-lineComment,
+.tok-blockComment {
+  color: var(--syn-comment);
+  font-style: italic;
+}
+.tok-typeName,
+.tok-className,
+.tok-standard {
+  color: var(--syn-type);
+}
+.tok-variableName,
+.tok-propertyName {
+  color: var(--syn-variable);
+}
+.tok-operator,
+.tok-punctuation {
+  color: var(--syn-operator);
+}
+
 body {
   font-family: var(--font-sans);
   font-size: var(--text-md);
   line-height: 1.5;
   color: var(--text);
   background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.01em;
   transition:
     color var(--transition-normal),
     background var(--transition-normal),
@@ -187,8 +245,8 @@ textarea {
 }
 
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {

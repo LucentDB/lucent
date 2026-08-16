@@ -386,4 +386,17 @@ describe('runAndAdvance contract (edit-mode bindings delegate here)', () => {
     expect(model.cells.length).toBe(2);
     expect(model.selectedCellId).toBe(second);
   });
+
+  it('runAndAdvance advances Markdown without executing it', async () => {
+    const model = createNotebookModel();
+    const first = model.cells[0].id;
+    model.cells[0].kind = 'markdown';
+    model.setCellSource(first, '# Notes');
+    vi.spyOn(model.session, 'runCell').mockResolvedValue(undefined as never);
+
+    await model.runAndAdvance(first);
+
+    expect(model.session.runCell).not.toHaveBeenCalled();
+    expect(model.selectedCellId).toBe(model.cells[1].id);
+  });
 });

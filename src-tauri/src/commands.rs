@@ -8,8 +8,9 @@ use tauri::{Emitter, Manager, State};
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
-use crate::ai::agent::{AgentSink, AgentState, ConversationState, DatabaseAgent};
-use crate::ai::config::{keychain_account, AiConfig, KEYCHAIN_SERVICE};
+use crate::ai::acp::install::InstalledAgent;
+use crate::ai::agent::{AgentDriver, AgentSink, AgentState, ConversationState, DatabaseAgent};
+use crate::ai::config::{keychain_account, AiConfig, AiProvider, KEYCHAIN_SERVICE};
 use crate::ai::context::SchemaCache;
 use crate::ai::events::{AiErrorPayload, AiEvent, TokenUsage};
 use crate::ai::provider::LlmProvider;
@@ -22,13 +23,15 @@ use crate::client::{ConnectorClient, ExecuteResult};
 use crate::connections::ConnectionProfileRepository;
 use crate::supervisor::Supervisor;
 
-/// Tauri-side sink bridging the agent loop to IPC events.
-pub(crate) struct TauriSink {
+/// Tauri-side sink bridging the agent loop to IPC events. Generic over the
+/// runtime so tests can drive `run_agent_turn` with `tauri::test::mock_app`
+/// (production uses the default `Wry`).
+pub(crate) struct TauriSink<R: tauri::Runtime> {
     channel: tauri::ipc::Channel<crate::ai::events::AiEvent>,
-    app_handle: tauri::AppHandle,
+    app_handle: tauri::AppHandle<R>,
 }
 
-impl AgentSink for TauriSink {
+impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
     fn event(&self, event: crate::ai::events::AiEvent) {
         // Accumulate before forwarding so a frontend fetch racing the `done`
         // delivery (fire-and-forget `get_ai_usage`) never sees stale totals.
@@ -48,10 +51,12 @@ impl AgentSink for TauriSink {
     fn dml_approval(&self, payload: crate::ai::events::DmlApprovalPayload) {
         let _ = self.app_handle.emit("ai:dml_approval", payload);
     }
+    fn permission_request(&self, payload: crate::ai::events::AgentPermissionPayload) {
+        let _ = self.app_handle.emit("ai:agent_permission", payload);
+    }
 }
 
-/// Pure accumulation of one run's usage into a conversation's totals. Cost is
-/// per-run (one model response), so the Option values sum when both present.
+/// Pure accumulation of one run's usage into a conversation's totals.
 pub(crate) fn accumulate_usage(existing: &TokenUsage, new: &TokenUsage) -> TokenUsage {
     TokenUsage {
         prompt_tokens: existing.prompt_tokens.saturating_add(new.prompt_tokens),
@@ -61,12 +66,6 @@ pub(crate) fn accumulate_usage(existing: &TokenUsage, new: &TokenUsage) -> Token
         cached_prompt_tokens: existing
             .cached_prompt_tokens
             .saturating_add(new.cached_prompt_tokens),
-        estimated_cost_usd: match (existing.estimated_cost_usd, new.estimated_cost_usd) {
-            (Some(a), Some(b)) => Some(a + b),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        },
     }
 }
 
@@ -108,7 +107,10 @@ pub struct AppState {
     /// Hold this lock only to clone the Arc. Never hold it across `.execute().await` — a long query would serialize every other query and deadlock `cancel`.
     pub client: Arc<Mutex<Option<ConnectorClient>>>,
     /// The ConnectionId assigned by the worker for the current connection.
-    pub current_connection_id: Mutex<Option<ConnectionId>>,
+    /// `Arc` so the background indexer can hold a clone to check ownership of
+    /// the shared schema-graph slot (swap guard) without touching the
+    /// AppState struct.
+    pub current_connection_id: Arc<Mutex<Option<ConnectionId>>>,
     /// Postgres session dedicated to AI tools, preflight, and DML — so BEGIN/
     /// ROLLBACK and statement_timeout on the AI path can never touch the
     /// editor's session (the same worker socket, a different ConnectionId).
@@ -126,6 +128,11 @@ pub struct AppState {
     pub schema_graph: Arc<Mutex<Option<crate::ai::schema_graph::SchemaGraph>>>,
     pub embedder: Arc<Mutex<Option<crate::ai::embed::Embedder>>>,
     pub reranker: Arc<Mutex<Option<crate::ai::rerank::Reranker>>>,
+    /// Paths the user explicitly chose in a native save dialog this session or
+    /// a previous one (persisted to `<config_dir>/lucent/approved_save_paths.json`).
+    /// Write commands only ever touch paths in this set — the frontend is an
+    /// untrusted boundary, so raw IPC paths are never written directly.
+    pub approved_save_paths: Arc<Mutex<std::collections::HashSet<std::path::PathBuf>>>,
     pub notebook_sessions: DashMap<String, crate::notebook::session::NotebookSession>,
     /// Ring buffer of worker stderr lines for the in-app Logs drawer: the
     /// supervisor's drain task appends; `get_logs` tails from the frontend.
@@ -137,6 +144,17 @@ pub struct AppState {
     /// Phase 2 moves this onto `LiveConnection`; `capabilities()` is the seam
     /// that keeps that a small change.
     pub driver_capabilities: Mutex<Option<lucent_protocol::DriverCapabilities>>,
+    /// Background schema indexing manager. Holds per-connection indexing tasks,
+    /// persistent BLAKE3 cache store, and telemetry emitter.
+    pub indexing: crate::ai::indexer::IndexingManager,
+    /// HTTP client for the ACP agent registry (fetch + binary downloads),
+    /// rustls-only. Built once here so tests can construct AppState without a
+    /// Tauri runtime; the 60s timeout bounds both feed fetches and downloads.
+    pub acp_http: reqwest::Client,
+    /// The shared ACP subsystem: process manager, per-conversation bridge
+    /// handles, permission registry, connection/session state (phase D).
+    /// `Clone` is cheap — the chat driver takes a copy per turn.
+    pub acp: crate::ai::acp::AcpState,
 }
 
 impl Default for AppState {
@@ -147,12 +165,28 @@ impl Default for AppState {
 
 impl AppState {
     pub fn new() -> Self {
+        Self::with_indexing_sink(Arc::new(crate::ai::indexer::LoggingSink))
+    }
+
+    /// Build the app state with a specific indexing telemetry sink. Production
+    /// passes the Tauri emitter (wired in lib.rs setup); tests use the default
+    /// logging sink so they need no Tauri runtime.
+    pub fn with_indexing_sink(sink: Arc<dyn crate::ai::indexer::IndexingEventSink>) -> Self {
         let ai_config = crate::ai::config::load_config_from_disk();
+        let cache =
+            crate::ai::cache_store::PersistentVectorCache::open_default().unwrap_or_else(|e| {
+                log::warn!("vector cache unavailable: {e}");
+                let tmp = std::env::temp_dir()
+                    .join(format!("lucent-cache-fallback-{}", std::process::id()));
+                crate::ai::cache_store::PersistentVectorCache::open_at(tmp)
+                    .expect("fallback cache opens")
+            });
+        let indexing = crate::ai::indexer::IndexingManager::new(cache, sink);
         Self {
             repo: Arc::new(ConnectionProfileRepository::load()),
             supervisor: Mutex::new(None),
             client: Arc::new(Mutex::new(None)),
-            current_connection_id: Mutex::new(None),
+            current_connection_id: Arc::new(Mutex::new(None)),
             ai_connection_id: Mutex::new(None),
             editor_query: Mutex::new(None),
             current_database: Mutex::new(None),
@@ -164,11 +198,18 @@ impl AppState {
             schema_graph: Arc::new(Mutex::new(None)),
             embedder: Arc::new(Mutex::new(None)),
             reranker: Arc::new(Mutex::new(None)),
+            approved_save_paths: Arc::new(Mutex::new(load_approved_paths())),
             api_key_cache: Arc::new(RwLock::new(None)),
             password_cache: Arc::new(RwLock::new(HashMap::new())),
             notebook_sessions: DashMap::new(),
             logs: crate::supervisor::new_log_buffer(),
             llm_usage: DashMap::new(),
+            indexing,
+            acp_http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .expect("reqwest client for the ACP registry builds"),
+            acp: crate::ai::acp::AcpState::new(),
         }
     }
 
@@ -194,13 +235,13 @@ pub struct ConnectResult {
 
 #[cfg(test)]
 mod capability_state_tests {
-    use lucent_protocol::ReadOnlyMode;
+    use lucent_protocol::{ReadOnlyMode, SqlDialect};
 
     use super::CapabilityView;
 
     #[test]
     fn the_view_the_frontend_gets_names_the_enforcement_level() {
-        let strong = CapabilityView::from(&lucent_driver_postgres_caps());
+        let strong = CapabilityView::from(&lucent_driver_postgres_caps(SqlDialect::PostgreSql));
         assert_eq!(strong.driver, "postgres");
         assert_eq!(strong.display_name, "PostgreSQL");
         assert!(strong.engine_enforced_readonly);
@@ -212,7 +253,7 @@ mod capability_state_tests {
 
     #[test]
     fn a_guard_only_driver_ships_its_disclosure_to_the_ui() {
-        let mut caps = lucent_driver_postgres_caps();
+        let mut caps = lucent_driver_postgres_caps(SqlDialect::PostgreSql);
         caps.readonly = ReadOnlyMode::GuardOnly;
         let view = CapabilityView::from(&caps);
         assert!(!view.engine_enforced_readonly);
@@ -220,11 +261,17 @@ mod capability_state_tests {
         assert!(note.to_lowercase().contains("not enforced"), "{note}");
     }
 
-    fn lucent_driver_postgres_caps() -> lucent_protocol::DriverCapabilities {
+    #[test]
+    fn forwards_the_driver_s_sql_dialect() {
+        let view = CapabilityView::from(&lucent_driver_postgres_caps(SqlDialect::DuckDb));
+        assert_eq!(view.dialect, SqlDialect::DuckDb);
+    }
+
+    fn lucent_driver_postgres_caps(dialect: SqlDialect) -> lucent_protocol::DriverCapabilities {
         lucent_protocol::DriverCapabilities {
             id: "postgres".into(),
             display_name: "PostgreSQL".into(),
-            sql_dialect: lucent_protocol::SqlDialect::PostgreSql,
+            sql_dialect: dialect,
             namespace_model: lucent_protocol::NamespaceModel::DbSchemaObject,
             readonly: ReadOnlyMode::TransactionScoped,
             statement_timeout: lucent_protocol::TimeoutSupport::Statement,
@@ -248,6 +295,8 @@ pub struct CapabilityView {
     /// Present only when the guarantee is weakened. The badge renders it as a
     /// warning; absence means "nothing to say", not "everything is fine".
     pub readonly_disclosure: Option<String>,
+    /// Which SQL dialect the editor should assume for autocomplete and paging.
+    pub dialect: lucent_protocol::SqlDialect,
 }
 
 impl From<&lucent_protocol::DriverCapabilities> for CapabilityView {
@@ -257,6 +306,7 @@ impl From<&lucent_protocol::DriverCapabilities> for CapabilityView {
             display_name: c.display_name.clone(),
             engine_enforced_readonly: c.readonly.is_engine_enforced(),
             readonly_disclosure: c.readonly.disclosure().map(str::to_string),
+            dialect: c.sql_dialect,
         }
     }
 }
@@ -284,21 +334,62 @@ pub struct SchemaObject {
     pub row_count: Option<i64>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct SchemaInfo {
+    /// Dotted display name (`catalog.schema` for DuckDB, `schema` for
+    /// Postgres). For display only — never round-tripped back into a
+    /// namespace: use [`SchemaInfo::path`] for that.
     pub name: String,
+    /// The namespace path segments. The sidebar lists objects by passing
+    /// these through — a dotted string would be misread as one segment.
+    pub path: Vec<String>,
     pub object_count: i64,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct EditorColumn {
+    pub name: String,
+    pub type_name: String,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct EditorTable {
+    /// `NamespacePath` joined with '.'. Single-segment for Postgres today.
+    pub schema: String,
+    pub name: String,
+    pub columns: Vec<EditorColumn>,
+}
+
+fn object_details_to_editor_tables(
+    details: Vec<lucent_protocol::ObjectDetail>,
+) -> Vec<EditorTable> {
+    details
+        .into_iter()
+        .map(|d| EditorTable {
+            schema: d.reference.namespace.join("."),
+            name: d.reference.name,
+            columns: d
+                .columns
+                .into_iter()
+                .map(|c| EditorColumn {
+                    name: c.name,
+                    type_name: c.type_name,
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// Normalized namespaces → the flat `SchemaInfo` the sidebar consumes.
 ///
 /// Postgres emits one path segment, so this reproduces today's schema names
 /// exactly. A driver with deeper namespaces renders dotted.
-fn namespaces_to_schema_info(namespaces: Vec<lucent_protocol::Namespace>) -> Vec<SchemaInfo> {
+pub fn namespaces_to_schema_info(namespaces: Vec<lucent_protocol::Namespace>) -> Vec<SchemaInfo> {
     namespaces
         .into_iter()
         .map(|n| SchemaInfo {
             name: n.display(),
+            path: n.path.clone(),
             // The frontend field is a plain i64. Until it learns to render
             // "unknown", collapse None here — in exactly one place.
             object_count: n.object_count.unwrap_or(0) as i64,
@@ -324,6 +415,78 @@ fn summaries_to_schema_objects(
         .collect()
 }
 
+#[cfg(test)]
+mod editor_schema_mapping_tests {
+    use super::{object_details_to_editor_tables, EditorColumn, EditorTable};
+    use lucent_protocol::{ColumnDetail, ObjectDetail, ObjectKind, ObjectRef};
+
+    fn column(name: &str, type_name: &str) -> ColumnDetail {
+        ColumnDetail {
+            name: name.to_string(),
+            type_name: type_name.to_string(),
+            nullable: true,
+            is_primary_key: false,
+            ordinal: 1,
+            default: None,
+            comment: None,
+            foreign_key: None,
+        }
+    }
+
+    fn detail(schema: &str, table: &str, columns: Vec<ColumnDetail>) -> ObjectDetail {
+        ObjectDetail {
+            reference: ObjectRef {
+                namespace: vec![schema.to_string()],
+                name: table.to_string(),
+                kind: ObjectKind::Table,
+            },
+            columns,
+            comment: None,
+        }
+    }
+
+    #[test]
+    fn maps_schema_table_and_columns() {
+        let details = vec![detail(
+            "public",
+            "customers",
+            vec![column("id", "int4"), column("name", "text")],
+        )];
+        let tables = object_details_to_editor_tables(details);
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].schema, "public");
+        assert_eq!(tables[0].name, "customers");
+        assert_eq!(
+            tables[0].columns,
+            vec![
+                EditorColumn {
+                    name: "id".into(),
+                    type_name: "int4".into()
+                },
+                EditorColumn {
+                    name: "name".into(),
+                    type_name: "text".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_table_with_no_columns_maps_to_an_empty_list_not_an_error() {
+        let details = vec![detail("public", "empty_view", vec![])];
+        let tables = object_details_to_editor_tables(details);
+        assert_eq!(tables[0].columns, Vec::<EditorColumn>::new());
+    }
+
+    #[test]
+    fn empty_input_maps_to_empty_output() {
+        assert_eq!(
+            object_details_to_editor_tables(vec![]),
+            Vec::<EditorTable>::new()
+        );
+    }
+}
+
 #[tauri::command]
 pub async fn get_schemas(state: State<'_, AppState>) -> Result<Vec<SchemaInfo>, CommandError> {
     let conn_id = (*state.current_connection_id.lock().await)
@@ -343,7 +506,6 @@ pub async fn get_schemas(state: State<'_, AppState>) -> Result<Vec<SchemaInfo>, 
 
 #[derive(Debug, Serialize, Clone)]
 pub struct SchemaObjectsResult {
-    pub name: String,
     pub objects: Vec<SchemaObject>,
 }
 
@@ -442,6 +604,14 @@ async fn connect_impl(
 
     // Disconnect previous connection if any
     {
+        let prev_id = *state.current_connection_id.lock().await;
+        // Abort the previous connection's background indexer so it cannot swap
+        // its (socket-independent) Tier-2 graph into the shared slot after this
+        // connect starts a new one. The swap guard in indexer.rs is the
+        // defense-in-depth; stopping here removes the task promptly.
+        if let Some(prev_id) = prev_id {
+            state.indexing.stop(prev_id).await;
+        }
         let mut client_lock = state.client.lock().await;
         if let Some(ref mut old_client) = *client_lock {
             log::info!("Disconnecting previous connection before new connect");
@@ -464,9 +634,26 @@ async fn connect_impl(
     let mut connect_id: Option<ConnectionId> = None;
     for attempt in 0..3 {
         let mut supervisor_lock = state.supervisor.lock().await;
-        let sup = supervisor_lock.get_or_insert_with(|| Supervisor::with_logs(state.logs.clone()));
+        // One worker process per driver TYPE. Switching drivers replaces the
+        // supervisor; Phase 2 turns this into a refcounted pool so several
+        // drivers run at once (spec §6.1).
+        let needs_replacement = supervisor_lock
+            .as_ref()
+            .is_some_and(|s| s.driver_id() != resolved.driver);
+        if needs_replacement {
+            if let Some(mut old) = supervisor_lock.take() {
+                log::info!(
+                    "Switching driver from {} to {}; stopping the old worker",
+                    old.driver_id(),
+                    resolved.driver
+                );
+                old.shutdown().await.ok();
+            }
+        }
+        let sup = supervisor_lock
+            .get_or_insert_with(|| Supervisor::for_driver(&resolved.driver, state.logs.clone()));
         let sp = match sup.ensure_running().await {
-            Ok(p) => p.to_path_buf(),
+            Ok(()) => sup.endpoint().to_string(),
             Err(e) => {
                 log::error!("Worker startup failed (attempt {}): {e}", attempt + 1);
                 last_connect_err = Some(e);
@@ -474,7 +661,7 @@ async fn connect_impl(
             }
         };
         let tk = sup.handshake_token().to_string();
-        log::debug!("Worker socket at {sp:?}, token={tk}");
+        log::debug!("Worker endpoint at {sp:?}, token={tk}");
         drop(supervisor_lock);
 
         match ConnectorClient::connect(&sp, &tk, resolved.clone()).await {
@@ -506,8 +693,11 @@ async fn connect_impl(
         .as_ref()
         .map(|s| s.version.clone())
         .unwrap_or_default();
-    let database = resolved.get("database").unwrap_or("").to_string();
-    log::info!("Connected to {database} (Postgres {server_version})");
+    let database = display_database(&resolved);
+    log::info!(
+        "Connected to {database} ({} {server_version})",
+        resolved.driver
+    );
 
     let capabilities = client.server_info.as_ref().map(|s| s.capabilities.clone());
     if let Some(caps) = &capabilities {
@@ -524,10 +714,15 @@ async fn connect_impl(
     *state.driver_capabilities.lock().await = capabilities;
 
     // Refresh schema cache BEFORE storing client (no lock needed)
+    // Driver-aware key: two DuckDB files (or a DuckDB and a Postgres
+    // connection) must not collide on a bare host:port/db label.
     let conn_id = format!(
-        "{}:{}/{}",
-        resolved.get("host").unwrap_or(""),
-        resolved.port().unwrap_or(0),
+        "{}://{}/{}",
+        resolved.driver,
+        resolved
+            .get("host")
+            .or_else(|| resolved.get("path"))
+            .unwrap_or(""),
         resolved.get("database").unwrap_or("")
     );
     state
@@ -536,63 +731,43 @@ async fn connect_impl(
         .await
         .ok();
 
-    // Build semantic schema index — non-blocking failure, never fails connect()
+    // Build semantic schema index — Tier-1 harvest inline (~5–50ms), Tier-2
+    // enriched in the background by IndexingManager. Non-blocking failure,
+    // never fails connect() (per the design's "Fast Mode" requirement). The
+    // harvest stores the Tier-1 graph immediately; the background start is
+    // deferred until session B exists below, because the sampling connection
+    // must be B (spec §B.5) — sampling on the editor session would run
+    // `SET statement_timeout = 3000` on a session the user is actively
+    // querying.
     *state.schema_graph.lock().await = None;
+    let mut pending_index: Option<(
+        crate::ai::schema_graph::SchemaGraph,
+        crate::ai::schema_graph::CatalogSnapshot,
+        Arc<AiConfig>,
+        String,
+        lucent_protocol::DriverCapabilities,
+    )> = None;
     {
-        let ai_cfg = state.ai_config.read().await;
+        let ai_cfg = state.ai_config.read().await.clone();
         if ai_cfg.enable_semantic_index {
-            // embedder is created once and reused across reconnects
-            let embedder_ready = state.embedder.lock().await.is_some();
-            if !embedder_ready {
-                match tokio::task::spawn_blocking(crate::ai::embed::Embedder::new).await {
-                    Ok(Ok(embedder)) => {
-                        *state.embedder.lock().await = Some(embedder);
-                    }
-                    Ok(Err(e)) => {
-                        log::warn!("Embedder init failed, continuing without semantic index: {e}");
-                    }
-                    Err(e) => {
-                        log::warn!("Embedder init task panicked: {e}");
-                    }
-                }
-            }
-            // reranker is created once and reused across reconnects
-            let reranker_ready = state.reranker.lock().await.is_some();
-            if !reranker_ready {
-                match tokio::task::spawn_blocking(crate::ai::rerank::Reranker::new).await {
-                    Ok(Ok(reranker)) => {
-                        *state.reranker.lock().await = Some(reranker);
-                    }
-                    Ok(Err(e)) => {
-                        log::warn!(
-                            "Reranker init failed, semantic search will skip reranking: {e}"
-                        );
+            let capabilities = state.capabilities().await;
+            if let Some(capabilities) = capabilities {
+                match crate::ai::schema_graph::SchemaGraph::from_catalog(
+                    worker_conn_id,
+                    &client,
+                    &capabilities,
+                )
+                .await
+                {
+                    Ok((graph, snapshot)) => {
+                        *state.schema_graph.lock().await = Some(graph.clone());
+                        let config = Arc::new(ai_cfg);
+                        let connection_key = crate::ai::cache_store::connection_key_for(&resolved);
+                        pending_index =
+                            Some((graph, snapshot, config, connection_key, capabilities));
                     }
                     Err(e) => {
-                        log::warn!("Reranker init task panicked: {e}");
-                    }
-                }
-            }
-
-            let embedder_guard = state.embedder.lock().await;
-            if let Some(embedder) = embedder_guard.as_ref() {
-                let capabilities = state.capabilities().await;
-                if let Some(capabilities) = capabilities.as_ref() {
-                    match crate::ai::schema_graph::SchemaIndexer::build_index(
-                        worker_conn_id,
-                        &client,
-                        embedder,
-                        ai_cfg.send_results_to_ai,
-                        capabilities,
-                    )
-                    .await
-                    {
-                        Ok(graph) => {
-                            *state.schema_graph.lock().await = Some(graph);
-                        }
-                        Err(e) => {
-                            log::warn!("Schema index build failed, continuing without it: {e}");
-                        }
+                        log::warn!("Tier-1 schema harvest failed, continuing without it: {e}");
                     }
                 }
             }
@@ -616,6 +791,31 @@ async fn connect_impl(
             log::warn!("AI session B failed to open ({e}); AI tools will use the editor session");
             *state.ai_connection_id.lock().await = None;
         }
+    }
+
+    // Start the background indexer now that session B exists: the sampling
+    // connection id captured here is real (Some on success, None on B-failure
+    // fallback), so enrich samples on B — never on the editor session.
+    if let Some((graph, snapshot, config, connection_key, capabilities)) = pending_index {
+        let sampling_conn = *state.ai_connection_id.lock().await;
+        state
+            .indexing
+            .start(
+                worker_conn_id,
+                Some(client.clone()),
+                sampling_conn,
+                state.schema_graph.clone(),
+                // Swap guard: the indexer only publishes its Tier-2 graph while
+                // this connection is still the current one (stale-task safety).
+                state.current_connection_id.clone(),
+                (graph, snapshot),
+                state.embedder.clone(),
+                None, // no override in production
+                config,
+                connection_key,
+                capabilities,
+            )
+            .await;
     }
 
     *state.client.lock().await = Some(client);
@@ -772,6 +972,21 @@ pub async fn test_connection(
     probe_connection(config, profile.driver.clone()).await
 }
 
+/// The database label shown in the UI for a connection config.
+///
+/// Host-based drivers (Postgres) name themselves by the `database` param;
+/// file-based drivers (DuckDB) by the `path` param. A driver-agnostic
+/// fallback keeps the explorer, the connect log, and the schema-cache key
+/// meaningful for either — an empty label makes the sidebar show the
+/// disconnected empty state while connected.
+pub fn display_database(config: &lucent_protocol::ConnectionConfig) -> String {
+    config
+        .get("database")
+        .or_else(|| config.get("path"))
+        .unwrap_or("")
+        .to_string()
+}
+
 /// Probe a connection config through a dedicated, short-lived worker process.
 ///
 /// A throwaway worker is required, not an optimization: the app's real worker
@@ -779,14 +994,22 @@ pub async fn test_connection(
 /// would sit unaccepted in the backlog and time out after 15s, reporting a
 /// healthy database as unreachable. A fresh worker per probe leaves the live
 /// connection untouched and exercises the real seam.
+///
+/// The probe worker must match the profile's driver: a Postgres worker would
+/// interpret a DuckDB config as Postgres credentials (and vice versa).
 pub async fn probe_connection(
     config: ConnectionConfig,
     display_fallback: String,
 ) -> Result<TestConnectionResult, CommandError> {
-    let mut supervisor = Supervisor::new();
+    // The probe worker must match the config's driver, not the app default.
+    let mut supervisor =
+        Supervisor::for_driver(config.driver.as_str(), crate::supervisor::new_log_buffer());
 
     let socket_and_token = match supervisor.ensure_running().await {
-        Ok(path) => (path.to_path_buf(), supervisor.handshake_token().to_string()),
+        Ok(()) => (
+            supervisor.endpoint().to_string(),
+            supervisor.handshake_token().to_string(),
+        ),
         Err(e) => {
             let _ = supervisor.shutdown().await;
             return Err(CommandError::new("ConnectError", e));
@@ -936,6 +1159,7 @@ pub async fn clear_history() -> Result<(), CommandError> {
 
 #[tauri::command]
 pub async fn export_results(
+    state: State<'_, AppState>,
     columns: Vec<crate::export::ColumnMeta>,
     rows: Vec<Vec<serde_json::Value>>,
     format: crate::export::ExportFormat,
@@ -953,8 +1177,10 @@ pub async fn export_results(
         }
     };
     let bytes = formatted.len() as u64;
-    std::fs::write(&path, formatted.as_bytes())
-        .map_err(|e| CommandError::new("FileError", e.to_string()))?;
+    let approved = state.approved_save_paths.lock().await.clone();
+    let canonical = validate_approved(std::path::Path::new(&path), &approved)?;
+    std::fs::write(&canonical, formatted.as_bytes())
+        .map_err(|e| CommandError::new("PathError", format!("write failed: {e}")))?;
     Ok(bytes)
 }
 
@@ -980,6 +1206,223 @@ pub async fn copy_results(
         .clipboard()
         .write_text(formatted)
         .map_err(|e| CommandError::new("ClipboardError", e.to_string()))
+}
+
+/// Canonicalize `path`, tolerating a not-yet-existing final component
+/// (new files) by canonicalizing the parent instead. Resolves symlinks, so
+/// a symlink pointing outside an approved directory is caught by the caller.
+pub fn canonicalize_allow_missing(
+    path: &std::path::Path,
+) -> Result<std::path::PathBuf, CommandError> {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return Ok(canonical);
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| CommandError::new("PathError", "invalid destination path"))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| CommandError::new("PathError", "invalid destination path"))?;
+    let canonical_parent = std::fs::canonicalize(parent)
+        .map_err(|e| CommandError::new("PathError", format!("cannot resolve parent: {e}")))?;
+    Ok(canonical_parent.join(file_name))
+}
+
+/// A path may only be written if it was chosen by the user in a native save
+/// dialog this session (or a previous one — the approved set is persisted).
+pub fn validate_approved(
+    path: &std::path::Path,
+    approved: &std::collections::HashSet<std::path::PathBuf>,
+) -> Result<std::path::PathBuf, CommandError> {
+    let canonical = canonicalize_allow_missing(path)?;
+    if !approved.contains(&canonical) {
+        return Err(CommandError::new(
+            "PathError",
+            "destination path was not chosen in a native save dialog",
+        ));
+    }
+    Ok(canonical)
+}
+
+/// `<config_dir>/lucent/approved_save_paths.json` — the persisted set of
+/// paths the user explicitly chose in a native dialog. Only ever grows via
+/// `choose_path_via_dialog`; nothing else writes it.
+fn approved_paths_file() -> Result<std::path::PathBuf, CommandError> {
+    let mut dir =
+        dirs::config_dir().ok_or_else(|| CommandError::new("PathError", "no config dir"))?;
+    dir.push("lucent");
+    std::fs::create_dir_all(&dir).map_err(|e| CommandError::new("PathError", e.to_string()))?;
+    Ok(dir.join("approved_save_paths.json"))
+}
+
+/// Load the persisted approved-path set. Missing/corrupt files degrade to
+/// empty — the set is a convenience cache, not a security boundary by itself
+/// (a fresh dialog re-approves on demand).
+fn load_approved_paths() -> std::collections::HashSet<std::path::PathBuf> {
+    let Ok(file) = approved_paths_file() else {
+        return Default::default();
+    };
+    std::fs::read_to_string(file)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .map(|v| v.into_iter().map(std::path::PathBuf::from).collect())
+        .unwrap_or_default()
+}
+
+/// Write the approved-path set back to disk. Best-effort: a persistence
+/// failure must not fail the dialog flow the user already completed.
+async fn persist_approved_paths(state: &AppState) -> Result<(), CommandError> {
+    let paths = state.approved_save_paths.lock().await.clone();
+    let file = approved_paths_file()?;
+    let list: Vec<String> = paths
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    std::fs::write(
+        &file,
+        serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()),
+    )
+    .map_err(|e| CommandError::new("PathError", format!("cannot persist approved paths: {e}")))
+}
+
+/// Shared body for `choose_save_path` / `choose_export_path`: show a native
+/// save dialog, canonicalize the picked path, record it in the approved set
+/// (persisted), and return the canonical path to the frontend.
+async fn choose_path_via_dialog(
+    app_handle: &tauri::AppHandle,
+    default_name: String,
+    filter_name: String,
+    extensions: Vec<String>,
+    state: &AppState,
+) -> Result<Option<String>, CommandError> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let ext_refs: Vec<&str> = extensions.iter().map(String::as_str).collect();
+    tauri_plugin_dialog::FileDialogBuilder::new(app_handle.dialog().clone())
+        .set_file_name(&default_name)
+        .add_filter(&filter_name, &ext_refs)
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let picked = rx
+        .await
+        .map_err(|_| CommandError::new("PathError", "save dialog channel closed"))?;
+    let Some(picked) = picked else {
+        return Ok(None);
+    };
+    let path = picked
+        .into_path()
+        .map_err(|e| CommandError::new("PathError", format!("dialog returned a URL: {e}")))?;
+    let canonical = canonicalize_allow_missing(&path)?;
+    state
+        .approved_save_paths
+        .lock()
+        .await
+        .insert(canonical.clone());
+    // Best-effort persistence: a read-only config dir must not fail the
+    // dialog flow the user already completed (the in-memory set still gates
+    // writes this session).
+    if let Err(e) = persist_approved_paths(state).await {
+        log::warn!("could not persist approved save paths: {e}");
+    }
+    Ok(Some(canonical.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+pub async fn choose_save_path(
+    app_handle: tauri::AppHandle,
+    default_name: String,
+    filter_name: String,
+    extensions: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, CommandError> {
+    choose_path_via_dialog(&app_handle, default_name, filter_name, extensions, &state).await
+}
+
+#[tauri::command]
+pub async fn choose_export_path(
+    app_handle: tauri::AppHandle,
+    default_name: String,
+    filter_name: String,
+    extensions: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, CommandError> {
+    choose_path_via_dialog(&app_handle, default_name, filter_name, extensions, &state).await
+}
+
+/// Native open dialog that approves the picked path for later writes.
+/// Opening a file from disk is a user choice in a native dialog — the same
+/// trust level as Save-As — so the picked path is recorded in the approved
+/// set, letting a subsequent Save (not Save-As) write back to the same file.
+pub async fn choose_open_path_via_dialog(
+    app_handle: &tauri::AppHandle,
+    filter_name: String,
+    extensions: Vec<String>,
+    state: &AppState,
+) -> Result<Option<String>, CommandError> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let ext_refs: Vec<&str> = extensions.iter().map(String::as_str).collect();
+    let mut builder = tauri_plugin_dialog::FileDialogBuilder::new(app_handle.dialog().clone());
+    if !filter_name.is_empty() && !extensions.is_empty() {
+        builder = builder.add_filter(&filter_name, &ext_refs);
+    }
+    builder.pick_file(move |path| {
+        let _ = tx.send(path);
+    });
+    let picked = rx
+        .await
+        .map_err(|_| CommandError::new("PathError", "open dialog channel closed"))?;
+    let Some(picked) = picked else {
+        return Ok(None);
+    };
+    let path = picked
+        .into_path()
+        .map_err(|e| CommandError::new("PathError", format!("dialog returned a URL: {e}")))?;
+    let canonical = canonicalize_allow_missing(&path)?;
+    state
+        .approved_save_paths
+        .lock()
+        .await
+        .insert(canonical.clone());
+    if let Err(e) = persist_approved_paths(state).await {
+        log::warn!("could not persist approved paths (open dialog): {e}");
+    }
+    Ok(Some(canonical.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+pub async fn choose_open_path(
+    app_handle: tauri::AppHandle,
+    filter_name: String,
+    extensions: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, CommandError> {
+    choose_open_path_via_dialog(&app_handle, filter_name, extensions, &state).await
+}
+
+/// Validate + write one file through the approved-path gate. Shared by the
+/// `save_sql_file` command; kept separate so unit tests can exercise the gate
+/// without a Tauri runtime.
+pub async fn write_approved_sql_file(
+    state: &AppState,
+    path: &str,
+    content: String,
+) -> Result<(), CommandError> {
+    let approved = state.approved_save_paths.lock().await.clone();
+    let canonical = validate_approved(std::path::Path::new(path), &approved)?;
+    std::fs::write(&canonical, content)
+        .map_err(|e| CommandError::new("PathError", format!("write failed: {e}")))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn save_sql_file(
+    state: State<'_, AppState>,
+    path: String,
+    content: String,
+) -> Result<(), CommandError> {
+    write_approved_sql_file(&state, &path, content).await
 }
 
 #[tauri::command]
@@ -1065,7 +1508,7 @@ pub async fn execute_query(
                 "success".into(),
                 None,
             );
-            let _ = crate::query_history::append_entry(entry);
+            let _ = crate::query_history::append_entry_async(entry).await;
             Ok(execute_result)
         }
         Err(e) => {
@@ -1079,7 +1522,7 @@ pub async fn execute_query(
                 "error".into(),
                 Some(e.clone()),
             );
-            let _ = crate::query_history::append_entry(entry);
+            let _ = crate::query_history::append_entry_async(entry).await;
             Err(CommandError::new("QueryError", e))
         }
     };
@@ -1126,7 +1569,7 @@ pub async fn get_databases(state: State<'_, AppState>) -> Result<Vec<DatabaseInf
 #[tauri::command]
 pub async fn get_schema_objects(
     state: State<'_, AppState>,
-    schema: String,
+    namespace: Vec<String>,
 ) -> Result<SchemaObjectsResult, CommandError> {
     let conn_id = (*state.current_connection_id.lock().await)
         .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
@@ -1136,16 +1579,48 @@ pub async fn get_schema_objects(
         .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
 
     // One request replaces four sequential queries. Empty `kinds` means every
-    // kind the driver knows.
+    // kind the driver knows. The namespace arrives as path segments (the
+    // sidebar passes SchemaInfo.path) — never as a dotted string, which would
+    // be misread as a single segment by multi-segment drivers.
     let summaries = client
-        .list_objects(conn_id, vec![schema.clone()], vec![])
+        .list_objects(conn_id, namespace, vec![])
         .await
         .map_err(|e| CommandError::new("QueryError", e))?;
 
     Ok(SchemaObjectsResult {
-        name: schema,
         objects: summaries_to_schema_objects(summaries),
     })
+}
+
+#[tauri::command]
+pub async fn get_editor_schema(
+    state: State<'_, AppState>,
+) -> Result<Vec<EditorTable>, CommandError> {
+    let conn_id = (*state.current_connection_id.lock().await)
+        .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
+    let client = state
+        .client_handle()
+        .await
+        .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
+
+    let summaries = client
+        .list_all_objects(
+            conn_id,
+            vec![
+                lucent_protocol::ObjectKind::Table,
+                lucent_protocol::ObjectKind::View,
+            ],
+        )
+        .await
+        .map_err(|e| CommandError::new("QueryError", e))?;
+
+    let refs: Vec<_> = summaries.into_iter().map(|s| s.reference).collect();
+    let details = client
+        .describe_objects(conn_id, refs)
+        .await
+        .map_err(|e| CommandError::new("QueryError", e))?;
+
+    Ok(object_details_to_editor_tables(details))
 }
 
 #[tauri::command]
@@ -1167,6 +1642,11 @@ pub async fn disconnect(state: State<'_, AppState>) -> Result<DisconnectResult, 
     let mut supervisor_lock = state.supervisor.lock().await;
     if let Some(mut supervisor) = supervisor_lock.take() {
         supervisor.shutdown().await.ok();
+    }
+
+    let conn_id = *state.current_connection_id.lock().await;
+    if let Some(id) = conn_id {
+        state.indexing.stop(id).await;
     }
 
     *state.current_connection_id.lock().await = None;
@@ -1207,7 +1687,7 @@ pub async fn get_logs(
 #[tauri::command]
 pub async fn get_function_source(
     state: State<'_, AppState>,
-    schema: String,
+    namespace: Vec<String>,
     name: String,
 ) -> Result<String, CommandError> {
     let conn_id = (*state.current_connection_id.lock().await)
@@ -1221,7 +1701,7 @@ pub async fn get_function_source(
         .object_ddl(
             conn_id,
             lucent_protocol::ObjectRef {
-                namespace: vec![schema],
+                namespace,
                 name,
                 kind: lucent_protocol::ObjectKind::Function,
             },
@@ -1233,7 +1713,7 @@ pub async fn get_function_source(
 #[tauri::command]
 pub async fn get_view_source(
     state: State<'_, AppState>,
-    schema: String,
+    namespace: Vec<String>,
     name: String,
     kind: Option<String>,
 ) -> Result<String, CommandError> {
@@ -1256,7 +1736,7 @@ pub async fn get_view_source(
         .object_ddl(
             conn_id,
             lucent_protocol::ObjectRef {
-                namespace: vec![schema],
+                namespace,
                 name,
                 kind,
             },
@@ -1274,7 +1754,7 @@ pub struct SequenceProperty {
 #[tauri::command]
 pub async fn get_sequence_info(
     state: State<'_, AppState>,
-    schema: String,
+    namespace: Vec<String>,
     name: String,
 ) -> Result<Vec<SequenceProperty>, CommandError> {
     let conn_id = (*state.current_connection_id.lock().await)
@@ -1288,7 +1768,7 @@ pub async fn get_sequence_info(
         .object_properties(
             conn_id,
             lucent_protocol::ObjectRef {
-                namespace: vec![schema],
+                namespace,
                 name,
                 kind: lucent_protocol::ObjectKind::Sequence,
             },
@@ -1305,10 +1785,29 @@ pub async fn get_sequence_info(
         .collect())
 }
 
+/// `SELECT * FROM` with every namespace segment quoted separately.
+///
+/// The namespace arrives as PATH SEGMENTS (`["analytics", "main"]` for a
+/// DuckDB file), never as a dotted display name — quoting the dotted string
+/// as one identifier (`"analytics.main"`) matches nothing. Postgres passes
+/// one segment (`["public"]`), so this reproduces today's SQL exactly.
+pub fn table_base_sql(
+    builder: &dyn crate::sql_builder::SqlBuilder,
+    namespace: &[String],
+    name: &str,
+) -> String {
+    let qualified = namespace
+        .iter()
+        .map(|s| builder.quote_identifier(s))
+        .collect::<Vec<_>>()
+        .join(".");
+    format!("SELECT * FROM {qualified}.{}", builder.quote_identifier(name))
+}
+
 #[tauri::command]
 pub async fn browse_table(
     state: State<'_, AppState>,
-    schema: String,
+    namespace: Vec<String>,
     name: String,
     limit: i64,
     offset: i64,
@@ -1328,11 +1827,7 @@ pub async fn browse_table(
         .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
     let builder = crate::sql_builder::for_driver(&capabilities);
 
-    let base_sql = format!(
-        "SELECT * FROM {}.{}",
-        builder.quote_identifier(&schema),
-        builder.quote_identifier(&name)
-    );
+    let base_sql = table_base_sql(builder.as_ref(), &namespace, &name);
     let final_sql = crate::query_paging::wrap_for_page(
         &base_sql,
         &sort,
@@ -1562,7 +2057,6 @@ async fn build_system_prompt(
         let p = crate::ai::context::build_system_prompt(
             &tree,
             graph_guard.as_ref(),
-            state.ai_config.read().await.send_results_to_ai,
             capabilities.as_ref(),
         );
         log::debug!("System prompt built ({} bytes, tier {:?})", p.len(), tier);
@@ -1578,12 +2072,7 @@ async fn build_system_prompt(
             .to_string();
         let tree = crate::ai::context::tree_from_graph(db_name, g);
         let capabilities = state.capabilities().await;
-        crate::ai::context::build_system_prompt(
-            &tree,
-            Some(g),
-            state.ai_config.read().await.send_results_to_ai,
-            capabilities.as_ref(),
-        )
+        crate::ai::context::build_system_prompt(&tree, Some(g), capabilities.as_ref())
     } else {
         log::warn!(
             "Schema cache miss for connection {connection_id} and no schema graph available"
@@ -1593,16 +2082,61 @@ async fn build_system_prompt(
     (prompt, tier)
 }
 
+/// Lazily initializes the cross-encoder reranker (a second ONNX model
+/// download). Called on first semantic search, never during connect.
+pub async fn ensure_reranker(state: &AppState) {
+    if state.reranker.lock().await.is_some() {
+        return;
+    }
+    match tokio::task::spawn_blocking(crate::ai::rerank::Reranker::new).await {
+        Ok(Ok(r)) => {
+            *state.reranker.lock().await = Some(r);
+        }
+        Ok(Err(e)) => log::warn!("Reranker init failed, semantic search will skip reranking: {e}"),
+        Err(e) => log::warn!("Reranker init task panicked: {e}"),
+    }
+}
+
+/// Constructs the turn driver from the config: the ACP driver when `acp` is
+/// set, else the rig `DatabaseAgent`. Pure so the branch is unit-testable
+/// (the D1 seam test). The `provider` is only ever built on the rig path —
+/// ACP agents own their auth.
+fn pick_driver(
+    acp: &Option<crate::ai::config::AcpAgentConfig>,
+    provider: Option<Arc<dyn LlmProvider>>,
+    tools: Vec<crate::ai::tools::LucentToolEnum>,
+    tool_ctx: AiToolContext,
+    acp_state: crate::ai::acp::AcpState,
+) -> Box<dyn AgentDriver> {
+    match acp {
+        Some(cfg) => Box::new(crate::ai::acp::driver::AcpChatDriver::new(
+            acp_state,
+            cfg.clone(),
+            tool_ctx,
+        )),
+        None => Box::new(DatabaseAgent::new(
+            provider.expect("the rig path always builds a provider"),
+            tools,
+            tool_ctx,
+        )),
+    }
+}
+
 /// Runs one full agent turn: provider creation, state transition to
 /// `Running`, preflight (skipped when `message` is empty — the resume-after-
 /// DML case needs no schema injection), the agent loop, and error/timeout
 /// handling. Deliberately has NO `PausedForDml` guard: `ai_chat` rejects new
 /// messages while a DML is pending, but `execute_dml` resumes the agent
 /// through here after the user approves.
+///
+/// The ACP branch happens here, after the conversation CAS (spec §3 D3):
+/// with `acp` configured, the API-key load + `RigProvider` section is
+/// skipped and the turn drives the `AcpChatDriver` instead. Everything
+/// downstream — timeout wrapper, sink, error handling — is shared.
 #[allow(clippy::too_many_arguments)]
-async fn run_agent_turn(
+pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
     state: &AppState,
-    app_handle: &tauri::AppHandle,
+    app_handle: &tauri::AppHandle<R>,
     channel: tauri::ipc::Channel<AiEvent>,
     conversation_id: String,
     message: String,
@@ -1616,12 +2150,16 @@ async fn run_agent_turn(
 
     let config = state.ai_config.read().await.clone();
     log::debug!(
-        "ai_chat config: provider={}, model={}, max_turns={}, send_results_to_ai={}",
+        "ai_chat config: provider={}, model={}, max_turns={}",
         config.provider,
         config.model,
-        config.max_turns,
-        config.send_results_to_ai
+        config.max_turns
     );
+
+    // ACP branch point: with `acp` configured the rig-only section below is
+    // skipped entirely — ACP agents own their auth, and `keychain_account`
+    // for `AiProvider::Acp` is a placeholder by design (spec §4.7/D8).
+    let is_acp = config.acp.is_some();
 
     // Read the cache separately so the read guard drops before the match body
     // runs. Otherwise a write() inside the None branch would deadlock — the
@@ -1630,20 +2168,8 @@ async fn run_agent_turn(
         let guard = state.api_key_cache.read().await;
         cached_api_key(&guard, &config.provider)
     };
-    let api_key = match cached_key {
-        Some(k) => k,
-        None => {
-            let t0 = std::time::Instant::now();
-            let key = load_api_key(&config)?;
-            log::info!(
-                "API key loaded from keychain/env/file in {:.0?}",
-                t0.elapsed()
-            );
-            *state.api_key_cache.write().await = Some((config.provider.clone(), key.clone()));
-            key
-        }
-    };
-
+    // RIG-ONLY: the API key load + `RigProvider` construction. `context_tier`
+    // stays shared — the preflight below consumes it on both paths.
     let context_tier = {
         let guard = state.schema_graph.lock().await;
         guard
@@ -1651,23 +2177,56 @@ async fn run_agent_turn(
             .map(|g| crate::ai::mschema::select_tier(g).0)
             .unwrap_or(crate::ai::mschema::ContextTier::Pull)
     };
-
-    log::info!("Creating LLM provider");
-    let provider: Arc<dyn LlmProvider> = Arc::new(RigProvider::new(
-        config.provider.clone(),
-        api_key,
-        config.endpoint.clone(),
-    ));
+    let provider: Option<Arc<dyn LlmProvider>> = if is_acp {
+        None
+    } else {
+        let api_key = match cached_key {
+            Some(k) => k,
+            None => {
+                let t0 = std::time::Instant::now();
+                let key = load_api_key(&config)?;
+                log::info!(
+                    "API key loaded from keychain/env/file in {:.0?}",
+                    t0.elapsed()
+                );
+                *state.api_key_cache.write().await = Some((config.provider.clone(), key.clone()));
+                key
+            }
+        };
+        log::info!("Creating LLM provider");
+        Some(Arc::new(RigProvider::new(
+            config.provider.clone(),
+            api_key,
+            config.endpoint.clone(),
+        )))
+    };
 
     let cancel = tokio_util::sync::CancellationToken::new();
     {
         let mut locked = conv.lock().await;
-        locked.state = AgentState::Running {
-            cancel: cancel.clone(),
-        };
+        // E1: the CAS closes the window between ai_chat_impl's friendly
+        // pre-check and this point — two concurrent calls cannot both
+        // claim the conversation.
+        locked.try_begin_turn(cancel.clone())?;
+        // D2: keep the channel on the conversation only after the claim
+        // succeeds. `execute_dml` clones it to resume the agent on the same
+        // IPC stream after the user approves DML (C1). Writing it before the
+        // claim left a losing concurrent ai_chat's dead channel registered,
+        // and a later execute_dml resume would emit into it.
+        locked.event_channel = Some(channel.clone());
+        // The ACP driver keys its session-per-conversation map by this —
+        // several conversations share one connection_id, so the connection
+        // id alone would merge their ACP sessions.
+        locked.conversation_id = Some(conversation_id.clone());
     }
 
-    log::info!("Provider created, building tool context");
+    // Reranker warm-up is rig-only: the ACP path's tools run behind the
+    // bridge and degrade gracefully without it (semantic search skips
+    // reranking when the model is absent).
+    if !is_acp {
+        log::info!("Provider created, building tool context");
+        ensure_reranker(state).await;
+    }
 
     let ai_conn_id = {
         let guard = state.ai_connection_id.lock().await;
@@ -1710,8 +2269,12 @@ async fn run_agent_turn(
     };
 
     log::info!("Agent loop starting");
-    let tools = crate::ai::tools::all_tools(tool_ctx.clone());
-    let agent = DatabaseAgent::new(provider, tools, tool_ctx);
+    let tools = if is_acp {
+        Vec::new() // ACP tools live behind the bridge — the agent calls them over MCP.
+    } else {
+        crate::ai::tools::all_tools(tool_ctx.clone())
+    };
+    let driver = pick_driver(&config.acp, provider, tools, tool_ctx, state.acp.clone());
     let sink: Arc<dyn AgentSink> = Arc::new(TauriSink {
         channel,
         app_handle: app_handle.clone(),
@@ -1721,7 +2284,7 @@ async fn run_agent_turn(
     const AGENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
     let chat_result = tokio::time::timeout(
         AGENT_TIMEOUT,
-        agent.chat(
+        driver.chat(
             augmented_message,
             &config,
             system_prompt,
@@ -1817,22 +2380,41 @@ async fn ai_chat_impl(
             .await
             .map_err(|e| e.to_string())?;
 
-        // Ensure worker is connected
-        let (socket_path, token) = {
-            let mut supervisor_lock = state.supervisor.lock().await;
-            let sup =
-                supervisor_lock.get_or_insert_with(|| Supervisor::with_logs(state.logs.clone()));
-            let socket_path = sup
-                .ensure_running()
-                .await
-                .map_err(|e| format!("Worker startup failed: {e}"))?
-                .to_path_buf();
-            let token = sup.handshake_token().to_string();
-            (socket_path, token)
-        };
-
+        // Ensure worker is connected. Only touched when no client exists yet:
+        // if a client is live, the AI reuses it (and its driver) regardless of
+        // the profile, and switching the supervisor here would kill the worker
+        // under the editor's connection.
         let mut client_lock = state.client.lock().await;
         if client_lock.is_none() {
+            let (socket_path, token) = {
+                let mut supervisor_lock = state.supervisor.lock().await;
+                // Same driver-switch semantics as connect_impl: the AI can
+                // attach a profile of a different driver than the editor's
+                // last connection.
+                let needs_replacement = supervisor_lock
+                    .as_ref()
+                    .is_some_and(|s| s.driver_id() != config.driver);
+                if needs_replacement {
+                    if let Some(mut old) = supervisor_lock.take() {
+                        log::info!(
+                            "Switching driver from {} to {}; stopping the old worker",
+                            old.driver_id(),
+                            config.driver
+                        );
+                        old.shutdown().await.ok();
+                    }
+                }
+                let sup = supervisor_lock.get_or_insert_with(|| {
+                    Supervisor::for_driver(&config.driver, state.logs.clone())
+                });
+                sup.ensure_running()
+                    .await
+                    .map_err(|e| format!("Worker startup failed: {e}"))?;
+                let socket_path = sup.endpoint().to_string();
+                let token = sup.handshake_token().to_string();
+                (socket_path, token)
+            };
+
             let (new_client, new_conn_id) = ConnectorClient::connect(&socket_path, &token, config)
                 .await
                 .map_err(|e| format!("Connect failed: {e}"))?;
@@ -1848,15 +2430,22 @@ async fn ai_chat_impl(
 
     {
         let locked = conv.lock().await;
-        if let AgentState::PausedForDml { .. } = &locked.state {
-            return Err("Approve or cancel the pending DML before sending another message.".into());
+        match &locked.state {
+            AgentState::Idle => {}
+            AgentState::PausedForDml { .. } => {
+                return Err(
+                    "Approve or cancel the pending DML before sending another message.".into(),
+                );
+            }
+            AgentState::Running { .. } => {
+                return Err("An AI response is already in progress for this conversation.".into());
+            }
         }
     }
 
-    // Keep the channel on the conversation: `execute_dml` clones it to resume
-    // the agent on the same IPC stream after the user approves DML (C1).
-    conv.lock().await.event_channel = Some(channel.clone());
-
+    // D2: the channel is registered inside run_agent_turn, after the CAS
+    // claim succeeds — never here, where a losing concurrent ai_chat would
+    // leave its dead channel behind for execute_dml to emit into.
     log::info!(
         "ai_chat: conversation={conversation_id}, message_len={}",
         message.len()
@@ -1885,10 +2474,26 @@ pub async fn ai_cancel(state: State<'_, AppState>, conversation_id: String) -> R
     match &s.state {
         AgentState::Running { cancel } => {
             cancel.cancel();
+            // ACP: if the bridge is holding a `preview_dml` approval open,
+            // nothing will ever approve it now — reject it so the agent's
+            // MCP call completes with an error instead of hanging, and the
+            // slot clears (a stale approve can't execute after cancel).
+            if state.ai_config.read().await.acp.is_some() {
+                if let Some(handle) = state
+                    .acp
+                    .bridges
+                    .lock()
+                    .await
+                    .get(&conversation_id)
+                    .cloned()
+                {
+                    let _ = reject_acp_dml(&handle).await;
+                }
+            }
             s.state = AgentState::Idle;
         }
         AgentState::PausedForDml { .. } => {
-            s.take_staged_sql();
+            let _ = s.take_staged_sql();
         }
         AgentState::Idle => {}
     }
@@ -1909,6 +2514,9 @@ pub async fn close_conversation(
     state: State<'_, AppState>,
     conversation_id: String,
 ) -> Result<(), String> {
+    // ACP: end the conversation's session — the bridge socket closes with it
+    // and any parked permission requests auto-reject (spec §4.5 teardown).
+    state.acp.drop_session(&conversation_id).await;
     evict_conversation(&state, &conversation_id);
     Ok(())
 }
@@ -1928,11 +2536,61 @@ pub async fn execute_dml(
         .get(&conversation_id)
         .ok_or("Conversation not found")?
         .clone();
-    let staged_sql = conv
+
+    // ACP branch (spec §3 D5): with `acp` configured the staged SQL lives in
+    // the bridge's single-slot pending registry, NOT `conv_state` — and the
+    // agent's turn is still running while the bridge holds `preview_dml`, so
+    // `run_agent_turn` is NEVER invoked here (its API-key load would fail
+    // first; its `try_begin_turn` CAS would reject the running conversation).
+    // Approving resolves the held MCP tool call with the execution summary.
+    if state.ai_config.read().await.acp.is_some() {
+        let handle = state
+            .acp
+            .bridges
+            .lock()
+            .await
+            .get(&conversation_id)
+            .cloned()
+            .ok_or("No pending DML for this conversation (bridge not active)")?;
+        let conn_id = *state.ai_connection_id.lock().await;
+        let conn_id = conn_id
+            .or(*state.current_connection_id.lock().await)
+            .ok_or("not connected")?;
+        let client = state.client_handle().await.ok_or("not connected")?;
+        let (rows_affected, sql) = resolve_acp_dml(&handle, |sql| {
+            let client = client.clone();
+            async move { execute_staged_dml(&client, conn_id, &conv, sql).await }
+        })
+        .await?;
+        log::info!("DML executed (ACP): {rows_affected} rows affected — {sql}");
+        let _ = app_handle.emit(
+            "dml:executed",
+            serde_json::json!({
+                "conversation_id": conversation_id.clone(),
+                "rows_affected": rows_affected,
+            }),
+        );
+        return Ok(serde_json::json!({ "rows_affected": rows_affected, "sql": sql }));
+    }
+
+    const DML_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+
+    let (staged_sql, staged_at) = conv
         .lock()
         .await
         .take_staged_sql()
         .ok_or("No pending DML for this conversation")?;
+
+    // E6: a statement staged minutes ago and approved now may no longer
+    // match the data it was previewed against. Refuse (after clearing the
+    // state, so the conversation is not stuck) and ask for a re-run.
+    if staged_at.elapsed() > DML_STALE_AFTER {
+        return Err(
+            "The pending DML was staged more than 5 minutes ago. Ask the assistant \
+             to re-run the preview and approve again."
+                .into(),
+        );
+    }
 
     // Session B: the AI session when it exists (Task 2.2), else the editor's.
     let conn_id = *state.ai_connection_id.lock().await;
@@ -1999,6 +2657,104 @@ pub(crate) async fn execute_staged_dml(
     Ok(rows_affected)
 }
 
+/// Takes the bridge's single-slot DML approval (spec §3 D5). `take()` — not
+/// a peek — so a second approve/reject can never double-send through the
+/// oneshot, no matter how the frontend races its buttons.
+pub(crate) async fn take_pending_dml(
+    handle: &Arc<crate::ai::acp::bridge::BridgeHandle>,
+) -> Result<crate::ai::acp::bridge::PendingDml, String> {
+    handle
+        .pending_dml
+        .lock()
+        .await
+        .take()
+        .ok_or_else(|| "No pending DML for this conversation".to_string())
+}
+
+/// ACP-mode DML execution: executes the staged SQL through `execute` and
+/// resolves the held `preview_dml` tool call with the outcome — the agent
+/// sees a slow tool call that returns data. Never touches `run_agent_turn`.
+pub(crate) async fn resolve_acp_dml<F, Fut>(
+    handle: &Arc<crate::ai::acp::bridge::BridgeHandle>,
+    execute: F,
+) -> Result<(u64, String), String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<u64, String>>,
+{
+    let pending = take_pending_dml(handle).await?;
+    let sql = pending.sql.clone();
+    let rows_affected = execute(sql.clone()).await?;
+    let _ = pending.tx.send(Ok(crate::ai::acp::bridge::DmlOutcome { rows_affected }));
+    Ok((rows_affected, sql))
+}
+
+/// ACP-mode DML rejection: resolves the held tool call with an error, so the
+/// agent streams an acknowledgement instead of hanging on a dead call.
+pub(crate) async fn reject_acp_dml(
+    handle: &Arc<crate::ai::acp::bridge::BridgeHandle>,
+) -> Result<(), String> {
+    let pending = take_pending_dml(handle).await?;
+    let _ = pending.tx.send(Err("DML rejected by user".into()));
+    Ok(())
+}
+
+/// The conversation's ACP session id (the permission FIFO is keyed by
+/// session id — spec §4.5). Errors when the conversation has no live session.
+pub(crate) async fn resolve_permission_session(
+    state: &AppState,
+    conversation_id: &str,
+) -> Result<String, String> {
+    state
+        .acp
+        .sessions
+        .lock()
+        .await
+        .get(conversation_id)
+        .map(|s| s.session_id.clone())
+        .ok_or_else(|| "no active ACP session for this conversation".into())
+}
+
+/// ACP-mode DML rejection command: same branch shape as `execute_dml` — the
+/// staged SQL lives in the bridge, so rejecting takes the slot and resolves
+/// the held tool call with an error. The `dml:rejected` event closes the DML
+/// card on the frontend. Rig mode uses `ai_cancel` (which drops the staged
+/// SQL) instead.
+#[tauri::command]
+pub async fn reject_dml(
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+    conversation_id: String,
+) -> Result<(), String> {
+    let handle = state
+        .acp
+        .bridges
+        .lock()
+        .await
+        .get(&conversation_id)
+        .cloned()
+        .ok_or("No pending DML for this conversation (bridge not active)")?;
+    reject_acp_dml(&handle).await?;
+    let _ = app_handle.emit(
+        "dml:rejected",
+        serde_json::json!({ "conversation_id": conversation_id }),
+    );
+    Ok(())
+}
+
+/// Answers the agent's `session/request_permission` for a conversation
+/// (spec §4.5): `allow=true` selects the agent's allow-once option,
+/// `allow=false` rejects. The agent's turn is blocked until this resolves.
+#[tauri::command]
+pub async fn respond_agent_permission(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    allow: bool,
+) -> Result<(), String> {
+    let session_id = resolve_permission_session(&state, &conversation_id).await?;
+    state.acp.permissions.respond(&session_id, allow).await
+}
+
 #[tauri::command]
 pub async fn get_ai_settings(state: State<'_, AppState>) -> Result<AiConfig, String> {
     Ok(state.ai_config.read().await.clone())
@@ -2020,12 +2776,44 @@ pub async fn get_ai_usage(
     Ok(serde_json::json!(usage))
 }
 
+/// `Custom` has no default base URL (see `dispatch::default_base_url`) — an
+/// empty endpoint there isn't "use the default," it's a config the agent
+/// can never actually connect with. Every other provider is fine with no
+/// endpoint override.
+fn validate_custom_endpoint(config: &AiConfig) -> Result<(), String> {
+    if config.provider == AiProvider::Custom {
+        let has_endpoint = config
+            .endpoint
+            .as_deref()
+            .map(|e| !e.trim().is_empty())
+            .unwrap_or(false);
+        if !has_endpoint {
+            return Err("Custom provider requires an endpoint URL".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Enforces the ACP-path invariant at the save boundary: the ACP path is
+/// selected by the presence of `config.acp` alone (`pick_driver` branches on
+/// it, never on `provider`) — a stale block with a non-ACP provider would
+/// silently route chats to the agent. Normalize here rather than relying on
+/// the frontend to null it out.
+fn normalize_acp_config(mut config: AiConfig) -> AiConfig {
+    if config.provider != AiProvider::Acp {
+        config.acp = None;
+    }
+    config
+}
+
 #[tauri::command]
 pub async fn save_ai_settings(
     state: State<'_, AppState>,
     config: AiConfig,
     api_key: Option<String>,
 ) -> Result<(), String> {
+    validate_custom_endpoint(&config)?;
+    let config = normalize_acp_config(config);
     if let Some(key) = api_key {
         keyring::Entry::new(KEYCHAIN_SERVICE, keychain_account(&config.provider))
             .map_err(|e| format!("Keychain error: {e}"))?
@@ -2038,6 +2826,68 @@ pub async fn save_ai_settings(
     // Key or provider may have changed — force a fresh keychain read next message.
     *state.api_key_cache.write().await = None;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn list_ai_models(
+    provider: AiProvider,
+    api_key: Option<String>,
+    endpoint: Option<String>,
+) -> Result<Vec<crate::ai::providers::dispatch::ModelSummary>, String> {
+    let key = match api_key {
+        Some(k) if !k.is_empty() => k,
+        _ => keyring::Entry::new(KEYCHAIN_SERVICE, keychain_account(&provider))
+            .ok()
+            .and_then(|entry| entry.get_password().ok())
+            .unwrap_or_default(),
+    };
+    crate::ai::providers::dispatch::list_models_for(&provider, &key, &endpoint).await
+}
+
+/// Lists the ACP agent registry merged with installed state. Never fails: on
+/// a fetch error it falls back to the cached registry, then the bundled
+/// snapshot (see `registry::refresh_registry`), so the Settings panel always
+/// has a list to render.
+#[tauri::command]
+pub async fn list_registry_agents(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::ai::acp::RegistryAgentSummary>, String> {
+    let reg = crate::ai::acp::registry::refresh_registry(&state.acp_http).await?;
+    Ok(crate::ai::acp::summarize(&reg, |id| {
+        crate::ai::acp::install::read_installed(id).ok().flatten()
+    }))
+}
+
+/// Installs a registry agent (npx/uvx launch spec or verified binary
+/// download) into `~/.lucent/agents/<id>/` and returns its launch spec, which
+/// the frontend surfaces as install confirmation.
+#[tauri::command]
+pub async fn install_acp_agent(
+    state: State<'_, AppState>,
+    agent_id: String,
+) -> Result<crate::ai::acp::install::InstalledAgent, String> {
+    let reg = crate::ai::acp::registry::refresh_registry(&state.acp_http).await?;
+    let agent = reg
+        .agents
+        .iter()
+        .find(|a| a.id == agent_id)
+        .ok_or_else(|| format!("unknown agent: {agent_id}"))?;
+    crate::ai::acp::install::install(agent, &state.acp_http).await
+}
+
+/// Removes an installed agent directory (binary downloads and installed.json).
+/// Idempotent: a missing directory is not an error.
+#[tauri::command]
+pub async fn uninstall_acp_agent(agent_id: String) -> Result<(), String> {
+    crate::ai::acp::install::uninstall(&agent_id)
+}
+
+/// Lists every installed ACP agent from disk, independent of the registry — an
+/// agent installed via command override, or whose registry entry vanished,
+/// still appears here (the provider picker depends on that).
+#[tauri::command]
+pub async fn list_installed_acp_agents() -> Result<Vec<InstalledAgent>, String> {
+    Ok(crate::ai::acp::install::list_installed())
 }
 
 #[cfg(test)]
@@ -2071,46 +2921,112 @@ mod api_key_cache_tests {
 }
 
 #[cfg(test)]
+mod acp_config_normalization_tests {
+    use super::normalize_acp_config;
+    use crate::ai::config::{AcpAgentConfig, AiConfig, AiProvider};
+    use std::collections::HashMap;
+
+    fn config_with_acp(provider: AiProvider) -> AiConfig {
+        AiConfig {
+            provider,
+            acp: Some(AcpAgentConfig {
+                agent_id: "opencode".to_string(),
+                command: None,
+                env: HashMap::new(),
+                auto_deny_permissions: false,
+            }),
+            ..AiConfig::default()
+        }
+    }
+
+    #[test]
+    fn drops_a_stale_acp_block_for_a_non_acp_provider() {
+        let cfg = config_with_acp(AiProvider::OpenAI);
+        let normalized = normalize_acp_config(cfg);
+        assert!(
+            normalized.acp.is_none(),
+            "a stale acp block with a non-ACP provider must be dropped"
+        );
+        assert_eq!(normalized.provider, AiProvider::OpenAI);
+    }
+
+    #[test]
+    fn keeps_the_acp_block_for_the_acp_provider() {
+        let cfg = config_with_acp(AiProvider::Acp);
+        let normalized = normalize_acp_config(cfg);
+        assert!(normalized.acp.is_some(), "acp block must survive for acp");
+    }
+
+    #[test]
+    fn leaves_a_config_without_acp_untouched() {
+        let cfg = AiConfig {
+            provider: AiProvider::Anthropic,
+            ..AiConfig::default()
+        };
+        let normalized = normalize_acp_config(cfg);
+        assert!(normalized.acp.is_none());
+    }
+}
+
+#[cfg(test)]
+mod custom_endpoint_validation_tests {
+    use super::validate_custom_endpoint;
+    use crate::ai::config::{AiConfig, AiProvider};
+
+    fn config_with(provider: AiProvider, endpoint: Option<&str>) -> AiConfig {
+        AiConfig {
+            provider,
+            endpoint: endpoint.map(str::to_string),
+            ..AiConfig::default()
+        }
+    }
+
+    #[test]
+    fn rejects_custom_with_no_endpoint() {
+        let cfg = config_with(AiProvider::Custom, None);
+        assert!(validate_custom_endpoint(&cfg).is_err());
+    }
+
+    #[test]
+    fn rejects_custom_with_blank_endpoint() {
+        let cfg = config_with(AiProvider::Custom, Some("   "));
+        assert!(validate_custom_endpoint(&cfg).is_err());
+    }
+
+    #[test]
+    fn accepts_custom_with_endpoint() {
+        let cfg = config_with(AiProvider::Custom, Some("http://localhost:8080/v1"));
+        assert!(validate_custom_endpoint(&cfg).is_ok());
+    }
+
+    #[test]
+    fn accepts_non_custom_with_no_endpoint() {
+        let cfg = config_with(AiProvider::OpenAI, None);
+        assert!(validate_custom_endpoint(&cfg).is_ok());
+    }
+}
+
+#[cfg(test)]
 mod usage_tests {
     use super::accumulate_usage;
     use crate::ai::events::TokenUsage;
 
     #[test]
-    fn sums_token_fields_and_cost_across_runs() {
+    fn sums_token_fields_across_runs() {
         let existing = TokenUsage {
             prompt_tokens: 100,
             completion_tokens: 20,
             cached_prompt_tokens: 30,
-            estimated_cost_usd: Some(0.5),
         };
         let new = TokenUsage {
             prompt_tokens: 50,
             completion_tokens: 10,
             cached_prompt_tokens: 5,
-            estimated_cost_usd: Some(0.25),
         };
         let acc = accumulate_usage(&existing, &new);
         assert_eq!(acc.prompt_tokens, 150);
         assert_eq!(acc.completion_tokens, 30);
         assert_eq!(acc.cached_prompt_tokens, 35);
-        assert_eq!(acc.estimated_cost_usd, Some(0.75));
-    }
-
-    #[test]
-    fn cost_survives_runs_that_report_none() {
-        let with_cost = TokenUsage {
-            estimated_cost_usd: Some(1.0),
-            ..TokenUsage::default()
-        };
-        let no_cost = TokenUsage::default();
-        assert_eq!(
-            accumulate_usage(&with_cost, &no_cost).estimated_cost_usd,
-            Some(1.0)
-        );
-        assert_eq!(
-            accumulate_usage(&no_cost, &no_cost).estimated_cost_usd,
-            None
-        );
     }
 
     #[test]
@@ -2119,13 +3035,11 @@ mod usage_tests {
             prompt_tokens: 42,
             completion_tokens: 7,
             cached_prompt_tokens: 3,
-            estimated_cost_usd: None,
         };
         let acc = accumulate_usage(&TokenUsage::default(), &new);
         assert_eq!(acc.prompt_tokens, 42);
         assert_eq!(acc.completion_tokens, 7);
         assert_eq!(acc.cached_prompt_tokens, 3);
-        assert_eq!(acc.estimated_cost_usd, None);
     }
 }
 
@@ -2167,7 +3081,6 @@ mod conversation_lifecycle_tests {
             crate::ai::events::TokenUsage {
                 prompt_tokens: 10,
                 completion_tokens: 5,
-                estimated_cost_usd: Some(0.01),
                 cached_prompt_tokens: 2,
             },
         );
@@ -2296,5 +3209,240 @@ mod password_cache_tests {
         );
         // The cache must not have been polluted by the miss.
         assert!(state.password_cache.read().await.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod path_security_tests {
+    #[tokio::test]
+    async fn test_export_path_rejects_traversal() {
+        let dir = std::env::temp_dir().join(format!("lucent-path-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // temp_dir may be a symlink (/var -> /private/var on macOS); canonicalize
+        // so the approved set holds the same form validate_approved produces.
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let approved: std::collections::HashSet<std::path::PathBuf> =
+            std::collections::HashSet::from([dir.join("ok.csv")]);
+
+        // ../../ escape
+        let evil = dir.join("..").join("..").join(".zshrc");
+        assert!(super::validate_approved(&evil, &approved).is_err());
+        // absolute escape
+        let absolute = std::env::temp_dir().join("lucent-escape.csv");
+        assert!(super::validate_approved(&absolute, &approved).is_err());
+        // symlink escape: approved path is a symlink pointing outside
+        #[cfg(unix)]
+        {
+            let outside =
+                std::env::temp_dir().join(format!("lucent-outside-{}", std::process::id()));
+            std::fs::write(&outside, b"x").unwrap();
+            let link = dir.join("link.csv");
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            assert!(super::validate_approved(&link, &approved).is_err());
+            let _ = std::fs::remove_file(&outside);
+        }
+        // approved in-bounds path accepted
+        assert!(super::validate_approved(&dir.join("ok.csv"), &approved).is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/save_sql_file_test.rs"]
+mod save_sql_file_tests;
+
+/// D1 seam tests: `pick_driver` branches on `config.acp` — the ACP path
+/// constructs the `AcpChatDriver` (no provider), the rig path constructs the
+/// `DatabaseAgent` with the provider it was given.
+#[cfg(test)]
+mod acp_driver_branch_tests {
+    use super::*;
+    use crate::ai::acp::AcpState;
+    use crate::ai::config::AcpAgentConfig;
+    use crate::ai::provider::LlmProvider;
+    use async_trait::async_trait;
+
+    /// Minimal tool context: no DB, no schema graph, no embedder — the
+    /// branch test never runs a turn, only constructs drivers.
+    fn tool_ctx() -> AiToolContext {
+        AiToolContext {
+            db: Arc::new(Mutex::new(None)),
+            connection_id: None,
+            capabilities: None,
+            config: AiConfig::default(),
+            schema_graph: Arc::new(Mutex::new(None)),
+            embedder: Arc::new(Mutex::new(None)),
+            reranker: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    struct FakeProvider;
+
+    #[async_trait]
+    impl LlmProvider for FakeProvider {
+        async fn build_agent(
+            &self,
+            _model: &str,
+            _preamble: String,
+            _max_tokens: u32,
+            _tools: Vec<crate::ai::tools::LucentToolEnum>,
+        ) -> Box<dyn crate::ai::provider::LucentAgent> {
+            unreachable!("the branch test never chats")
+        }
+    }
+
+    #[test]
+    fn driver_branch_selects_acp_when_configured() {
+        let acp = Some(AcpAgentConfig {
+            agent_id: "stub".into(),
+            command: Some("stub-binary".into()),
+            env: HashMap::new(),
+            auto_deny_permissions: false,
+        });
+        let driver: Box<dyn AgentDriver> =
+            pick_driver(&acp, None, Vec::new(), tool_ctx(), AcpState::new());
+        assert!(
+            driver.as_any().is::<crate::ai::acp::driver::AcpChatDriver>(),
+            "acp configured → AcpChatDriver"
+        );
+    }
+
+    #[test]
+    fn driver_branch_keeps_rig_when_unconfigured() {
+        let driver: Box<dyn AgentDriver> = pick_driver(
+            &None,
+            Some(Arc::new(FakeProvider)),
+            Vec::new(),
+            tool_ctx(),
+            AcpState::new(),
+        );
+        assert!(
+            driver.as_any().is::<DatabaseAgent>(),
+            "no acp → DatabaseAgent"
+        );
+    }
+}
+
+/// D4 branch tests: the ACP `execute_dml` / `reject_dml` resolution resolves
+/// the bridge's held `preview_dml` tool call through its oneshot and never
+/// touches `run_agent_turn`'s machinery (no conversation CAS).
+#[cfg(test)]
+mod acp_dml_branch_tests {
+    use super::*;
+    use crate::ai::acp::bridge::{BridgeHandle, PendingDml};
+    use crate::ai::acp::permissions::PermissionPending;
+    use crate::ai::acp::SessionEntry;
+    use agent_client_protocol::schema::v1::{
+        PermissionOptionId, RequestPermissionOutcome,
+    };
+
+    #[tokio::test]
+    async fn execute_dml_acp_branch_resolves_bridge_oneshot() {
+        let handle = Arc::new(BridgeHandle::new("conv-1"));
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle.pending_dml.lock().await.replace(PendingDml {
+            sql: "UPDATE t SET a = 1".into(),
+            tx,
+        });
+        let conv = Arc::new(Mutex::new(ConversationState::new("conn-1".into())));
+
+        let (rows, sql) = resolve_acp_dml(&handle, |sql| async move {
+            assert_eq!(sql, "UPDATE t SET a = 1");
+            Ok(2u64)
+        })
+        .await
+        .expect("resolve succeeds");
+        assert_eq!(rows, 2);
+        assert_eq!(sql, "UPDATE t SET a = 1");
+
+        let outcome = rx.await.expect("oneshot fires").expect("Ok outcome");
+        assert_eq!(outcome.rows_affected, 2);
+
+        // take() already removed the slot — a second approval cannot
+        // double-send.
+        assert!(
+            resolve_acp_dml(&handle, |_| async move { Ok(0u64) })
+                .await
+                .is_err(),
+            "second resolution finds no pending slot"
+        );
+        // The ACP branch never touched the conversation CAS — the state is
+        // whatever it was (Idle here), and no claim was attempted.
+        assert!(
+            matches!(conv.lock().await.state, AgentState::Idle),
+            "no conversation CAS on the ACP path"
+        );
+    }
+
+    #[tokio::test]
+    async fn reject_dml_resolves_oneshot_with_error() {
+        let handle = Arc::new(BridgeHandle::new("conv-1"));
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle.pending_dml.lock().await.replace(PendingDml {
+            sql: "UPDATE t SET a = 1".into(),
+            tx,
+        });
+
+        reject_acp_dml(&handle).await.expect("reject succeeds");
+        let err = rx
+            .await
+            .expect("oneshot fires")
+            .expect_err("rejection carries the error to the agent");
+        assert!(err.contains("rejected"), "{err}");
+
+        assert!(
+            reject_acp_dml(&handle).await.is_err(),
+            "nothing left to reject after take()"
+        );
+    }
+
+    #[tokio::test]
+    async fn respond_agent_permission_resolves_via_conversation_session() {
+        let state = AppState::new();
+        let entry = Arc::new(SessionEntry {
+            session_id: "s1".into(),
+            bridge: Arc::new(BridgeHandle::new("conv-1")),
+            tools: Arc::new(crate::ai::acp::bridge::BridgeConnection::default()),
+            first_prompt: std::sync::atomic::AtomicBool::new(false),
+            tools_notice: std::sync::atomic::AtomicBool::new(false),
+            _endpoint_dir: None,
+        });
+        state.acp.sessions.lock().await.insert("conv-1".into(), entry);
+
+        let sid = resolve_permission_session(&state, "conv-1")
+            .await
+            .expect("conversation → session");
+        assert_eq!(sid, "s1");
+        let err = resolve_permission_session(&state, "conv-9")
+            .await
+            .expect_err("unknown conversation");
+        assert!(err.contains("no active ACP session"), "{err}");
+
+        // Full round-trip: park a pending decision, resolve it allow=true
+        // through the same registry `respond_agent_permission` touches.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state
+            .acp
+            .permissions
+            .push(
+                "s1",
+                PermissionPending {
+                    tx,
+                    allow_option_id: Some(PermissionOptionId::new("allow_once")),
+                },
+            )
+            .await;
+        state
+            .acp
+            .permissions
+            .respond("s1", true)
+            .await
+            .expect("allow resolves");
+        let outcome = rx.await.expect("oneshot fires");
+        assert!(
+            matches!(outcome, RequestPermissionOutcome::Selected(_)),
+            "allow selects the agent's option: {outcome:?}"
+        );
     }
 }

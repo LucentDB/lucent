@@ -53,8 +53,18 @@
 
   let connectionName = $derived(model.metadata.connectionName ?? '');
   let databaseName = $derived(model.metadata.database ?? '');
+  let notebookEl: HTMLDivElement | undefined = $state();
 
   let handleCommandKey = $derived(createCommandKeymap(model));
+
+  // Command mode needs a stable focus target so Arrow/J/K navigation keeps
+  // working after Escape or Shift+Enter blurs the cell editor.
+  $effect(() => {
+    if (model.mode !== 'command' || !notebookEl) return;
+    if (document.activeElement !== notebookEl) {
+      notebookEl.focus({ preventScroll: true });
+    }
+  });
 
   function onKeydown(e: KeyboardEvent) {
     // Edit mode belongs to the editors: CodeMirror and the textareas own their keys.
@@ -76,13 +86,16 @@
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
+  bind:this={notebookEl}
   class="notebook"
+  class:command-mode={model.mode === 'command'}
   role="application"
   aria-label="SQL notebook"
   tabindex="-1"
   onkeydown={onKeydown}
 >
   <NotebookToolbar
+    mode={model.mode as 'command' | 'edit'}
     onRunAll={() => model.runAll()}
     onClearOutputs={async () => {
       await model.clearOutputs();
@@ -110,10 +123,21 @@
         <MarkdownCell
           source={cell.source}
           status={cell.status}
+          editing={model.selectedCellId === cell.id && model.mode === 'edit'}
           onSourceChange={(v) => model.setCellSource(cell.id, v)}
+          onRun={() => model.runCell(cell.id)}
+          onRunAndAdvance={() => model.runAndAdvance(cell.id)}
+          onEnterEdit={() => model.enterEditMode()}
+          onExitEdit={() => model.enterCommandMode()}
         />
       {:else if cell.kind === 'ai'}
-        <AiCell {cell} {model} />
+        <AiCell
+          {cell}
+          {model}
+          editing={model.selectedCellId === cell.id && model.mode === 'edit'}
+          onEnterEdit={() => model.enterEditMode()}
+          onExitEdit={() => model.enterCommandMode()}
+        />
       {/if}
     {/snippet}
   </CellList>

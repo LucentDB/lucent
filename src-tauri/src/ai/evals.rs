@@ -262,13 +262,21 @@ mod runner {
         // If the worker binary is not locatable via Supervisor (e.g. under cargo test),
         // set LUCENT_WORKER_BIN to the full path of lucent-driver-postgres.
         let mut sup = crate::supervisor::Supervisor::new();
-        let socket = sup.ensure_running().await.expect("worker").to_path_buf();
+        sup.ensure_running().await.expect("worker");
+        let socket = sup.endpoint().to_string();
         let token = sup.handshake_token().to_string();
         let conn_config = eval_connection_config(&db_conn);
-        let client = crate::client::ConnectorClient::connect(&socket, &token, conn_config)
-            .await
-            .expect("agent DB connect");
+        let (client, worker_conn_id) =
+            crate::client::ConnectorClient::connect(&socket, &token, conn_config)
+                .await
+                .expect("agent DB connect");
         let db = Arc::new(Mutex::new(Some(client)));
+        let capabilities = db
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|c| c.server_info.as_ref())
+            .map(|s| s.capabilities.clone());
 
         // Build graph + embedder exactly as connect_db does, then the system prompt.
         let embedder = crate::ai::embed::Embedder::new().ok();
@@ -276,9 +284,11 @@ mod runner {
         let graph = {
             let mut g = db.lock().await;
             crate::ai::schema_graph::SchemaIndexer::build_index(
+                worker_conn_id,
                 g.as_mut().unwrap(),
                 embedder.lock().await.as_ref().expect("embedder"),
                 true,
+                &capabilities.clone().expect("capabilities after connect"),
             )
             .await
             .expect("graph")
@@ -322,7 +332,8 @@ mod runner {
                 ));
             let tool_ctx = crate::ai::tools::AiToolContext {
                 db: db.clone(),
-                capabilities: None,
+                connection_id: Some(worker_conn_id),
+                capabilities: capabilities.clone(),
                 config: config.clone(),
                 schema_graph: graph.clone(),
                 embedder: embedder.clone(),
@@ -333,7 +344,7 @@ mod runner {
                 let tree = crate::ai::context::tree_from_graph("demo".into(), g.as_ref().unwrap());
                 // Evals run against a fixed in-memory schema with no live
                 // connection, so there are no capabilities to disclose.
-                crate::ai::context::build_system_prompt(&tree, g.as_ref(), true, None)
+                crate::ai::context::build_system_prompt(&tree, g.as_ref(), None)
             };
             let tools = crate::ai::tools::all_tools(tool_ctx.clone());
             let agent = crate::ai::agent::DatabaseAgent::new(provider, tools, tool_ctx);

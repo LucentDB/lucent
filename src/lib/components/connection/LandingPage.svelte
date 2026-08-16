@@ -101,7 +101,19 @@
   <!-- Header -->
   <div class="manager-header">
     <div class="brand">
-      <span class="logo">⌬</span>
+      <div class="logo-container">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="url(#logo-gradient)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="logo-svg">
+          <defs>
+            <linearGradient id="logo-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="var(--accent)" />
+              <stop offset="100%" stop-color="#a78bfa" />
+            </linearGradient>
+          </defs>
+          <ellipse cx="12" cy="5" rx="9" ry="3" />
+          <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+          <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+        </svg>
+      </div>
       <h1 class="title">Lucent</h1>
     </div>
     <p class="tagline">
@@ -224,42 +236,59 @@
     flex-direction: column;
     background: var(--bg);
     overflow: hidden;
-    max-width: 760px;
+    max-width: 780px;
     margin: 0 auto;
     width: 100%;
     height: 100%;
     box-sizing: border-box;
+    position: relative;
   }
   .manager-header {
     text-align: center;
-    padding: 32px 24px 20px;
+    padding: 44px 24px 24px;
     flex-shrink: 0;
+    position: relative;
   }
   .brand {
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 10px;
-    margin-bottom: 6px;
+    gap: 14px;
+    margin-bottom: 10px;
   }
-  .logo {
-    font-size: 32px;
-    color: var(--accent);
-    filter: drop-shadow(
-      0 2px 8px color-mix(in srgb, var(--accent) 30%, transparent)
-    );
+  .logo-container {
+    width: 48px;
+    height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--accent-soft);
+    border-radius: var(--radius-lg);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--accent) 15%, transparent),
+      0 4px 20px color-mix(in srgb, var(--accent) 20%, transparent);
+    flex-shrink: 0;
+  }
+  .logo-svg {
+    filter: drop-shadow(0 2px 4px color-mix(in srgb, var(--accent) 30%, transparent));
   }
   .title {
-    font-size: 24px;
-    font-weight: 700;
-    color: var(--text);
-    letter-spacing: -0.03em;
+    font-size: 30px;
+    font-weight: 750;
+    background: linear-gradient(135deg, var(--text) 40%, var(--accent));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    letter-spacing: -0.04em;
     margin: 0;
+    line-height: 1.1;
   }
   .tagline {
-    font-size: 13px;
+    font-size: 14px;
     color: var(--text-muted);
     margin: 0;
+    font-weight: 400;
+    line-height: 1.5;
   }
   .manager-body {
     flex: 1;
@@ -283,12 +312,13 @@
     font-weight: 600;
     color: var(--text);
     margin: 0;
+    letter-spacing: -0.02em;
   }
   .back-btn {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 7px 12px;
+    padding: 8px 14px;
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: var(--bg-surface);
@@ -297,12 +327,14 @@
     font-weight: 500;
     cursor: pointer;
     transition:
-      background 0.12s,
-      color 0.12s;
+      all var(--transition-normal);
+    box-shadow: var(--shadow-sm);
   }
   .back-btn:hover {
     background: var(--bg-hover);
     color: var(--text);
+    transform: translateX(-2px);
+    border-color: color-mix(in srgb, var(--text) 30%, transparent);
   }
   .error-banner {
     display: flex;
@@ -310,16 +342,21 @@
     justify-content: space-between;
     gap: 12px;
     padding: 12px 16px;
-    margin: 16px 0;
-    background: color-mix(in srgb, var(--error) 10%, transparent);
+    margin: 12px 0;
+    background: color-mix(in srgb, var(--error) 8%, transparent);
     color: var(--error);
     border-radius: var(--radius-md);
     font-size: 13px;
-    border: 1px solid color-mix(in srgb, var(--error) 30%, transparent);
+    border: 1px solid color-mix(in srgb, var(--error) 25%, transparent);
+    animation: slide-in 0.2s ease-out;
+  }
+  @keyframes slide-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
   }
   .dismiss-btn {
-    width: 20px;
-    height: 20px;
+    width: 24px;
+    height: 24px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -329,15 +366,18 @@
     cursor: pointer;
     border-radius: 50%;
     flex-shrink: 0;
+    font-size: 14px;
+    transition: all var(--transition-fast);
   }
   .dismiss-btn:hover {
-    background: color-mix(in srgb, var(--error) 20%, transparent);
+    background: color-mix(in srgb, var(--error) 15%, transparent);
+    transform: scale(1.1);
   }
   .quick-connect-container {
-    margin-top: 24px;
+    margin-top: 28px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 14px;
   }
   .quick-connect-header {
     display: flex;
@@ -346,24 +386,38 @@
     padding: 0 4px;
   }
   .quick-connect-header h3 {
-    font-size: 14px;
+    font-size: 12px;
     font-weight: 600;
-    color: var(--text-secondary);
+    color: var(--text-muted);
     margin: 0;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
   }
   .shortcut-hint {
     text-align: center;
     font-size: 12px;
     color: var(--text-muted);
-    padding: 12px 24px;
+    padding: 14px 24px 18px;
     flex-shrink: 0;
+    border-top: 1px solid var(--border-light);
+    background: color-mix(in srgb, var(--bg-subtle) 50%, transparent);
   }
   .shortcut-hint kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 20px;
     font-size: 11px;
-    background: var(--bg-hover);
-    padding: 2px 6px;
-    border-radius: 4px;
+    font-weight: 600;
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    padding: 0 6px;
+    border-radius: 5px;
     border: 1px solid var(--border);
     font-family: var(--font-mono);
+    box-shadow: 0 1px 0 var(--border), 0 1px 2px rgba(0,0,0,0.05);
+    margin: 0 1px;
   }
 </style>
+

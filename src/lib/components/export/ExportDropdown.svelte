@@ -1,6 +1,5 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { save } from '@tauri-apps/plugin-dialog';
 
   let {
     disabled = false,
@@ -34,9 +33,12 @@
     const ext = exportFormats.find((f) => f.id === formatId)?.ext ?? '.csv';
 
     try {
-      const path = await save({
-        filters: [{ name: formatId.toUpperCase(), extensions: [ext.slice(1)] }],
-        defaultPath: `export${ext}`,
+      // The path must be chosen in a native Rust-side dialog so the write
+      // command's approved-path gate accepts it (frontend paths are untrusted).
+      const path = await invoke<string | null>('choose_export_path', {
+        defaultName: `export${ext}`,
+        filterName: formatId.toUpperCase(),
+        extensions: [ext.slice(1)],
       });
       if (!path) return; // cancelled
 

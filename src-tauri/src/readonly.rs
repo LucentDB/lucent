@@ -101,6 +101,21 @@ impl ReadOnlySession {
             },
         })
     }
+
+    /// Run the teardown synchronously (awaited). Prefer this over drop:
+    /// drop spawns the teardown, which can race the caller's next
+    /// transaction on the same connection — if the caller's next BEGIN wins
+    /// the writer lock, the spawned ROLLBACK aborts the NEW transaction
+    /// (C7). Drop remains as a best-effort fallback for error paths.
+    pub async fn close(mut self) {
+        if self.teardown.is_empty() {
+            return;
+        }
+        let statements = std::mem::take(&mut self.teardown);
+        for stmt in statements {
+            let _ = self.client.execute(self.conn_id, &stmt).await;
+        }
+    }
 }
 
 impl Drop for ReadOnlySession {
@@ -220,6 +235,11 @@ mod tests {
             let mut framed = new_framed(stream);
             let _version: u32 = read_message(&mut framed).await.unwrap().unwrap();
             let _token: String = read_message(&mut framed).await.unwrap().unwrap();
+            // Handshake ack (protocol v6): the client reads this before sending
+            // any request.
+            write_message(&mut framed, &WorkerResponse::HandshakeAccepted)
+                .await
+                .unwrap();
             let request: WorkerRequest = read_message(&mut framed).await.unwrap().unwrap();
             let connection_id = match request {
                 WorkerRequest::Connect { connection_id, .. } => connection_id,
@@ -283,10 +303,13 @@ mod tests {
             assert!(seen_rollback, "fake worker must receive ROLLBACK");
         });
 
-        let (client, conn_id) =
-            ConnectorClient::connect(&socket_path, "test-token", ConnectionConfig::default())
-                .await
-                .expect("connect to fake worker");
+        let (client, conn_id) = ConnectorClient::connect(
+            socket_path.to_str().unwrap(),
+            "test-token",
+            ConnectionConfig::default(),
+        )
+        .await
+        .expect("connect to fake worker");
 
         let caps = fake_capabilities();
         {
@@ -299,6 +322,111 @@ mod tests {
             .await
             .expect("fake worker must receive ROLLBACK after session drop")
             .expect("channel");
+        server.await.unwrap();
+        let mut client = client;
+        let _ = client.shutdown().await;
+    }
+
+    /// C7: close() must run the teardown to completion BEFORE returning —
+    /// the spawned Drop teardown races the caller's next transaction on the
+    /// same connection (if the caller's BEGIN wins the writer lock, the
+    /// spawned ROLLBACK aborts the NEW transaction). The fake worker records
+    /// when it has RECEIVED the ROLLBACK; close() returning after that
+    /// proves the round trip completed inside close().
+    #[tokio::test]
+    async fn close_awaits_the_rollback_round_trip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket_path = dir.path().join("worker.sock");
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let rollback_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let rollback_seen_worker = rollback_seen.clone();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut framed = new_framed(stream);
+            let _version: u32 = read_message(&mut framed).await.unwrap().unwrap();
+            let _token: String = read_message(&mut framed).await.unwrap().unwrap();
+            write_message(&mut framed, &WorkerResponse::HandshakeAccepted)
+                .await
+                .unwrap();
+            let request: WorkerRequest = read_message(&mut framed).await.unwrap().unwrap();
+            let connection_id = match request {
+                WorkerRequest::Connect { connection_id, .. } => connection_id,
+                other => panic!("expected Connect, got {other:?}"),
+            };
+            write_message(
+                &mut framed,
+                &WorkerResponse::Connected {
+                    connection_id,
+                    server_info: ServerInfo {
+                        version: "fake".into(),
+                        capabilities: fake_capabilities(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+
+            // Three setup statements, then the ROLLBACK from close().
+            let mut seen_rollback = false;
+            for _ in 0..4 {
+                let request: WorkerRequest = read_message(&mut framed).await.unwrap().unwrap();
+                let (query_id, command) = match request {
+                    WorkerRequest::Execute {
+                        query_id, command, ..
+                    } => (query_id, command),
+                    other => panic!("expected Execute, got {other:?}"),
+                };
+                if command == "ROLLBACK" {
+                    seen_rollback = true;
+                    rollback_seen_worker.store(true, std::sync::atomic::Ordering::SeqCst);
+                } else {
+                    assert!(
+                        matches!(
+                            command.as_str(),
+                            "BEGIN"
+                                | "SET TRANSACTION READ ONLY"
+                                | "SET LOCAL statement_timeout = 500"
+                        ),
+                        "unexpected setup statement: {command}"
+                    );
+                }
+                write_message(
+                    &mut framed,
+                    &WorkerResponse::ResultBatch {
+                        query_id,
+                        shape: ResultShape::Tabular {
+                            columns: Arc::new(vec![]),
+                            rows: vec![],
+                        },
+                        sequence: 0,
+                        is_final: true,
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            assert!(seen_rollback, "fake worker must receive ROLLBACK");
+        });
+
+        let (client, conn_id) = ConnectorClient::connect(
+            socket_path.to_str().unwrap(),
+            "test-token",
+            ConnectionConfig::default(),
+        )
+        .await
+        .expect("connect to fake worker");
+
+        let caps = fake_capabilities();
+        let session = ReadOnlySession::begin(&client, conn_id, &caps, 500)
+            .await
+            .expect("begin must succeed against the fake worker");
+        session.close().await;
+
+        assert!(
+            rollback_seen.load(std::sync::atomic::Ordering::SeqCst),
+            "close() must not return before the ROLLBACK round trip completes"
+        );
         server.await.unwrap();
         let mut client = client;
         let _ = client.shutdown().await;

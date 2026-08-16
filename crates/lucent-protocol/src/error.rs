@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LucentErrorKind {
+    Protocol,
     ConnectionRefused,
     AuthenticationFailed,
     QuerySyntaxError,
@@ -37,6 +38,7 @@ impl LucentError {
 impl std::fmt::Display for LucentErrorKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Protocol => write!(f, "Protocol"),
             Self::ConnectionRefused => write!(f, "Connection refused"),
             Self::AuthenticationFailed => write!(f, "Authentication failed"),
             Self::QuerySyntaxError => write!(f, "Query syntax error"),

@@ -6,7 +6,9 @@
     getSchemaObjects,
   } from '../../ipc/client.js';
   import { connections } from '../../stores/connections.svelte';
+  import { connectionEndpoint } from '../../connection-format';
   import { dbMatches, schemaMatches, objectMatches } from './sidebar-search.ts';
+  import { fetchExplorerSnapshot } from './sidebar-refresh.ts';
 
   let { onObjectClick, onDisconnect, onOpenLogs } = $props();
 
@@ -14,6 +16,9 @@
 
   let databases = $state([]);
   let loading = $state(true);
+  let refreshing = $state(false);
+  let catalogGeneration = 0;
+  let refreshSequence = 0;
   let error = $state(null);
   let expandedDbs = $state(new Set());
   let schemasByDb = $state({});
@@ -51,54 +56,118 @@
   }
 
   async function loadDatabases() {
+    const generation = ++catalogGeneration;
     error = null;
     loading = true;
     try {
-      databases = await getDatabases();
+      const nextDatabases = await getDatabases();
+      if (generation !== catalogGeneration) return;
+
+      databases = nextDatabases;
       const currentDbs = databases
         .filter((d) => d.is_current)
         .map((d) => d.name);
       expandedDbs = new Set(currentDbs);
-      for (const db of currentDbs) loadSchemasForDb(db);
+      for (const db of currentDbs) loadSchemasForDb(db, generation);
     } catch (e) {
-      error =
-        typeof e === 'string' ? e : (e.message ?? 'Failed to load databases');
+      if (generation === catalogGeneration) {
+        error =
+          typeof e === 'string'
+            ? e
+            : (e.message ?? 'Failed to load databases');
+      }
     } finally {
-      loading = false;
+      if (generation === catalogGeneration) loading = false;
     }
   }
 
-  async function loadSchemasForDb(dbName) {
+  async function refreshExplorer(event) {
+    event.stopPropagation();
+    if (refreshing) return;
+
+    const generation = ++catalogGeneration;
+    const refreshId = ++refreshSequence;
+    refreshing = true;
+    error = null;
+    loadingSchemas = new Set();
+    loadingObjects = new Set();
+    try {
+      const snapshot = await fetchExplorerSnapshot({
+        getDatabases,
+        getSchemas,
+        getSchemaObjects,
+      });
+      if (generation !== catalogGeneration) return;
+
+      // Commit only after every catalog request succeeds. Expansion sets stay
+      // untouched, so refresh never collapses the branch being explored.
+      databases = snapshot.databases;
+      schemasByDb = snapshot.schemasByDb;
+      objectsBySchema = snapshot.objectsBySchema;
+    } catch (e) {
+      if (generation === catalogGeneration) {
+        error =
+          typeof e === 'string'
+            ? e
+            : (e.message ?? 'Failed to refresh explorer');
+      }
+    } finally {
+      if (generation === catalogGeneration) {
+        // Invalidate child loads that began while this full snapshot was in
+        // flight. They must not overwrite the committed snapshot afterward.
+        catalogGeneration += 1;
+        loadingSchemas = new Set();
+        loadingObjects = new Set();
+      }
+      if (refreshId === refreshSequence) refreshing = false;
+    }
+  }
+
+  async function loadSchemasForDb(dbName, generation = catalogGeneration) {
     loadingSchemas = new Set([...loadingSchemas, dbName]);
     try {
       const schemas = await getSchemas();
-      schemasByDb = { ...schemasByDb, [dbName]: schemas };
+      if (generation === catalogGeneration && !refreshing) {
+        schemasByDb = { ...schemasByDb, [dbName]: schemas };
+      }
     } catch (e) {
-      error =
-        typeof e === 'object' && e !== null && 'message' in e
-          ? e.message
-          : String(e);
+      if (generation === catalogGeneration && !refreshing) {
+        error =
+          typeof e === 'object' && e !== null && 'message' in e
+            ? e.message
+            : String(e);
+      }
     } finally {
-      const next = new Set(loadingSchemas);
-      next.delete(dbName);
-      loadingSchemas = next;
+      if (generation === catalogGeneration && !refreshing) {
+        const next = new Set(loadingSchemas);
+        next.delete(dbName);
+        loadingSchemas = next;
+      }
     }
   }
 
-  async function loadObjectsForSchema(schemaName) {
-    loadingObjects = new Set([...loadingObjects, schemaName]);
+  async function loadObjectsForSchema(schema, generation = catalogGeneration) {
+    loadingObjects = new Set([...loadingObjects, schema.name]);
     try {
-      const result = await getSchemaObjects(schemaName);
-      objectsBySchema = { ...objectsBySchema, [schemaName]: result.objects };
+      // List by the namespace PATH — the dotted display name would be
+      // misread as a single segment by multi-segment drivers (DuckDB).
+      const result = await getSchemaObjects(schema.path);
+      if (generation === catalogGeneration && !refreshing) {
+        objectsBySchema = { ...objectsBySchema, [schema.name]: result.objects };
+      }
     } catch (e) {
-      error =
-        typeof e === 'object' && e !== null && 'message' in e
-          ? e.message
-          : String(e);
+      if (generation === catalogGeneration && !refreshing) {
+        error =
+          typeof e === 'object' && e !== null && 'message' in e
+            ? e.message
+            : String(e);
+      }
     } finally {
-      const next = new Set(loadingObjects);
-      next.delete(schemaName);
-      loadingObjects = next;
+      if (generation === catalogGeneration && !refreshing) {
+        const next = new Set(loadingObjects);
+        next.delete(schema.name);
+        loadingObjects = next;
+      }
     }
   }
 
@@ -113,13 +182,13 @@
     expandedDbs = next;
   }
 
-  function toggleSchema(schemaName) {
+  function toggleSchema(schema) {
     const next = new Set(expandedSchemas);
-    if (next.has(schemaName)) {
-      next.delete(schemaName);
+    if (next.has(schema.name)) {
+      next.delete(schema.name);
     } else {
-      next.add(schemaName);
-      if (!objectsBySchema[schemaName]) loadObjectsForSchema(schemaName);
+      next.add(schema.name);
+      if (!objectsBySchema[schema.name]) loadObjectsForSchema(schema);
     }
     expandedSchemas = next;
   }
@@ -134,7 +203,7 @@
 
   function handleObjectClick(schema, obj) {
     activeObject = `${schema.name}.${obj.name}`;
-    onObjectClick({ schema: schema.name, name: obj.name, kind: obj.kind });
+    onObjectClick({ schema: schema.name, path: schema.path, name: obj.name, kind: obj.kind });
   }
 
   function formatCount(n) {
@@ -212,7 +281,7 @@
             >
               <span class="switcher-item-name">{p.name}</span>
               <span class="switcher-item-host"
-                >{p.params['host']}:{p.params['port']}</span
+                >{connectionEndpoint(p)}</span
               >
             </button>
           {/each}
@@ -289,46 +358,71 @@
     {:else}
       {#each databases.filter( (d) => dbMatches(d.name, schemasByDb[d.name], objectsBySchema, searchQueryLower) ) as db}
         <div class="tree-node">
-          <button class="node-row db-row" onclick={() => toggleDb(db.name)}>
-            <svg
-              class="chevron"
-              class:open={expandedDbs.has(db.name)}
-              width="14"
-              height="14"
-              viewBox="0 0 16 16"
-              fill="none"
-            >
-              <path
-                d="M6 4l4 4-4 4"
-                stroke="currentColor"
-                stroke-width="1.5"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              />
-            </svg>
-            <span class="node-icon db-icon">
+          <div class="db-row-wrap">
+            <button class="node-row db-row" onclick={() => toggleDb(db.name)}>
               <svg
+                class="chevron"
+                class:open={expandedDbs.has(db.name)}
                 width="14"
                 height="14"
-                viewBox="0 0 24 24"
+                viewBox="0 0 16 16"
                 fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
               >
-                <ellipse cx="12" cy="5" rx="9" ry="3" />
-                <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
-                <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+                <path
+                  d="M6 4l4 4-4 4"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
               </svg>
-            </span>
-            <span class="node-name" class:current={db.is_current}
-              >{db.name}</span
-            >
+              <span class="node-icon db-icon">
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <ellipse cx="12" cy="5" rx="9" ry="3" />
+                  <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+                  <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+                </svg>
+              </span>
+              <span class="node-name" class:current={db.is_current}
+                >{db.name}</span
+              >
+            </button>
             {#if db.is_current}
-              <span class="status-dot" title="Connected"></span>
+              <button
+                class="refresh-btn"
+                class:spinning={refreshing}
+                onclick={refreshExplorer}
+                disabled={refreshing}
+                title="Refresh explorer"
+                aria-label="Refresh explorer"
+                type="button"
+              >
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M20 11a8 8 0 0 0-14.9-4M4 5v4h4" />
+                  <path d="M4 13a8 8 0 0 0 14.9 4M20 19v-4h-4" />
+                </svg>
+              </button>
             {/if}
-          </button>
+          </div>
 
           {#if expandedDbs.has(db.name)}
             <div class="children">
@@ -339,7 +433,7 @@
                   <div class="schema-node">
                     <button
                       class="node-row schema-row"
-                      onclick={() => toggleSchema(schema.name)}
+                      onclick={() => toggleSchema(schema)}
                     >
                       <svg
                         class="chevron"
@@ -855,8 +949,46 @@
     background: var(--bg-hover);
   }
 
+  .db-row-wrap {
+    display: flex;
+    align-items: stretch;
+  }
   .db-row {
+    flex: 1;
+    min-width: 0;
     padding-left: 6px;
+  }
+  .refresh-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 30px;
+    margin: 2px 4px 2px 0;
+    padding: 0;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition:
+      background var(--transition-fast),
+      color var(--transition-fast);
+  }
+  .refresh-btn:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--accent);
+  }
+  .refresh-btn:disabled {
+    cursor: default;
+    opacity: 0.65;
+  }
+  .refresh-btn.spinning svg {
+    animation: explorer-refresh-spin 0.8s linear infinite;
+  }
+  @keyframes explorer-refresh-spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .schema-row {
@@ -919,26 +1051,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  /* ── Status dot ───────────────────────────────────── */
-  .status-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--success);
-    flex-shrink: 0;
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--success) 20%, transparent);
-    animation: dot-pulse 2.5s ease-in-out infinite;
-  }
-  @keyframes dot-pulse {
-    0%,
-    100% {
-      box-shadow: 0 0 0 2px color-mix(in srgb, var(--success) 20%, transparent);
-    }
-    50% {
-      box-shadow: 0 0 0 4px color-mix(in srgb, var(--success) 10%, transparent);
-    }
   }
 
   /* ── Count / badge ────────────────────────────────── */

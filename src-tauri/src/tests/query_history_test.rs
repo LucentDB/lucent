@@ -356,3 +356,27 @@ fn test_entry_serialization_camelcase() {
     assert!(json.get("rowCount").is_some());
     assert!(json.get("executedAt").is_some());
 }
+
+#[tokio::test]
+async fn append_entry_async_returns_the_same_result_as_the_sync_path() {
+    // G1: the async wrapper must preserve error semantics — the same entry
+    // the sync path accepts must land identically through the
+    // spawn_blocking path.
+    let (_dir, _) = with_temp_dir();
+    let entry = QueryHistoryEntry::new(
+        "conn-1".into(),
+        "Test".into(),
+        "postgres".into(),
+        "SELECT 1".into(),
+        10,
+        Some(1),
+        "success".into(),
+        None,
+    );
+    append_entry_async(entry)
+        .await
+        .expect("append must succeed");
+    let entries = read_all_entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].sql, "SELECT 1");
+}

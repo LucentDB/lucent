@@ -1,10 +1,14 @@
 <script>
   import { onMount } from 'svelte';
   import { EditorView, basicSetup } from 'codemirror';
-  import { sql } from '@codemirror/lang-sql';
-  import { oneDark } from '@codemirror/theme-one-dark';
+  import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
+  import { oneDarkTheme } from '@codemirror/theme-one-dark';
+  import { tags } from '@lezer/highlight';
   import { Compartment } from '@codemirror/state';
   import { getTheme } from '../../stores/theme.svelte.js';
+  import { buildSqlExtension } from './sql-schema-extension.ts';
+  import { editorSchema } from '../../stores/editor-schema.svelte.ts';
+  import { connections } from '../../stores/connections.svelte.ts';
 
   let {
     onExecute,
@@ -20,26 +24,88 @@
   let view;
   const themeStore = getTheme();
   const themeCompartment = new Compartment();
+  const schemaCompartment = new Compartment();
+
+  // One Dark's default violet is legible on its own background, but becomes
+  // muddy against Lucent's darker surfaces. Reuse the app syntax tokens so the
+  // editor and read-only SQL blocks share one high-contrast palette.
+  const darkSqlHighlightStyle = HighlightStyle.define([
+    { tag: tags.keyword, color: 'var(--syn-keyword)', fontWeight: '600' },
+    {
+      tag: [tags.name, tags.variableName, tags.propertyName],
+      color: 'var(--syn-variable)',
+    },
+    {
+      tag: [tags.typeName, tags.className, tags.standard(tags.name)],
+      color: 'var(--syn-type)',
+    },
+    {
+      tag: [
+        tags.string,
+        tags.character,
+        tags.special(tags.string),
+      ],
+      color: 'var(--syn-string)',
+    },
+    {
+      tag: [tags.number, tags.bool, tags.null, tags.atom],
+      color: 'var(--syn-number)',
+    },
+    {
+      tag: [tags.comment, tags.lineComment, tags.blockComment, tags.docComment],
+      color: 'var(--syn-comment)',
+      fontStyle: 'italic',
+    },
+    {
+      tag: [
+        tags.operator,
+        tags.operatorKeyword,
+        tags.punctuation,
+        tags.separator,
+      ],
+      color: 'var(--syn-operator)',
+    },
+  ]);
+  const darkSqlTheme = [
+    oneDarkTheme,
+    syntaxHighlighting(darkSqlHighlightStyle),
+  ];
 
   function createEditor() {
     view = new EditorView({
       doc: content,
       extensions: [
         basicSetup,
-        sql(),
+        schemaCompartment.of(
+          buildSqlExtension({
+            tables: editorSchema.tables,
+            sqlDialect: connections.capabilities?.dialect,
+          }),
+        ),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
             onContentChange(update.state.doc.toString());
           }
         }),
-        themeCompartment.of(themeStore.current === 'dark' ? oneDark : []),
+        themeCompartment.of(themeStore.current === 'dark' ? darkSqlTheme : []),
         EditorView.theme({
-          '&': { height: '100%' },
-          '.cm-scroller': { fontFamily: 'var(--font-mono)' },
-          '.cm-content': { fontSize: '14px', padding: '12px 0' },
+          '&': {
+            height: '100%',
+            color: 'var(--text)',
+            backgroundColor: 'var(--bg-surface)',
+          },
+          '.cm-scroller': {
+            fontFamily: 'var(--font-mono)',
+            backgroundColor: 'var(--bg-surface)',
+          },
+          '.cm-content': {
+            fontSize: '14px',
+            padding: '12px 0',
+            color: 'var(--text)',
+          },
           '.cm-gutters': {
             borderRight: '1px solid var(--border)',
-            background: 'var(--bg-surface)',
+            backgroundColor: 'var(--bg-surface)',
           },
           '.cm-activeLineGutter': { backgroundColor: 'transparent' },
           '.cm-activeLine': { backgroundColor: 'var(--accent-active-line)' },
@@ -62,10 +128,29 @@
   }
 
   $effect(() => {
+    // Read the theme before the view guard so changes made before mount still
+    // invalidate this effect and changes after mount reconfigure the editor.
+    const currentTheme = themeStore.current;
     if (view) {
       view.dispatch({
         effects: themeCompartment.reconfigure(
-          themeStore.current === 'dark' ? oneDark : [],
+          currentTheme === 'dark' ? darkSqlTheme : [],
+        ),
+      });
+    }
+  });
+
+  // Rebuilds the schema-fed sql() extension whenever the editor-schema store
+  // or the connection's dialect changes, in place — an in-progress edit or
+  // cursor position is never disturbed by a schema refresh.
+  $effect(() => {
+    if (view) {
+      view.dispatch({
+        effects: schemaCompartment.reconfigure(
+          buildSqlExtension({
+            tables: editorSchema.tables,
+            sqlDialect: connections.capabilities?.dialect,
+          }),
         ),
       });
     }
@@ -121,6 +206,13 @@
   <div class="toolbar">
     <span class="shortcut-hint">⌘ + enter to run</span>
     <div class="toolbar-actions">
+      <button
+        class="toolbar-btn"
+        onclick={() => editorSchema.refresh()}
+        title="Refresh table/column list for autocomplete"
+        aria-label="Refresh schema"
+        type="button">↻</button
+      >
       {#if isRunning}
         <button
           class="toolbar-btn stop"
@@ -129,7 +221,12 @@
           type="button">Stop</button
         >
       {/if}
-      <button class="run-btn" onclick={handleExecute} disabled={executing}>
+      <button
+        class="run-btn"
+        onclick={handleExecute}
+        disabled={executing}
+        type="button"
+      >
         <span class="run-icon">▶</span>
         {executing ? 'Running...' : 'Run'}
       </button>
@@ -172,6 +269,17 @@
     font-size: var(--text-sm);
     color: var(--text-muted);
   }
+  .toolbar-btn {
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+  .toolbar-btn:hover {
+    background: var(--bg-hover);
+  }
   /* Stop button — always visible while running, styled like CellToolbar's stop. */
   .toolbar-btn.stop {
     display: inline-flex;
@@ -195,16 +303,20 @@
     align-items: center;
     gap: 6px;
     padding: 6px 16px;
-    background: var(--text);
-    color: var(--bg);
+    background: var(--accent);
+    color: var(--accent-foreground);
     border: none;
     border-radius: var(--radius-md);
     font-size: var(--text-base);
     font-weight: var(--weight-semibold);
     cursor: pointer;
+    transition:
+      background var(--transition-fast),
+      box-shadow var(--transition-fast);
   }
   .run-btn:hover:not(:disabled) {
-    opacity: 0.9;
+    background: var(--accent-hover);
+    box-shadow: var(--shadow-sm);
   }
   .run-btn:disabled {
     opacity: 0.5;
@@ -217,6 +329,12 @@
     min-height: 0;
     overflow: auto;
     background: var(--bg-surface);
+  }
+  /* One Dark injects a fixed dark gutter rule. Keep the line-number rail on
+     Lucent's surface in both themes, including after a live theme switch. */
+  :global(.query-editor .cm-gutters) {
+    background-color: var(--bg-surface) !important;
+    color: var(--text-muted);
   }
   .error-panel {
     border-top: 1px solid rgba(239, 68, 68, 0.3);

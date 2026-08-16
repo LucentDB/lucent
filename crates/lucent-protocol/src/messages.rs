@@ -7,7 +7,7 @@ use crate::error::LucentErrorKind;
 
 /// Bump whenever the wire format changes (new variants, changed fields).
 /// Worker and app must agree; the handshake rejects mismatches loudly.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConnectionId(pub Uuid);
@@ -202,6 +202,20 @@ pub enum WorkerResponse {
     Disconnected {
         connection_id: ConnectionId,
     },
+    /// A Connect or Disconnect failure. Correlates on `connection_id` so the
+    /// app's sync-path oneshot routing can resolve it. The generic `Error`
+    /// variant carries `query_id: None` on these paths and was dropped by the
+    /// client reader, which turned every auth failure into a 10s "connect
+    /// response timed out" (C1).
+    ConnectionError {
+        connection_id: ConnectionId,
+        kind: LucentErrorKind,
+        message: String,
+    },
+    /// Sent by the worker immediately after a valid version+token handshake,
+    /// before any Connect request. Lets the client surface a typed mismatch
+    /// instead of a generic EOF.
+    HandshakeAccepted,
     CatalogResult {
         request_id: QueryId,
         result: crate::CatalogResult,
@@ -379,8 +393,42 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_five() {
-        assert_eq!(PROTOCOL_VERSION, 5);
+    fn handshake_accepted_roundtrips() {
+        let msg = WorkerResponse::HandshakeAccepted;
+        let bytes = bincode::serialize(&msg).unwrap();
+        let back: WorkerResponse = bincode::deserialize(&bytes).unwrap();
+        assert!(matches!(back, WorkerResponse::HandshakeAccepted));
+    }
+
+    #[test]
+    fn protocol_version_is_seven() {
+        assert_eq!(PROTOCOL_VERSION, 7);
+    }
+
+    #[test]
+    fn connection_error_roundtrips_through_bincode() {
+        let msg = WorkerResponse::ConnectionError {
+            connection_id: ConnectionId(uuid::Uuid::new_v4()),
+            kind: LucentErrorKind::AuthenticationFailed,
+            message: "password authentication failed for user \"postgres\"".into(),
+        };
+        let bytes = bincode::serialize(&msg).unwrap();
+        let back: WorkerResponse = bincode::deserialize(&bytes).unwrap();
+        match back {
+            WorkerResponse::ConnectionError {
+                connection_id,
+                kind,
+                message,
+            } => {
+                assert_eq!(
+                    message,
+                    "password authentication failed for user \"postgres\""
+                );
+                assert!(matches!(kind, LucentErrorKind::AuthenticationFailed));
+                assert!(!connection_id.0.is_nil());
+            }
+            other => panic!("expected ConnectionError, got {other:?}"),
+        }
     }
 
     #[test]

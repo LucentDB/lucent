@@ -16,7 +16,7 @@
 </script>
 
 <script>
-  import { untrack } from 'svelte';
+  import { untrack, onDestroy } from 'svelte';
   import FilterBar from './FilterBar.svelte';
   import GridMenu from './GridMenu.svelte';
   import {
@@ -64,6 +64,11 @@
 
   let columnMenu = $state(null);
   let cellMenu = $state(null);
+
+  // Clears the document-level drag listeners if the grid unmounts mid-drag.
+  // Without this, an unmount leaves mousemove/mouseup attached to `document`
+  // and the body cursor stuck at col-resize until the next mouseup.
+  let activeDragCleanup = null;
 
   // Reset state when tab changes — Svelte reuses the same component instance
   // for the same {#if} branch, so internal $state persists across tab switches.
@@ -377,6 +382,7 @@
     document.body.style.userSelect = 'none';
     document.addEventListener('mousemove', onResize);
     document.addEventListener('mouseup', stopResize);
+    activeDragCleanup = stopResize;
   }
 
   function onResize(e) {
@@ -397,7 +403,12 @@
     document.body.style.userSelect = '';
     document.removeEventListener('mousemove', onResize);
     document.removeEventListener('mouseup', stopResize);
+    activeDragCleanup = null;
   }
+
+  onDestroy(() => {
+    activeDragCleanup?.();
+  });
 
   // --- Checkbox ---
   function toggleCheckAll() {

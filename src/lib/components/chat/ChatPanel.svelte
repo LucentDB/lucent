@@ -13,6 +13,8 @@
     onSend,
     onRunDml,
     onCancelDml,
+    onAllowPermission,
+    onRejectPermission,
     onClose,
     onNewChat,
     onSwitchConv,
@@ -25,6 +27,8 @@
     onSend: (m: string) => void;
     onRunDml: () => void;
     onCancelDml: () => void;
+    onAllowPermission?: () => void;
+    onRejectPermission?: () => void;
     onClose?: () => void;
     onNewChat?: () => void;
     onSwitchConv?: (id: string) => void;
@@ -158,6 +162,8 @@
             message={m}
             {onRunDml}
             {onCancelDml}
+            {onAllowPermission}
+            {onRejectPermission}
             grouped={i > 0 && conv!.messages[i - 1].role === m.role}
             conversationId={conv!.id}
           />

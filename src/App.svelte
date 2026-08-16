@@ -1,6 +1,7 @@
 <script>
   import { onMount, onDestroy, untrack } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
+  import { initIndexingListeners } from './lib/stores/indexing.svelte';
   import Sidebar from './lib/components/sidebar/Sidebar.svelte';
   import QueryEditor from './lib/components/editor/QueryEditor.svelte';
   import ResultsGrid from './lib/components/grid/ResultsGrid.svelte';
@@ -22,6 +23,7 @@
     pickNotebookToOpen,
     confirmDiscardIfDirty,
   } from './lib/stores/notebook-files.ts';
+  import { saveQueryTab, saveQueryTabAs } from './lib/stores/query-files.ts';
   import {
     connect,
     executeQuery,
@@ -41,6 +43,7 @@
   } from './lib/stores/tabQuery.js';
   import { getTheme } from './lib/stores/theme.svelte.js';
   import { schemaSummary } from './lib/stores/schema-summary.svelte.ts';
+  import { editorSchema } from './lib/stores/editor-schema.svelte.ts';
   import { connections } from './lib/stores/connections.svelte.ts';
   import { addRecentConnection } from './lib/stores/recent.js';
   import {
@@ -49,6 +52,8 @@
     addMessage,
     getActive,
     updateLast,
+    pauseForPermission,
+    resumeFromPermission,
     createNewTab as createNewChatTab,
     closeTab as closeChatTab,
     switchTab as switchChatTab,
@@ -57,7 +62,8 @@
     createAiSession,
     sendMessage,
     executeDml,
-    cancelRun,
+    respondAgentPermission,
+    rejectPendingDml,
   } from './lib/ipc/ai.ts';
 
   let connected = $state(false);
@@ -76,7 +82,10 @@
   // only record of what we're attached to.
   let connectionName = $derived(connections.activeProfile?.name ?? null);
   let databaseName = $derived(
-    connections.activeProfile?.params['database'] ?? config?.database ?? null,
+    connections.activeProfile?.params['database'] ??
+      connections.activeProfile?.params['path'] ??
+      config?.database ??
+      null,
   );
 
   // Reloads the schema summary whenever the live database changes, covering
@@ -88,12 +97,30 @@
     const db = databaseName;
     untrack(() => schemaSummary.load(db));
   });
+
+  // Reloads the editor-schema store (table/column autocomplete lists) on the
+  // same connect/switch trigger as the schema summary above — the spec's
+  // fetch-on-connect behavior for schema-aware autocomplete. untrack() keeps
+  // the store's own $state out of this effect's dependencies, mirroring the
+  // sibling effect.
+  $effect(() => {
+    if (!connected || !databaseName) return;
+    // Track the active profile id so switching profiles retriggers the
+    // refresh even when the database name is unchanged (two profiles can
+    // share a database name while pointing at different hosts). The read
+    // stays outside untrack() so it registers as a real dependency.
+    void connections.activeProfileId;
+    untrack(() => void editorSchema.refresh());
+  });
   let sidebarWidth = $state(252);
   let sidebarCollapsed = $state(false);
   const SIDEBAR_RAIL_WIDTH = 64;
   let chatWidth = $state(380);
   let editorHeight = $state(220);
   let resizeTarget = $state(null);
+  // Clears document-level drag listeners if the app unmounts mid-drag. Each
+  // resize start registers its closure-local onUp here; onDestroy invokes it.
+  let resizeCleanup = null;
 
   function startResize(target, e) {
     e.preventDefault();
@@ -119,10 +146,12 @@
       document.body.style.userSelect = '';
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
+      resizeCleanup = null;
     };
 
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
+    resizeCleanup = onUp;
   }
 
   function startVResize(e) {
@@ -144,10 +173,12 @@
       document.body.style.userSelect = '';
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
+      resizeCleanup = null;
     };
 
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
+    resizeCleanup = onUp;
   }
   let tabs = $state([]);
   let activeTabId = $state(null);
@@ -175,6 +206,7 @@
         void handleMenuAction(e.payload);
       });
     })();
+    void initIndexingListeners();
   });
 
   let unlistenMenu = null;
@@ -196,6 +228,9 @@
         if (activeTab?.kind === 'notebook') {
           await saveNotebook(activeTab.id);
           updateNotebookTabName(activeTab.id);
+        } else if (activeTab?.kind === 'query') {
+          const saved = await saveQueryTab(activeTab);
+          if (saved) updateQueryTabPath(activeTab.id, saved);
         }
         return;
       }
@@ -203,6 +238,9 @@
         if (activeTab?.kind === 'notebook') {
           await saveNotebookAs(activeTab.id);
           updateNotebookTabName(activeTab.id);
+        } else if (activeTab?.kind === 'query') {
+          const saved = await saveQueryTabAs(activeTab);
+          if (saved) updateQueryTabPath(activeTab.id, saved);
         }
         return;
       }
@@ -220,6 +258,15 @@
     );
   }
 
+  /** After a query save, sync the tab's display name and path with the file written. */
+  function updateQueryTabPath(tabId, path) {
+    tabs = tabs.map((t) =>
+      t.id === tabId
+        ? { ...t, name: path.split('/').pop(), filePath: path }
+        : t,
+    );
+  }
+
   async function openNotebookFile(path) {
     // Reuse an already-open tab for this file rather than opening a duplicate.
     const existing = tabs.find(
@@ -233,6 +280,7 @@
   }
 
   onDestroy(() => {
+    resizeCleanup?.();
     if (session?.cleanup) session.cleanup();
     unlistenMenu?.();
   });
@@ -283,12 +331,44 @@
           });
         }
       },
+      onAgentPermission: (p) => {
+        // The agent asks permission to run one of ITS tools — distinct from
+        // the DML gate above (Lucent's own tool). Pause the conversation and
+        // stamp the permission card onto the last assistant message (E4).
+        pauseForPermission(p.conversationId, p);
+      },
       onError: (p) => {
         chat.error = p.message;
       },
     });
 
     await sendMessage(message, aiSession.channel, convId, activeConnectionId);
+  }
+
+  async function handleAllowPermission() {
+    const conv = getActive();
+    if (!conv?.isPaused || !conv.pendingPermission) return;
+    try {
+      await respondAgentPermission(conv.id, true);
+    } catch (e) {
+      chat.error = formatError(e);
+    } finally {
+      // The backend resolves the pending permission and the agent turn
+      // resumes streaming on its own — only the pause state clears.
+      resumeFromPermission(conv.id);
+    }
+  }
+
+  async function handleRejectPermission() {
+    const conv = getActive();
+    if (!conv?.isPaused || !conv.pendingPermission) return;
+    try {
+      await respondAgentPermission(conv.id, false);
+    } catch (e) {
+      chat.error = formatError(e);
+    } finally {
+      resumeFromPermission(conv.id);
+    }
   }
 
   async function handleRunDml() {
@@ -307,16 +387,11 @@
 
   async function handleCancelDml() {
     if (!chat.activeConversationId) return;
-    await cancelRun(chat.activeConversationId);
-    const conv = getActive();
-    if (conv) {
-      conv.isPaused = false;
-      conv.pausedDml = null;
-      conv.dmlResult = null;
-      conv.dmlError = null;
-      // Drop the card — its Execute button would be dead now.
-      updateLast(conv.id, { dmlApproval: undefined });
-    }
+    // ACP mode rejects the bridge-held preview through the backend (the
+    // `dml:rejected` event clears the card); the rig path cancels the turn.
+    // The provider branch lives in `rejectPendingDml` (ipc/ai.ts) so it is
+    // testable without mounting App.svelte.
+    await rejectPendingDml(chat.activeConversationId);
   }
 
   function handleKeydown(e) {
@@ -359,7 +434,10 @@
       addRecentConnection(cfg);
       config = cfg;
       connected = true;
-      activeConnectionId = `${cfg.host}:${cfg.port}/${cfg.database}`;
+      // Key AI conversations by the profile id when there is one (a DuckDB
+      // profile has no host:port/database to form the legacy key from).
+      activeConnectionId =
+        connections.activeProfileId ?? `${cfg.host}:${cfg.port}/${cfg.database}`;
       view = 'dashboard';
     } catch (e) {
       connectError = formatError(e);
@@ -458,7 +536,7 @@
       const opts = fetchMoreOptions(tab, CHUNK_SIZE);
       const result =
         tab.kind === 'view' || tab.kind === 'table'
-          ? await browseTable(tab.schema, tab.name, opts)
+          ? await browseTable(tab.path ?? [], tab.name, opts)
           : await executeQuery(tab.baseSql, opts);
       updateTab(tabId, {
         rows: [...tab.rows, ...result.rows],
@@ -487,7 +565,7 @@
       const opts = refetchOptions(merged, CHUNK_SIZE);
       const result =
         merged.kind === 'view' || merged.kind === 'table'
-          ? await browseTable(merged.schema, merged.name, opts)
+          ? await browseTable(merged.path ?? [], merged.name, opts)
           : await executeQuery(merged.baseSql, opts);
       updateTab(tabId, {
         columns: result.columns,
@@ -537,14 +615,14 @@
     return executeQuery(sql, { limit: CHUNK_SIZE, offset: 0 });
   }
 
-  async function handleViewSubView(schema, name, subView, kind = 'view') {
+  async function handleViewSubView(schema, name, path, subView, kind = 'view') {
     if (subView === 'data') {
       const existingTab = tabs.find(
         (t) => t.kind === 'view' && t.schema === schema && t.name === name,
       );
       if (existingTab && existingTab.columns.length > 0) return; // already loaded
       try {
-        const result = await browseTable(schema, name, {
+        const result = await browseTable(path, name, {
           limit: CHUNK_SIZE,
           offset: 0,
         });
@@ -565,7 +643,7 @@
       );
       if (existingTab?.sourceContent) return; // already loaded
       try {
-        const src = await getViewSource(schema, name, kind);
+        const src = await getViewSource(path, name, kind);
         updateTab(existingTab?.id || '', {
           sourceContent: src,
           sourceError: null,
@@ -584,13 +662,14 @@
       handleViewSubView(
         tab.schema,
         tab.name,
+        tab.path ?? [],
         subView,
         tab.sourceKind || 'view',
       );
     }
   }
 
-  async function handleObjectClick({ schema, name, kind }) {
+  async function handleObjectClick({ schema, path = [], name, kind }) {
     if (kind === 'function' || kind === 'sequence') {
       const tabId = crypto.randomUUID();
       currentObject = { schema, name, kind };
@@ -600,9 +679,9 @@
       sourceContent = '';
       try {
         if (kind === 'function') {
-          sourceContent = await getFunctionSource(schema, name);
+          sourceContent = await getFunctionSource(path, name);
         } else {
-          const props = await getSequenceInfo(schema, name);
+          const props = await getSequenceInfo(path, name);
           sourceContent = [
             `-- Sequence: ${schema}.${name}`,
             `--`,
@@ -618,6 +697,7 @@
         id: tabId,
         kind: 'source',
         schema,
+        path,
         name,
         columns: [],
         rows: [],
@@ -653,6 +733,7 @@
         sourceKind: kind,
         subView: 'data',
         schema,
+        path,
         name,
         columns: [],
         rows: [],
@@ -674,9 +755,9 @@
       view = 'view';
 
       // Fetch data immediately
-      handleViewSubView(schema, name, 'data', kind);
+      handleViewSubView(schema, name, path, 'data', kind);
       // Also fetch source in background
-      handleViewSubView(schema, name, 'source', kind);
+      handleViewSubView(schema, name, path, 'source', kind);
     } else {
       const existingTab = tabs.find(
         (t) => t.kind === 'table' && t.schema === schema && t.name === name,
@@ -691,7 +772,7 @@
       queryError = null;
       const start = performance.now();
       try {
-        const result = await browseTable(schema, name, {
+        const result = await browseTable(path, name, {
           limit: CHUNK_SIZE,
           offset: 0,
         });
@@ -700,6 +781,7 @@
           id: crypto.randomUUID(),
           kind: 'table',
           schema,
+          path,
           name,
           columns: result.columns,
           rows: result.rows,
@@ -729,6 +811,7 @@
       id: crypto.randomUUID(),
       kind: 'query',
       name: `query_${queryCount + 1}.sql`,
+      filePath: null,
       columns: [],
       rows: [],
       fetchedCount: 0,
@@ -829,21 +912,21 @@
       id: 'new-query',
       label: 'New Query',
       description: 'Open the SQL editor',
-      icon: '▸',
+      icon: 'terminal',
       shortcut: 'Cmd+Enter',
     },
     {
       id: 'new-notebook',
       label: 'New Notebook',
       description: 'Create a new SQL notebook',
-      icon: '📓',
+      icon: 'notebook',
       shortcut: '⌘⇧N',
     },
     {
       id: 'toggle-theme',
       label: 'Toggle Theme',
       description: `Switch to ${theme.current === 'light' ? 'dark' : 'light'} mode`,
-      icon: theme.current === 'light' ? '🌙' : '☀️',
+      icon: 'theme',
     },
     ...(connected
       ? [
@@ -851,14 +934,14 @@
             id: 'toggle-ai-chat',
             label: showChatPanel ? 'Close AI Chat' : 'Open AI Chat',
             description: 'Toggle the AI Copilot panel',
-            icon: '💬',
+            icon: 'sparkles',
             shortcut: '⌘⇧A',
           },
           {
             id: 'disconnect',
             label: 'Disconnect',
             description: 'Close the current connection',
-            icon: '',
+            icon: 'unplug',
           },
         ]
       : []),
@@ -895,12 +978,24 @@
     onCloseTabs={closeMultipleTabs}
     onNewQuery={goToQuery}
     onNotebookSave={async (id) => {
-      await saveNotebook(id);
-      updateNotebookTabName(id);
+      const tab = tabs.find((t) => t.id === id);
+      if (tab?.kind === 'notebook') {
+        await saveNotebook(id);
+        updateNotebookTabName(id);
+      } else if (tab?.kind === 'query') {
+        const saved = await saveQueryTab(tab);
+        if (saved) updateQueryTabPath(id, saved);
+      }
     }}
     onNotebookSaveAs={async (id) => {
-      await saveNotebookAs(id);
-      updateNotebookTabName(id);
+      const tab = tabs.find((t) => t.id === id);
+      if (tab?.kind === 'notebook') {
+        await saveNotebookAs(id);
+        updateNotebookTabName(id);
+      } else if (tab?.kind === 'query') {
+        const saved = await saveQueryTabAs(tab);
+        if (saved) updateQueryTabPath(id, saved);
+      }
     }}
     onNotebookOpen={async () => {
       const path = await pickNotebookToOpen();
@@ -1115,6 +1210,8 @@
               onSend={handleAiSend}
               onRunDml={handleRunDml}
               onCancelDml={handleCancelDml}
+              onAllowPermission={handleAllowPermission}
+              onRejectPermission={handleRejectPermission}
               {connected}
               database={databaseName}
               {connectionName}
@@ -1139,6 +1236,8 @@
             onSend={handleAiSend}
             onRunDml={handleRunDml}
             onCancelDml={handleCancelDml}
+            onAllowPermission={handleAllowPermission}
+            onRejectPermission={handleRejectPermission}
             {connected}
             database={databaseName}
             {connectionName}
@@ -1418,7 +1517,7 @@
   .modal-content {
     background: var(--bg);
     border-radius: var(--radius-lg);
-    padding: 24px;
+    padding: 0;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
   }
 </style>

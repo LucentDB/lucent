@@ -1,0 +1,36 @@
+[package]
+name = "lucent-driver-duckdb"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "lucent-driver-duckdb"
+path = "src/main.rs"
+
+[lib]
+name = "lucent_driver_duckdb"
+path = "src/lib.rs"
+
+[dependencies]
+lucent-protocol = { path = "../lucent-protocol" }
+lucent-worker-host = { path = "../lucent-worker-host" }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }
+chrono = "0.4"
+
+# `bundled` compiles libduckdb from source and links it statically, so the
+# worker binary is self-contained and needs no system library on the user's
+# machine.
+#
+# Deliberately NO other features. `parquet`, `json`, `httpfs`, and
+# `extensions-full` each pull in large additional C++ artifacts, and none of
+# them is needed to query a .duckdb file. Spec §5.7 and §9 both call this out:
+# if DuckDB ever becomes a compute engine, Parquet I/O belongs in `arrow-rs`,
+# not here.
+duckdb = { version = "1.10505.0", features = ["bundled"] }
+
+[dev-dependencies]
+lucent-driver-conformance = { path = "../lucent-driver-conformance" }
+tempfile = "3"

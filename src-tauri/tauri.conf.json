@@ -6,7 +6,7 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1421",
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "cargo build --bin lucent-db-tools-mcp && npm run dev",
     "beforeBuildCommand": "npm run build"
   },
   "app": {

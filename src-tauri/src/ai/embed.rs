@@ -1,8 +1,10 @@
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
+#[derive(Clone)]
 pub struct Embedder {
-    model: AsyncMutex<TextEmbedding>,
+    model: Arc<AsyncMutex<TextEmbedding>>,
 }
 
 impl Embedder {
@@ -14,7 +16,7 @@ impl Embedder {
         )
         .map_err(|e| format!("failed to init embedding model: {e}"))?;
         Ok(Self {
-            model: AsyncMutex::new(model),
+            model: Arc::new(AsyncMutex::new(model)),
         })
     }
 

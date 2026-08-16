@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// Which `sqlparser` dialect parses this driver's SQL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum SqlDialect {
     PostgreSql,
@@ -181,6 +182,22 @@ mod tests {
         );
         assert!(ReadOnlyMode::TransactionScoped.disclosure().is_none());
         assert!(ReadOnlyMode::SessionFlag.disclosure().is_none());
+    }
+
+    #[test]
+    fn sql_dialect_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&SqlDialect::PostgreSql).unwrap(),
+            "\"postgresql\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SqlDialect::DuckDb).unwrap(),
+            "\"duckdb\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SqlDialect::BigQuery).unwrap(),
+            "\"bigquery\""
+        );
     }
 
     #[test]

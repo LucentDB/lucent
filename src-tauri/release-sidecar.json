@@ -1,0 +1,5 @@
+{
+  "bundle": {
+    "externalBin": ["binaries/lucent-db-tools-mcp"]
+  }
+}

@@ -4,16 +4,15 @@ use crate::ai::agent::{
 use crate::ai::config::AiProvider;
 use crate::ai::events::TokenUsage;
 use crate::ai::provider::{LlmProvider, LucentAgent};
+use crate::ai::providers::dispatch;
 use crate::ai::tools::LucentToolEnum;
 use async_trait::async_trait;
 use futures::StreamExt;
-use rig_core::client::{CompletionClient, ProviderClient};
+use rig_core::client::CompletionClient;
 use rig_core::completion::message::{AssistantContent, ReasoningContent};
-use rig_core::completion::GetTokenUsage;
-use rig_core::completion::ToolDefinition;
-use rig_core::completion::{self, Completion};
+use rig_core::completion::{self, Completion, CompletionModel, GetTokenUsage, ToolDefinition};
 use rig_core::one_or_many::OneOrMany;
-use rig_core::providers::openai;
+use rig_core::providers::{anthropic, deepseek, gemini, mistral, openai, openrouter};
 use rig_core::streaming::StreamedAssistantContent;
 use rig_core::tool::{ToolDyn, ToolError as RigToolError};
 use rig_core::wasm_compat::WasmBoxedFuture;
@@ -43,51 +42,115 @@ impl LlmProvider for RigProvider {
         max_tokens: u32,
         tools: Vec<LucentToolEnum>,
     ) -> Box<dyn LucentAgent> {
-        // Configure env vars for OpenAI-compatible client
-        std::env::set_var("OPENAI_API_KEY", &self.api_key);
+        let rig_tools = build_rig_tools(&tools);
 
-        // Use the Chat Completions API (compatible with all OpenAI-compatible endpoints)
-        if let Some(ref endpoint) = self.endpoint {
-            std::env::set_var("OPENAI_BASE_URL", endpoint.trim_end_matches('/'));
-        } else if self.kind == AiProvider::Ollama {
-            std::env::set_var("OPENAI_BASE_URL", "http://localhost:11434/v1");
-        } else {
-            std::env::set_var("OPENAI_BASE_URL", "https://api.openai.com/v1");
-        }
-
-        // Use CompletionsClient (Chat Completions API — /v1/chat/completions)
-        // instead of Client (Responses API — /v1/responses) for broader compatibility
-        let client = match openai::CompletionsClient::from_env() {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("Failed to create OpenAI-compatible client: {e}");
-                return Box::new(StubAgent);
+        match self.kind {
+            AiProvider::OpenAI => match openai::CompletionsClient::builder()
+                .api_key(self.api_key.as_str())
+                .build()
+            {
+                Ok(client) => wrap_agent(build_rig_agent(
+                    &client, model, &preamble, max_tokens, rig_tools,
+                )),
+                Err(e) => {
+                    eprintln!("Failed to create OpenAI client: {e}");
+                    Box::new(StubAgent)
+                }
+            },
+            AiProvider::Anthropic => match anthropic::Client::builder()
+                .api_key(self.api_key.as_str())
+                .build()
+            {
+                Ok(client) => wrap_agent(build_rig_agent(
+                    &client, model, &preamble, max_tokens, rig_tools,
+                )),
+                Err(e) => {
+                    eprintln!("Failed to create Anthropic client: {e}");
+                    Box::new(StubAgent)
+                }
+            },
+            AiProvider::Gemini => match gemini::Client::builder()
+                .api_key(self.api_key.as_str())
+                .build()
+            {
+                Ok(client) => wrap_agent(build_rig_agent(
+                    &client, model, &preamble, max_tokens, rig_tools,
+                )),
+                Err(e) => {
+                    eprintln!("Failed to create Gemini client: {e}");
+                    Box::new(StubAgent)
+                }
+            },
+            AiProvider::OpenRouter => match openrouter::Client::builder()
+                .api_key(self.api_key.as_str())
+                .build()
+            {
+                Ok(client) => wrap_agent(build_rig_agent(
+                    &client, model, &preamble, max_tokens, rig_tools,
+                )),
+                Err(e) => {
+                    eprintln!("Failed to create OpenRouter client: {e}");
+                    Box::new(StubAgent)
+                }
+            },
+            AiProvider::Mistral => match mistral::Client::builder()
+                .api_key(self.api_key.as_str())
+                .build()
+            {
+                Ok(client) => wrap_agent(build_rig_agent(
+                    &client, model, &preamble, max_tokens, rig_tools,
+                )),
+                Err(e) => {
+                    eprintln!("Failed to create Mistral client: {e}");
+                    Box::new(StubAgent)
+                }
+            },
+            AiProvider::DeepSeek => match deepseek::Client::builder()
+                .api_key(self.api_key.as_str())
+                .build()
+            {
+                Ok(client) => wrap_agent(build_rig_agent(
+                    &client, model, &preamble, max_tokens, rig_tools,
+                )),
+                Err(e) => {
+                    eprintln!("Failed to create DeepSeek client: {e}");
+                    Box::new(StubAgent)
+                }
+            },
+            AiProvider::Groq
+            | AiProvider::XAI
+            | AiProvider::Ollama
+            | AiProvider::Custom
+            | AiProvider::OpenCode => {
+                let base_url = match dispatch::resolve_base_url(&self.kind, &self.endpoint) {
+                    Ok(url) => url,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return Box::new(StubAgent);
+                    }
+                };
+                match openai::CompletionsClient::builder()
+                    .api_key(self.api_key.as_str())
+                    .base_url(&base_url)
+                    .build()
+                {
+                    Ok(client) => wrap_agent(build_rig_agent(
+                        &client, model, &preamble, max_tokens, rig_tools,
+                    )),
+                    Err(e) => {
+                        eprintln!("Failed to create {} client: {e}", self.kind);
+                        Box::new(StubAgent)
+                    }
+                }
             }
-        };
-
-        // Register tool definitions with Rig so the LLM knows about them.
-        // For providers that don't support tool result messages (e.g. opencode Go),
-        // the agent loop in agent.rs also has a text-based fallback.
-        let rig_tools: Vec<Box<dyn ToolDyn>> = tools
-            .iter()
-            .map(|t| {
-                let td: Box<dyn ToolDyn> = Box::new(RigToolDef {
-                    name: t.name().to_string(),
-                    description: t.description(),
-                    params: t.parameters(),
-                });
-                td
-            })
-            .collect();
-
-        let agent = client
-            .agent(model)
-            .preamble(&preamble)
-            .max_tokens(max_tokens as u64)
-            .tools(rig_tools)
-            .build();
-
-        Box::new(RigAgent { inner: agent })
+            // The ACP path drives agents through AcpChatDriver (phase D) and
+            // never constructs a rig provider; keep this arm as a clear
+            // failure if it is ever reached.
+            AiProvider::Acp => {
+                eprintln!("ACP agents are driven through the ACP client, not the rig provider");
+                Box::new(StubAgent)
+            }
+        }
     }
 }
 
@@ -143,14 +206,15 @@ impl LucentAgent for StubAgent {
 
 // ── Real Rig agent with streaming ────────────────────────────────────────
 
-struct RigAgent {
-    inner: rig_core::agent::Agent<
-        <openai::CompletionsClient as rig_core::client::CompletionClient>::CompletionModel,
-    >,
+struct RigAgent<M: CompletionModel> {
+    inner: rig_core::agent::Agent<M>,
 }
 
 #[async_trait]
-impl LucentAgent for RigAgent {
+impl<M> LucentAgent for RigAgent<M>
+where
+    M: CompletionModel + Send + Sync + 'static,
+{
     async fn complete(
         &self,
         prompt: Message,
@@ -178,8 +242,6 @@ impl LucentAgent for RigAgent {
                 StreamedAssistantContent::Text(t) => {
                     on_delta(crate::ai::provider::AgentDelta::Text(t.text));
                 }
-                // ToolCall/ToolCallDelta/Reasoning(complete)/Final are assembled by
-                // rig-core into stream.choice/stream.response below, once drained.
                 _ => {}
             }
         }
@@ -195,7 +257,6 @@ impl LucentAgent for RigAgent {
                 TokenUsage {
                     prompt_tokens: u.input_tokens as u32,
                     completion_tokens: u.output_tokens as u32,
-                    estimated_cost_usd: None,
                     cached_prompt_tokens: u.cached_input_tokens as u32,
                 }
             })
@@ -208,6 +269,47 @@ impl LucentAgent for RigAgent {
             thinking,
         })
     }
+}
+
+/// Shared by every arm above — the `.agent(...)` builder chain is identical
+/// regardless of which concrete client produced it.
+fn build_rig_agent<C>(
+    client: &C,
+    model: &str,
+    preamble: &str,
+    max_tokens: u32,
+    tools: Vec<Box<dyn ToolDyn>>,
+) -> rig_core::agent::Agent<C::CompletionModel>
+where
+    C: CompletionClient,
+{
+    client
+        .agent(model)
+        .preamble(preamble)
+        .max_tokens(max_tokens as u64)
+        .tools(tools)
+        .build()
+}
+
+fn wrap_agent<M>(agent: rig_core::agent::Agent<M>) -> Box<dyn LucentAgent>
+where
+    M: CompletionModel + Send + Sync + 'static,
+{
+    Box::new(RigAgent { inner: agent })
+}
+
+fn build_rig_tools(tools: &[LucentToolEnum]) -> Vec<Box<dyn ToolDyn>> {
+    tools
+        .iter()
+        .map(|t| {
+            let td: Box<dyn ToolDyn> = Box::new(RigToolDef {
+                name: t.name().to_string(),
+                description: t.description(),
+                params: t.parameters(),
+            });
+            td
+        })
+        .collect()
 }
 
 /// Splits an aggregated assistant response into (final text, thinking/reasoning
@@ -473,5 +575,18 @@ mod tests {
         assert_eq!(text, None);
         assert_eq!(thinking, None);
         assert!(tool_calls.is_empty());
+    }
+
+    #[test]
+    fn anthropic_provider_does_not_default_to_openai_base_url() {
+        // Regression guard for the bug this task fixes: selecting Anthropic with
+        // no custom endpoint must build against Anthropic's own base URL, not
+        // silently fall through to OpenAI's. `Client::builder().build()` doesn't
+        // make a network call, so this is safe to assert synchronously.
+        let client = rig_core::providers::anthropic::Client::builder()
+            .api_key("test-key-not-a-real-key")
+            .build()
+            .expect("client construction with a syntactically valid key should succeed offline");
+        assert_eq!(client.base_url(), "https://api.anthropic.com");
     }
 }

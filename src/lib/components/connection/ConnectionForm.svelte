@@ -1,3 +1,35 @@
+<script module lang="ts">
+  /** A driver field as the rendering decisions need it. */
+  interface FieldLike {
+    kind: string;
+  }
+
+  /**
+   * The HTML input type for a driver field kind.
+   *
+   * A `path` renders as text plus a Browse button rather than
+   * `<input type="file">`: the browser's file input deliberately hides the
+   * real filesystem path, and a path is exactly what the driver needs.
+   *
+   * Exported and pure so the rendering logic is testable without mounting.
+   */
+  export function fieldInputType(field: FieldLike): string {
+    switch (field.kind) {
+      case 'number':
+        return 'number';
+      case 'password':
+        return 'password';
+      default:
+        return 'text';
+    }
+  }
+
+  /** True when the field needs a Browse button (a filesystem path). */
+  export function needsFilePicker(field: FieldLike): boolean {
+    return field.kind === 'path';
+  }
+</script>
+
 <script lang="ts">
   import {
     connections,
@@ -34,6 +66,18 @@
 
   /** Field descriptors for the selected driver — drives the form's fields. */
   const descriptor = $derived(connections.driverFor(driver));
+
+  /**
+   * A driver's parameters are meaningless to another driver: switching the
+   * driver must not carry stale fields (host/port/user/database) into a
+   * DuckDB profile — they would be saved into the profile and sent to probes.
+   * The seeding effect below re-adds the new driver's own defaults.
+   */
+  function resetParamsForDriver() {
+    params = {};
+    testResult = null;
+    testError = null;
+  }
 
   /** Seed defaults for fields this driver defines but the profile lacks. */
   $effect(() => {
@@ -80,6 +124,41 @@
 
   // ─── Actions ──────────────────────────────────────────────────────────
 
+  import { open } from '@tauri-apps/plugin-dialog';
+
+  /**
+   * Pick a database file. Cancelling leaves the current value alone — clearing
+   * it would silently discard a path the user already typed.
+   */
+  async function browseFor(key: string) {
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'DuckDB database', extensions: ['duckdb', 'db'] }],
+      });
+      if (typeof selected === 'string') {
+        params = { ...params, [key]: selected };
+      }
+    } catch (e) {
+      console.error('File picker failed:', e);
+    }
+  }
+
+  /**
+   * Params the selected driver's descriptor declares, preserving entered
+   * values. Prunes params left over from a different driver (e.g. postgres
+   * host/port in a duckdb profile) so they never get saved or probed.
+   */
+  function driverParams(): Record<string, string> {
+    if (!descriptor) return { ...params };
+    return Object.fromEntries(
+      descriptor.fields
+        .filter((f) => params[f.key] !== undefined)
+        .map((f) => [f.key, params[f.key]]),
+    );
+  }
+
   async function handleSave() {
     saving = true;
     try {
@@ -88,7 +167,7 @@
         name: name || 'Untitled',
         driver,
         alias: alias.trim() || null,
-        params: { ...params },
+        params: driverParams(),
         sshTunnelId: profile?.sshTunnelId ?? null,
         group: group || null,
         color: color || null,
@@ -122,7 +201,7 @@
           name: name || 'Test',
           driver,
           alias: null,
-          params: { ...params },
+          params: driverParams(),
           sshTunnelId: null,
           group: group || null,
           color: color || null,
@@ -207,7 +286,11 @@
       <!-- Driver -->
       <label class="field">
         <span class="label-text">Driver</span>
-        <select bind:value={driver} class="styled-select">
+        <select
+          bind:value={driver}
+          class="styled-select"
+          onchange={resetParamsForDriver}
+        >
           {#each connections.drivers as d (d.id)}
             <option value={d.id}>{d.displayName}</option>
           {/each}
@@ -229,11 +312,29 @@
                   <option value={option}>{option}</option>
                 {/each}
               </select>
+            {:else if needsFilePicker(field)}
+              <div class="browse-row">
+                <input
+                  id={`field-${field.key}`}
+                  class="plain-input"
+                  type={fieldInputType(field)}
+                  placeholder={field.placeholder ?? ''}
+                  required={field.required}
+                  bind:value={params[field.key]}
+                />
+                <button
+                  type="button"
+                  class="browse-btn"
+                  onclick={() => browseFor(field.key)}
+                >
+                  Browse…
+                </button>
+              </div>
             {:else}
               <input
                 id={`field-${field.key}`}
                 class="plain-input"
-                type={field.kind === 'number' ? 'number' : 'text'}
+                type={fieldInputType(field)}
                 placeholder={field.placeholder ?? ''}
                 required={field.required}
                 bind:value={params[field.key]}
@@ -483,6 +584,37 @@
   .plain-input {
     padding: 0 10px;
   }
+  .browse-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .browse-row .plain-input {
+    flex: 1;
+    min-width: 0;
+  }
+  .browse-btn {
+    height: 36px;
+    padding: 0 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    box-sizing: border-box;
+    cursor: pointer;
+    transition:
+      background 0.12s,
+      color 0.12s,
+      border-color 0.12s;
+  }
+  .browse-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+    border-color: var(--border-hover, var(--border));
+  }
   .styled-select {
     padding: 0 10px;
     cursor: pointer;
@@ -541,17 +673,18 @@
   }
 
   .form-actions {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
     gap: 12px;
     padding-top: 4px;
   }
   .test-area {
-    display: flex;
-    align-items: center;
+    min-width: 0;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
     gap: 10px;
-    flex-wrap: wrap;
   }
 
   /* Consistent 36px height across all buttons & status badges */
@@ -570,6 +703,9 @@
   }
 
   .test-btn {
+    flex-shrink: 0;
+    justify-self: start;
+    white-space: nowrap;
     gap: 6px;
     padding: 0 14px;
     border: 1px solid var(--border);
@@ -603,7 +739,14 @@
     }
   }
   .test-badge {
-    padding: 0 12px;
+    min-width: 0;
+    min-height: 36px;
+    height: auto;
+    padding: 8px 12px;
+    justify-content: flex-start;
+    text-align: left;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
   }
   .test-success {
     color: var(--success, #22c55e);
@@ -615,10 +758,13 @@
   }
   .save-area {
     display: flex;
+    flex-shrink: 0;
     gap: 10px;
     align-items: center;
   }
   .cancel-btn {
+    flex-shrink: 0;
+    white-space: nowrap;
     padding: 0 16px;
     border: 1px solid var(--border);
     background: var(--bg-surface);
@@ -630,6 +776,8 @@
     color: var(--text);
   }
   .save-btn {
+    flex-shrink: 0;
+    white-space: nowrap;
     gap: 8px;
     padding: 0 18px;
     border: none;
@@ -647,6 +795,22 @@
   }
   .save-btn:disabled {
     opacity: 0.6;
+  }
+
+  @media (max-width: 600px) {
+    .form-actions {
+      grid-template-columns: 1fr;
+    }
+    .test-area {
+      grid-template-columns: 1fr;
+    }
+    .test-badge {
+      width: 100%;
+    }
+    .save-area {
+      width: 100%;
+      justify-content: flex-end;
+    }
   }
 
   /* Clean readymade text badge for keyboard shortcut */

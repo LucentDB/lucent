@@ -1,7 +1,9 @@
 <script lang="ts">
   import { EditorView, basicSetup } from 'codemirror';
-  import { sql } from '@codemirror/lang-sql';
   import { oneDark } from '@codemirror/theme-one-dark';
+  import { buildSqlExtension } from '../../editor/sql-schema-extension.ts';
+  import { editorSchema } from '../../../stores/editor-schema.svelte.ts';
+  import { connections } from '../../../stores/connections.svelte.ts';
   import {
     MatchDecorator,
     Decoration,
@@ -43,6 +45,7 @@
   let view: EditorView | undefined;
   const themeStore = getTheme();
   const themeCompartment = new Compartment();
+  const schemaCompartment = new Compartment();
   let isInternalChange = false;
   // Tracks whether we should focus the editor once it mounts (e.g. user clicked
   // the static placeholder before the CodeMirror instance existed).
@@ -119,6 +122,19 @@
   });
 
   $effect(() => {
+    if (view) {
+      view.dispatch({
+        effects: schemaCompartment.reconfigure(
+          buildSqlExtension({
+            tables: editorSchema.tables,
+            sqlDialect: connections.capabilities?.dialect,
+          }),
+        ),
+      });
+    }
+  });
+
+  $effect(() => {
     if (!container || !shouldMount) return;
     const initialSource = untrack(() => source);
     const shouldFocusNow = untrack(() => pendingFocus || focused);
@@ -156,7 +172,12 @@
           ]),
         ),
         basicSetup,
-        sql(),
+        schemaCompartment.of(
+          buildSqlExtension({
+            tables: editorSchema.tables,
+            sqlDialect: connections.capabilities?.dialect,
+          }),
+        ),
         cellRefPlugin,
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
@@ -223,10 +244,31 @@
     };
   });
 
+  function focusStaticCell() {
+    pendingFocus = true;
+    model.select(cellId);
+    model.enterEditMode();
+    onEnterEdit?.();
+  }
+
+  function handleStaticKeydown(e: KeyboardEvent) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    focusStaticCell();
+  }
+
   // Focus an already-mounted editor when the cell enters edit mode.
   $effect(() => {
     if (focused && view && !view.hasFocus) {
       view.focus();
+    }
+  });
+
+  // Command mode must also remove focus from the previous cell. Without this,
+  // Shift+Enter changes selection but leaves the old CodeMirror cursor active.
+  $effect(() => {
+    if (!focused && view?.hasFocus) {
+      view.contentDOM.blur();
     }
   });
 </script>
@@ -237,15 +279,16 @@
   {:else}
     <!-- Static stand-in: same font metrics, no editor instance. Clicking or
          scrolling into view upgrades it to CodeMirror. -->
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions a11y_click_events_have_key_events -->
-    <pre
+    <div
       class="sql-static"
-      onclick={() => {
-        pendingFocus = true;
-        model.select(cellId);
-        model.enterEditMode();
-        onEnterEdit?.();
-      }}>{source || '-- Click to write SQL'}</pre>
+      role="button"
+      tabindex="0"
+      aria-label="Edit SQL cell"
+      onclick={focusStaticCell}
+      onkeydown={handleStaticKeydown}
+    >
+      {source || '-- Click to write SQL'}
+    </div>
   {/if}
   <RefPreview {source} cells={cells ?? []} />
 </div>

@@ -93,11 +93,11 @@ async fn worker_client(
     crate::supervisor::Supervisor,
 ) {
     let mut supervisor = crate::supervisor::Supervisor::new();
-    let socket_path = supervisor
+    supervisor
         .ensure_running()
         .await
-        .expect("supervisor running")
-        .to_path_buf();
+        .expect("supervisor running");
+    let socket_path = supervisor.endpoint().to_string();
     let token = supervisor.handshake_token().to_owned();
     let (client, conn_id) =
         crate::client::ConnectorClient::connect(&socket_path, &token, pg_config(port))
@@ -383,6 +383,47 @@ async fn e2e_llm_tool_awareness() {
     );
 }
 
+#[tokio::test]
+#[ignore]
+async fn anthropic_provider_completes_a_real_request() {
+    let api_key =
+        std::env::var("ANTHROPIC_API_KEY").expect("set ANTHROPIC_API_KEY to run this ignored test");
+    let provider = crate::ai::providers::rig::RigProvider::new(
+        crate::ai::config::AiProvider::Anthropic,
+        api_key,
+        None,
+    );
+    let agent = provider
+        .build_agent(
+            "claude-3-5-haiku-latest",
+            "You are a terse test assistant.".to_string(),
+            64,
+            vec![],
+        )
+        .await;
+    let response = agent
+        .complete(
+            crate::ai::agent::Message {
+                role: crate::ai::agent::MessageRole::User,
+                content: crate::ai::agent::MessageContent::Text(
+                    "Reply with exactly the word: pong".to_string(),
+                ),
+                tool_calls: None,
+            },
+            vec![],
+            &|_delta| {},
+        )
+        .await
+        .expect("a real Anthropic call with a valid key should succeed");
+    assert!(
+        response.text.is_some(),
+        "this is the exact regression this task fixes: before Task 7, selecting \
+         Anthropic silently called OpenAI's API instead and this assertion would \
+         either fail with an OpenAI auth error (using an Anthropic-shaped key) or \
+         hang on a network layer mismatch"
+    );
+}
+
 /// The driver catalog answers partition metadata and flags partition children;
 /// `harvest_to_entries` collapses children into their parent. Drive the real
 /// seam — worker binary → catalog RPC → graph harvest — and assert the same
@@ -425,11 +466,11 @@ async fn partitioned_table_metadata_query_collapses_children() {
     .unwrap();
 
     let mut supervisor = Supervisor::new();
-    let socket_path = supervisor
+    supervisor
         .ensure_running()
         .await
-        .expect("supervisor running")
-        .to_path_buf();
+        .expect("supervisor running");
+    let socket_path = supervisor.endpoint().to_string();
     let token = supervisor.handshake_token().to_owned();
     let (mut client, conn_id) = ConnectorClient::connect(&socket_path, &token, pg_config(port))
         .await
@@ -533,11 +574,11 @@ async fn execute_staged_dml_runs_the_approved_sql_and_reports_real_rows() {
     wait_for_postgres(port).await;
 
     let mut supervisor = Supervisor::new();
-    let socket_path = supervisor
+    supervisor
         .ensure_running()
         .await
-        .expect("supervisor running")
-        .to_path_buf();
+        .expect("supervisor running");
+    let socket_path = supervisor.endpoint().to_string();
     let token = supervisor.handshake_token().to_owned();
 
     let (mut client, conn_id) = ConnectorClient::connect(&socket_path, &token, pg_config(port))
@@ -569,7 +610,7 @@ async fn execute_staged_dml_runs_the_approved_sql_and_reports_real_rows() {
 
     // Mirror execute_dml: take the staged SQL (PausedForDml → Idle), then run
     // the core fn on session B.
-    let staged = conv
+    let (staged, _staged_at) = conv
         .lock()
         .await
         .take_staged_sql()

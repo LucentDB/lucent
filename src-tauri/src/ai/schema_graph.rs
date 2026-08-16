@@ -1,7 +1,12 @@
-use lucent_protocol::ConnectionId;
+use lucent_protocol::{ConnectionId, QueryId};
 use std::collections::HashMap;
+use std::time::Duration;
 
+use crate::ai::cache_store::{
+    EmbeddingRow, PersistentVectorCache, DOC_TEXT_FORMAT_VERSION, MODEL_NAME,
+};
 use crate::ai::embed::Embedder;
+use crate::ai::single_flight::SingleFlightEmbedder;
 use crate::ai::truncate_utf8;
 use crate::client::ConnectorClient;
 
@@ -11,7 +16,18 @@ type ColumnTuple = (String, String, String, String, bool);
 /// Columns grouped by owning table id.
 type TableColumns = HashMap<usize, Vec<ColumnTuple>>;
 
-#[derive(Clone, Debug)]
+/// How much of the schema index has been materialized for this connection.
+/// Tier-1 is metadata only (fast, inside connect()); Tier-2 adds sampled
+/// values + embeddings (background). Serialized into the persisted graph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexingTier {
+    #[default]
+    MetadataOnly,
+    FullyEnriched,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ColumnEntry {
     pub id: usize,
     pub table_id: usize,
@@ -20,20 +36,25 @@ pub struct ColumnEntry {
     pub name: String,
     pub data_type: String,
     pub is_primary_key: bool,
+    #[serde(default)]
     pub sample_values: Vec<String>,
+    #[serde(default)]
     pub fk_ref: Option<String>,
+    #[serde(default)]
     pub embedding: Vec<f32>,
     pub doc_text: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TableEntry {
     pub id: usize,
     pub schema: String,
     pub name: String,
     /// Estimated row count from the driver's catalog; 0 when unknown.
+    #[serde(default)]
     pub row_count_estimate: i64,
     /// "PARTITIONED BY RANGE (created_at) — 84 partitions" for partitioned parents.
+    #[serde(default)]
     pub partition_info: Option<String>,
 }
 
@@ -42,20 +63,28 @@ pub fn partition_annotation(partkey: Option<&str>, partition_count: i64) -> Opti
     partkey.map(|k| format!("PARTITIONED BY {k} — {partition_count} partitions"))
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FkEdge {
     pub from_column: usize,
     pub to_column: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SchemaGraph {
     pub tables: Vec<TableEntry>,
     pub columns: Vec<ColumnEntry>,
+    #[serde(default)]
     pub columns_by_table: HashMap<usize, Vec<usize>>,
+    #[serde(default)]
     pub fk_edges: Vec<FkEdge>,
+    #[serde(default)]
     pub table_adjacency: HashMap<usize, Vec<usize>>,
-    pub built_at: std::time::Instant,
+    /// Epoch seconds (serializable — replaces the old `std::time::Instant`).
+    #[serde(default)]
+    pub built_at_unix: i64,
+    /// Metadata-only until the background indexer finishes enrich().
+    #[serde(default)]
+    pub tier: IndexingTier,
 }
 
 pub struct SchemaIndexer;
@@ -135,23 +164,18 @@ pub(crate) const RANGE_TYPES: &[&str] = &[
 /// naive join on the table's other key columns alone can silently fan out across
 /// historical periods — this was directly observed corrupting a join result (the same
 /// flight_id resolving to two different airplane_codes) before this hint existed.
-fn doc_text_for(
-    schema: &str,
-    table: &str,
-    name: &str,
-    data_type: &str,
-    _is_pk: bool,
-    values: &[String],
-) -> String {
+///
+/// Deliberately metadata-only: sample values are NEVER part of the embedded text.
+/// The sampler is non-deterministic (LIMIT without ORDER BY), so values in the hash
+/// would silently invalidate the cache on data churn and break the differential
+/// re-index claim. `ColumnEntry.sample_values` remains a separate field for value hints.
+pub(crate) fn doc_text_for(schema: &str, table: &str, name: &str, data_type: &str) -> String {
     let mut parts = vec![format!("{schema}.{table}.{name} {data_type}")];
     if RANGE_TYPES.contains(&data_type) {
         parts.push(format!(
             "(time-versioned — joins on {table}'s other key columns alone may fan out \
              across historical periods; also filter on {name})"
         ));
-    }
-    if !values.is_empty() {
-        parts.push(format!("values: {}", values.join(", ")));
     }
     parts.join(" ")
 }
@@ -239,19 +263,149 @@ fn truncate_sample_value(val_str: &str) -> String {
     }
 }
 
-impl SchemaIndexer {
-    pub async fn build_index(
+/// Canonical metadata snapshot of a schema, used for fingerprinting. The
+/// snapshot types derive `Ord` so the caller sorts before hashing — ordering
+/// must not affect the fingerprint.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CatalogSnapshot {
+    pub format_version: u32,
+    pub tables: Vec<SnapshotTable>,
+    pub columns: Vec<SnapshotColumn>,
+    pub fks: Vec<SnapshotFk>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct SnapshotTable {
+    pub schema: String,
+    pub name: String,
+    pub row_count_estimate: i64,
+    pub partition_info: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct SnapshotColumn {
+    pub schema: String,
+    pub table: String,
+    pub name: String,
+    pub data_type: String,
+    pub is_primary_key: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct SnapshotFk {
+    pub from_schema: String,
+    pub from_table: String,
+    pub from_column: String,
+    pub to_schema: String,
+    pub to_table: String,
+    pub to_column: String,
+}
+
+/// SHA256 over the bincode of the canonically-sorted snapshot. The snapshot
+/// types derive Ord so the caller sorts before hashing (see `from_catalog`);
+/// the sort is repeated here on a clone so order-stability holds even for an
+/// unsorted snapshot passed directly.
+pub fn compute_schema_hash(snapshot: &CatalogSnapshot) -> String {
+    use sha2::Digest;
+    let mut canonical = snapshot.clone();
+    canonical.tables.sort();
+    canonical.columns.sort();
+    canonical.fks.sort();
+    // Hash ONLY the stable identity fields. The table row-count estimate
+    // moves on every autovacuum and `partition_info` changes on partition
+    // layout edits — neither reflects a schema identity change, and hashing
+    // them would invalidate the persisted Tier-2 graph on reconnect for
+    // exactly the active schemas the differential cache targets.
+    let tables: Vec<(&str, &str)> = canonical
+        .tables
+        .iter()
+        .map(|t| (t.schema.as_str(), t.name.as_str()))
+        .collect();
+    let columns: Vec<(&str, &str, &str, &str, bool)> = canonical
+        .columns
+        .iter()
+        .map(|c| {
+            (
+                c.schema.as_str(),
+                c.table.as_str(),
+                c.name.as_str(),
+                c.data_type.as_str(),
+                c.is_primary_key,
+            )
+        })
+        .collect();
+    let fks: Vec<(&str, &str, &str, &str, &str, &str)> = canonical
+        .fks
+        .iter()
+        .map(|f| {
+            (
+                f.from_schema.as_str(),
+                f.from_table.as_str(),
+                f.from_column.as_str(),
+                f.to_schema.as_str(),
+                f.to_table.as_str(),
+                f.to_column.as_str(),
+            )
+        })
+        .collect();
+    let bytes = bincode::serialize(&(canonical.format_version, tables, columns, fks))
+        .expect("snapshot serializes");
+    format!("{:x}", sha2::Sha256::digest(&bytes))
+}
+
+/// Version tag for the persisted Tier-2 graph blob. Bumped whenever the
+/// serialized `SchemaGraph` layout changes so stale blobs are dropped and
+/// re-indexed instead of failing forever on the same bytes (bincode is
+/// order-sensitive — any field removal/rename breaks old blobs deliberately).
+pub const GRAPH_FORMAT_VERSION: u32 = 1;
+
+/// Serialize a Tier-2 graph for the connection cache: `(version, graph)` so a
+/// loader can reject a blob written by an older/newer layout before
+/// attempting (and failing) a bincode decode.
+pub(crate) fn encode_persisted_graph(graph: &SchemaGraph) -> Result<Vec<u8>, String> {
+    bincode::serialize(&(GRAPH_FORMAT_VERSION, graph)).map_err(|e| e.to_string())
+}
+
+/// Decode a persisted Tier-2 graph, rejecting mismatched format versions with
+/// a typed error the caller can treat as "stale, re-index".
+pub(crate) fn decode_persisted_graph(blob: &[u8]) -> Result<SchemaGraph, String> {
+    let (version, graph): (u32, SchemaGraph) =
+        bincode::deserialize(blob).map_err(|e| format!("corrupt cached graph: {e}"))?;
+    if version != GRAPH_FORMAT_VERSION {
+        return Err(format!(
+            "cached graph format v{version} != current v{GRAPH_FORMAT_VERSION}"
+        ));
+    }
+    Ok(graph)
+}
+
+/// Epoch seconds — the serializable replacement for `std::time::Instant`.
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Phases the background indexer reports through `on_progress`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexingStage {
+    Sampling,
+    Embedding,
+    Complete,
+}
+
+impl SchemaGraph {
+    /// Tier-1: metadata only, no sampling, no embeddings. Fast enough to run
+    /// inside connect(). Returns the canonical snapshot for fingerprinting.
+    pub async fn from_catalog(
         connection_id: ConnectionId,
         client: &ConnectorClient,
-        embedder: &Embedder,
-        include_sample_values: bool,
-        capabilities: &lucent_protocol::DriverCapabilities,
-    ) -> Result<SchemaGraph, String> {
-        let start = std::time::Instant::now();
-
-        // Step 0-2: harvest tables and columns through the catalog seam. Two
-        // requests replace two hand-written Postgres queries; the FK edges come
-        // from a third and are applied after embedding, as before.
+        _capabilities: &lucent_protocol::DriverCapabilities,
+    ) -> Result<(SchemaGraph, CatalogSnapshot), String> {
+        // Harvest tables and columns through the catalog seam. Two requests
+        // replace two hand-written Postgres queries; the FK edges come from a
+        // third and are applied after embedding, as before.
         let objects = client
             .list_all_objects(connection_id, vec![lucent_protocol::ObjectKind::Table])
             .await
@@ -271,62 +425,12 @@ impl SchemaIndexer {
         let (tables, table_columns) = harvest_to_entries(objects, details);
 
         log::info!(
-            "SchemaIndexer: {} tables, {} columns from the catalog",
+            "SchemaGraph::from_catalog: {} tables, {} columns from the catalog",
             tables.len(),
             table_columns.values().map(Vec::len).sum::<usize>()
         );
 
-        // Step 3: fetch sample values — collapsed into ONE combined query across all
-        // tables instead of one query per table (which caused a ~23x regression:
-        // 214ms → 4.88s on a 12-table / 77-column schema because N round trips
-        // between the app and database add up fast over a single connection).
-        //
-        // Each column gets a parenthesized subquery with an inner bounded-scan (LIMIT 1000)
-        // to avoid full-table hash aggregates on huge tables, then GROUP BY to deduplicate
-        // and capped at 20 values per column.
-        let mut sample_values: HashMap<(usize, String), Vec<String>> = HashMap::new();
-        if include_sample_values {
-            let builder = crate::sql_builder::for_driver(capabilities);
-            if let Some(sql) =
-                build_sampling_sql(&tables, &table_columns, builder.as_ref(), &capabilities.id)
-            {
-                // Session-level timeout as its own statement (SET LOCAL needs a
-                // transaction and multi-statement strings are rejected outright).
-                let _ = client
-                    .execute(connection_id, "SET statement_timeout = 3000")
-                    .await;
-                let query_result = client.execute(connection_id, &sql).await;
-                let _ = client
-                    .execute(connection_id, "SET statement_timeout = 0")
-                    .await;
-                match query_result {
-                    Ok(res) => {
-                        for row in &res.rows {
-                            if let (Some(tid_f), Some(col_str), Some(val_str)) =
-                                (row[0].as_i64(), row[1].as_str(), row[2].as_str())
-                            {
-                                let truncated = truncate_sample_value(val_str);
-                                sample_values
-                                    .entry((tid_f as usize, col_str.to_string()))
-                                    .or_default()
-                                    .push(truncated);
-                            }
-                        }
-                        log::info!(
-                            "SchemaIndexer: sampled values for {} (table,column) pairs",
-                            sample_values.len()
-                        );
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "Value sampling failed for the whole batch, continuing with name+type only: {e}"
-                        );
-                    }
-                }
-            }
-        }
-
-        // Step 4: build columns + FK edges
+        // Build columns (stable metadata-only doc_text, empty embeddings) + FK edges.
         let mut columns: Vec<ColumnEntry> = Vec::new();
         let mut columns_by_table: HashMap<usize, Vec<usize>> = HashMap::new();
         let mut col_lookup: HashMap<(String, String, String), usize> = HashMap::new();
@@ -335,11 +439,7 @@ impl SchemaIndexer {
             let ids = columns_by_table.entry(*tid).or_default();
             for (name, data_type, schema, table, is_pk) in col_infos {
                 let cid = columns.len();
-                let vals = sample_values
-                    .get(&(*tid, name.clone()))
-                    .cloned()
-                    .unwrap_or_default();
-                let doc_text = doc_text_for(schema, table, name, data_type, *is_pk, &vals);
+                let doc_text = doc_text_for(schema, table, name, data_type);
                 columns.push(ColumnEntry {
                     id: cid,
                     table_id: *tid,
@@ -348,7 +448,7 @@ impl SchemaIndexer {
                     name: name.clone(),
                     data_type: data_type.clone(),
                     is_primary_key: *is_pk,
-                    sample_values: vals,
+                    sample_values: vec![],
                     fk_ref: None,
                     embedding: vec![],
                     doc_text,
@@ -358,8 +458,8 @@ impl SchemaIndexer {
             }
         }
 
-        // Step 5: fetch FK constraints through the catalog seam — the driver
-        // answers with normalized ForeignKey { from: ColumnPath, to: ColumnPath }.
+        // Fetch FK constraints through the catalog seam — the driver answers
+        // with normalized ForeignKey { from: ColumnPath, to: ColumnPath }.
         let fk_rows = client.list_foreign_keys(connection_id).await?;
         let mut fk_edges: Vec<FkEdge> = Vec::new();
         let mut table_adjacency: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -403,21 +503,128 @@ impl SchemaIndexer {
         }
 
         log::info!(
-            "SchemaIndexer: {} FK edges, {} table adjacencies",
+            "SchemaGraph::from_catalog: {} FK edges, {} table adjacencies",
             fk_edges.len(),
             table_adjacency.len()
         );
 
-        // Step 6: embed all column documents
-        let doc_texts: Vec<&str> = columns.iter().map(|c| c.doc_text.as_str()).collect();
+        // Canonical snapshot for fingerprinting — sorted so query order never
+        // changes the hash.
+        let mut snapshot = CatalogSnapshot {
+            format_version: DOC_TEXT_FORMAT_VERSION,
+            tables: tables
+                .iter()
+                .map(|t| SnapshotTable {
+                    schema: t.schema.clone(),
+                    name: t.name.clone(),
+                    row_count_estimate: t.row_count_estimate,
+                    partition_info: t.partition_info.clone(),
+                })
+                .collect(),
+            columns: columns
+                .iter()
+                .map(|c| SnapshotColumn {
+                    schema: c.schema.clone(),
+                    table: c.table.clone(),
+                    name: c.name.clone(),
+                    data_type: c.data_type.clone(),
+                    is_primary_key: c.is_primary_key,
+                })
+                .collect(),
+            fks: fk_edges
+                .iter()
+                .map(|e| {
+                    let from = &columns[e.from_column];
+                    let to = &columns[e.to_column];
+                    SnapshotFk {
+                        from_schema: from.schema.clone(),
+                        from_table: from.table.clone(),
+                        from_column: from.name.clone(),
+                        to_schema: to.schema.clone(),
+                        to_table: to.table.clone(),
+                        to_column: to.name.clone(),
+                    }
+                })
+                .collect(),
+        };
+        snapshot.tables.sort();
+        snapshot.columns.sort();
+        snapshot.fks.sort();
+
+        let graph = SchemaGraph {
+            tables,
+            columns,
+            columns_by_table,
+            fk_edges,
+            table_adjacency,
+            built_at_unix: now_unix(),
+            tier: IndexingTier::MetadataOnly,
+        };
+        Ok((graph, snapshot))
+    }
+}
+
+impl SchemaIndexer {
+    /// TEMPORARY shim (removed by T2.4): the connect path still calls
+    /// `build_index` with this exact shape until IndexingManager::start lands.
+    /// Internally it now runs the Tier-1 harvest (from_catalog) and then the
+    /// old inline sampling + embedding — behavior identical to the pre-T2.3
+    /// connect-time build, but no persistent cache (the connect path has no
+    /// connection key until T2.4 wires the manager).
+    pub async fn build_index(
+        connection_id: ConnectionId,
+        client: &ConnectorClient,
+        embedder: &Embedder,
+        include_sample_values: bool,
+        capabilities: &lucent_protocol::DriverCapabilities,
+    ) -> Result<SchemaGraph, String> {
+        let start = std::time::Instant::now();
+        let (mut graph, _snapshot) =
+            SchemaGraph::from_catalog(connection_id, client, capabilities).await?;
+
+        // Old Step 3: fetch sample values — ONE combined query across all
+        // tables (per-table round trips caused a ~23x regression: 214ms → 4.88s
+        // on a 12-table / 77-column schema). Bounded scan LIMIT 1000, dedup via
+        // GROUP BY, capped at 20 values per column.
+        if include_sample_values {
+            let table_columns = graph_columns_by_table(&graph);
+            let builder = crate::sql_builder::for_driver(capabilities);
+            if let Some(sql) = build_sampling_sql(
+                &graph.tables,
+                &table_columns,
+                builder.as_ref(),
+                &capabilities.id,
+            ) {
+                // Session-level timeout as its own statement (SET LOCAL needs a
+                // transaction and multi-statement strings are rejected outright).
+                let _ = client
+                    .execute(connection_id, "SET statement_timeout = 3000")
+                    .await;
+                let query_result = client.execute(connection_id, &sql).await;
+                let _ = client
+                    .execute(connection_id, "SET statement_timeout = 0")
+                    .await;
+                match query_result {
+                    Ok(res) => apply_sample_values(&mut graph, &res),
+                    Err(e) => {
+                        log::warn!(
+                            "Value sampling failed for the whole batch, continuing with name+type only: {e}"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Old Step 6: embed all column documents.
+        let doc_texts: Vec<&str> = graph.columns.iter().map(|c| c.doc_text.as_str()).collect();
         let embeddings = match embedder.embed(&doc_texts).await {
             Ok(embs) => embs,
             Err(e) => {
                 log::warn!(
                     "Batch embed failed ({e}), retrying column-by-column to isolate bad input"
                 );
-                let mut embs = Vec::with_capacity(columns.len());
-                for (i, c) in columns.iter().enumerate() {
+                let mut embs = Vec::with_capacity(graph.columns.len());
+                for (i, c) in graph.columns.iter().enumerate() {
                     match embedder.embed(&[&c.doc_text]).await {
                         Ok(mut v) => {
                             embs.push(v.pop().unwrap_or_default());
@@ -438,25 +645,302 @@ impl SchemaIndexer {
             }
         };
 
-        for (c, emb) in columns.iter_mut().zip(embeddings) {
+        for (c, emb) in graph.columns.iter_mut().zip(embeddings) {
             c.embedding = emb;
         }
+        graph.tier = IndexingTier::FullyEnriched;
 
         let elapsed = start.elapsed();
         log::info!(
             "SchemaGraph built in {elapsed:?}: {} tables, {} columns",
-            tables.len(),
-            columns.len()
+            graph.tables.len(),
+            graph.columns.len()
         );
+        Ok(graph)
+    }
 
-        Ok(SchemaGraph {
-            tables,
-            columns,
-            columns_by_table,
-            fk_edges,
-            table_adjacency,
-            built_at: std::time::Instant::now(),
-        })
+    /// Tier-2: enrich a Tier-1 graph in the background. Fast path loads the
+    /// persisted Tier-2 graph on an unchanged-schema fingerprint hit (zero
+    /// catalog queries, zero ONNX). Otherwise: chunked value sampling on the
+    /// sampling connection (session B, 5s client timeout + cancel backstop),
+    /// bulk BLAKE3 cache lookup, single-flight embedding of ONLY the misses,
+    /// persistence of embeddings + graph blob + fingerprint, and a copy-on-write
+    /// swap of the enriched graph.
+    ///
+    /// The 11-parameter signature is plan-mandated (used verbatim by T2.4's
+    /// IndexingManager) — a context struct would churn every caller for no
+    /// behavior change, so the lint is allowed at the function level.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn enrich(
+        _connection_id: ConnectionId,
+        snapshot: &CatalogSnapshot,
+        graph: &SchemaGraph,
+        client: Option<&ConnectorClient>,
+        sampling_connection_id: Option<ConnectionId>,
+        embedder: &SingleFlightEmbedder,
+        cache: &PersistentVectorCache,
+        connection_key: &str,
+        sample_values: bool,
+        capabilities: &lucent_protocol::DriverCapabilities,
+        on_progress: &(dyn Fn(IndexingStage, usize, usize, usize, usize) + Send + Sync),
+    ) -> Result<SchemaGraph, String> {
+        let total = graph.tables.len();
+        let column_count = graph.columns.len();
+
+        // Fast path: unchanged schema with a persisted Tier-2 graph.
+        if let Some(entry) = cache.get_connection_cache(connection_key).await? {
+            if entry.schema_hash == compute_schema_hash(snapshot) {
+                match decode_persisted_graph(&entry.graph_blob) {
+                    Ok(mut tier2) => {
+                        tier2.built_at_unix = now_unix();
+                        on_progress(IndexingStage::Complete, total, total, column_count, 0);
+                        return Ok(tier2);
+                    }
+                    Err(e) => {
+                        // Corrupt or format-stale blob: drop it and fall through
+                        // to re-index instead of failing forever on the same
+                        // bad bytes (bincode is order-sensitive, so any layout
+                        // change breaks old blobs deliberately).
+                        log::warn!(
+                            "cached graph for {connection_key} unreadable ({e}); re-indexing"
+                        );
+                        let _ = cache.delete_connection_cache(connection_key).await;
+                    }
+                }
+            }
+        }
+
+        let mut tier2 = graph.clone();
+        let table_columns = graph_columns_by_table(graph);
+
+        // 1. Sampling — chunked 10 tables/statement on session B ONLY. The
+        //    statement timeout is scoped to a short transaction (BEGIN → SET
+        //    LOCAL → query → COMMIT/ROLLBACK) so it can never leak onto a
+        //    shared session, and there is NO fallback to the editor connection:
+        //    sampling the user's active session would mutate its timeout.
+        if sample_values {
+            if let Some(sampling_conn_id) = sampling_connection_id {
+                if let Some(client) = client {
+                    let chunks: Vec<&[TableEntry]> = graph.tables.chunks(10).collect();
+                    for (ci, chunk) in chunks.iter().enumerate() {
+                        on_progress(IndexingStage::Sampling, ci * 10 + chunk.len(), total, 0, 0);
+                        let builder = crate::sql_builder::for_driver(capabilities);
+                        let Some(sql) = build_sampling_sql(
+                            chunk,
+                            &table_columns,
+                            builder.as_ref(),
+                            &capabilities.id,
+                        ) else {
+                            continue;
+                        };
+                        // The transaction is the timeout-scoping mechanism; on
+                        // ANY failure path we roll back so session B never
+                        // retains an open sampling transaction.
+                        if let Err(e) = client.execute(sampling_conn_id, "BEGIN").await {
+                            log::warn!("sampling chunk {ci}: BEGIN failed: {e}; skipping chunk");
+                            break;
+                        }
+                        if let Err(e) = client
+                            .execute(sampling_conn_id, "SET LOCAL statement_timeout = 3000")
+                            .await
+                        {
+                            log::warn!("sampling chunk {ci}: SET LOCAL failed: {e}; rolling back");
+                            if let Err(rb) = client.execute(sampling_conn_id, "ROLLBACK").await {
+                                log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
+                            }
+                            break;
+                        }
+                        let query_id = QueryId(uuid::Uuid::new_v4());
+                        let result = tokio::time::timeout(
+                            Duration::from_secs(5),
+                            client.execute_with_id(query_id, sampling_conn_id, &sql, None),
+                        )
+                        .await;
+                        match result {
+                            Ok(Ok((res, _qid))) => {
+                                if let Err(e) = client.execute(sampling_conn_id, "COMMIT").await {
+                                    log::warn!(
+                                        "sampling chunk {ci}: COMMIT failed: {e}; rolling back"
+                                    );
+                                    if let Err(rb) =
+                                        client.execute(sampling_conn_id, "ROLLBACK").await
+                                    {
+                                        log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
+                                    }
+                                    break;
+                                }
+                                apply_sample_values(&mut tier2, &res);
+                            }
+                            Ok(Err(e)) => {
+                                log::warn!("sampling chunk {ci} failed: {e}");
+                                if let Err(rb) = client.execute(sampling_conn_id, "ROLLBACK").await
+                                {
+                                    log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
+                                }
+                                break;
+                            }
+                            Err(_elapsed) => {
+                                log::warn!("sampling chunk {ci} timed out; cancelling");
+                                let _ = client.cancel(sampling_conn_id, query_id).await;
+                                if let Err(rb) = client.execute(sampling_conn_id, "ROLLBACK").await
+                                {
+                                    log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
+                                }
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    log::info!("no DB client available; skipping value sampling");
+                }
+            } else {
+                log::info!("no dedicated session B available; skipping value sampling this run");
+            }
+        }
+
+        // 2. Hashes + bulk cache lookup.
+        let doc_texts: Vec<String> = tier2.columns.iter().map(|c| c.doc_text.clone()).collect();
+        let hashes: Vec<String> = doc_texts
+            .iter()
+            .map(|t| PersistentVectorCache::compute_doc_hash(t))
+            .collect();
+        let cached = cache.get_embeddings(&hashes).await?;
+
+        // 3. Embed ONLY the misses.
+        let mut missing: Vec<(usize, String)> = Vec::new();
+        for (i, h) in hashes.iter().enumerate() {
+            if !cached.contains_key(h) {
+                missing.push((i, h.clone()));
+            }
+        }
+        if !missing.is_empty() {
+            on_progress(
+                IndexingStage::Embedding,
+                cached.len(),
+                hashes.len(),
+                cached.len(),
+                missing.len(),
+            );
+            let missing_texts: Vec<String> =
+                missing.iter().map(|(i, _)| doc_texts[*i].clone()).collect();
+            match embedder.embed_missing(&missing_texts).await {
+                Ok(new_embeddings) => {
+                    let rows: Vec<EmbeddingRow> = missing
+                        .iter()
+                        .zip(new_embeddings.iter())
+                        .filter(|(_, e)| !e.is_empty())
+                        .map(|((i, h), e)| EmbeddingRow {
+                            doc_hash: h.clone(),
+                            model_name: MODEL_NAME.into(),
+                            doc_text: doc_texts[*i].clone(),
+                            embedding: e.clone(),
+                        })
+                        .collect();
+                    if let Err(e) = cache.put_embeddings(&rows).await {
+                        log::warn!(
+                            "persisting {} embeddings failed ({e}); continuing with in-memory vectors",
+                            rows.len()
+                        );
+                    }
+                    for ((i, _), e) in missing.iter().zip(new_embeddings.iter()) {
+                        tier2.columns[*i].embedding = e.clone();
+                    }
+                }
+                Err(e) => {
+                    // Degrade, don't fail the whole graph (spec contract: a
+                    // failed embedding must not fail the graph). The tier-2
+                    // clone keeps whatever resolved from the cache and is
+                    // still swapped; the blob is NOT persisted so the next
+                    // reconnect re-attempts the missing columns.
+                    log::warn!(
+                        "embedding {} missing columns failed ({e}); degrading to cached embeddings only",
+                        missing.len()
+                    );
+                }
+            }
+        }
+        for (i, h) in hashes.iter().enumerate() {
+            if let Some(v) = cached.get(h) {
+                tier2.columns[i].embedding = v.clone();
+            }
+        }
+
+        // 4. Persist the Tier-2 graph + fingerprint — only when every missing
+        //    column was embedded. A degraded run (embed failure) is swapped but
+        //    not pinned, so the next reconnect re-attempts it. The persisted
+        //    blob is version-tagged and carries NO sample values: live row
+        //    values are privacy-sensitive and never belong in the on-disk
+        //    cache (they stay in-memory for the current session only).
+        let embedded_count = tier2
+            .columns
+            .iter()
+            .filter(|c| !c.embedding.is_empty())
+            .count();
+        if embedded_count == hashes.len() {
+            tier2.tier = IndexingTier::FullyEnriched;
+            let mut persist_graph = tier2.clone();
+            for col in &mut persist_graph.columns {
+                col.sample_values.clear();
+            }
+            let blob = encode_persisted_graph(&persist_graph).map_err(|e| e.to_string())?;
+            if let Err(e) = cache
+                .put_connection_cache(connection_key, &compute_schema_hash(snapshot), &blob)
+                .await
+            {
+                log::warn!("persisting the tier-2 graph failed ({e}); skipping cache write");
+            }
+        } else {
+            log::warn!(
+                "tier-2 graph incomplete ({embedded_count}/{} columns embedded); swapping without persisting",
+                hashes.len()
+            );
+        }
+        on_progress(
+            IndexingStage::Complete,
+            total,
+            total,
+            cached.len(),
+            missing.len(),
+        );
+        Ok(tier2)
+    }
+}
+
+/// Rebuild the per-table column map (name, data_type, schema, table, is_pk)
+/// from a graph — used by sampling in both the temporary shim and enrich.
+fn graph_columns_by_table(graph: &SchemaGraph) -> TableColumns {
+    let mut table_columns: TableColumns = HashMap::new();
+    for col in &graph.columns {
+        table_columns.entry(col.table_id).or_default().push((
+            col.name.clone(),
+            col.data_type.clone(),
+            col.schema.clone(),
+            col.table.clone(),
+            col.is_primary_key,
+        ));
+    }
+    table_columns
+}
+
+/// Attach sampled values to the tier-2 clone. Row shape from
+/// build_sampling_sql's UNION ALL: (tid, col, val) as JSON values.
+fn apply_sample_values(tier2: &mut SchemaGraph, res: &crate::client::ExecuteResult) {
+    let mut col_lookup: HashMap<(usize, String), usize> = HashMap::new();
+    for (cid, col) in tier2.columns.iter().enumerate() {
+        col_lookup.insert((col.table_id, col.name.clone()), cid);
+    }
+    for row in &res.rows {
+        if let (Some(tid_f), Some(col_str), Some(val_str)) =
+            (row[0].as_i64(), row[1].as_str(), row[2].as_str())
+        {
+            let truncated = truncate_sample_value(val_str);
+            if let Some(cid) = col_lookup.get(&(tid_f as usize, col_str.to_string())) {
+                let values = &mut tier2.columns[*cid].sample_values;
+                if values.len() < 20 && !values.contains(&truncated) {
+                    values.push(truncated);
+                }
+            }
+        }
     }
 }
 
@@ -679,6 +1163,11 @@ mod partition_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use uuid::Uuid;
 
     #[test]
     fn long_multibyte_sample_value_never_panics() {
@@ -737,7 +1226,8 @@ mod tests {
             columns_by_table,
             fk_edges,
             table_adjacency,
-            built_at: std::time::Instant::now(),
+            built_at_unix: 0,
+            tier: IndexingTier::MetadataOnly,
         }
     }
 
@@ -899,7 +1389,7 @@ mod tests {
 
     #[test]
     fn range_typed_column_doc_text_includes_join_hazard_hint() {
-        let col = doc_text_for("public", "routes", "validity", "tstzrange", false, &[]);
+        let col = doc_text_for("public", "routes", "validity", "tstzrange");
         assert!(
             col.contains("time-versioned") || col.contains("may fan out"),
             "range-typed columns must warn that a naive join on the table's other \
@@ -909,7 +1399,7 @@ mod tests {
 
     #[test]
     fn plain_typed_column_doc_text_has_no_hazard_hint() {
-        let col = doc_text_for("public", "users", "email", "text", false, &[]);
+        let col = doc_text_for("public", "users", "email", "text");
         assert!(
             !col.contains("time-versioned"),
             "non-range columns should not get this hint"
@@ -1053,5 +1543,506 @@ mod tests {
         );
         assert!(tables.is_empty());
         assert!(columns.is_empty());
+    }
+
+    // ─── T2.3: stable doc text, schema fingerprint, two-tier enrich ───────────
+
+    #[test]
+    fn doc_text_excludes_sample_values_and_keeps_range_hints() {
+        let text = doc_text_for("public", "routes", "airplane_code", "tstzrange");
+        assert!(text.starts_with("public.routes.airplane_code tstzrange"));
+        assert!(text.contains("time-versioned"), "range hint retained");
+        assert!(
+            !text.contains("values:"),
+            "samples must not enter the hash input"
+        );
+        let plain = doc_text_for("public", "users", "status", "text");
+        assert_eq!(plain, "public.users.status text");
+    }
+
+    #[test]
+    fn schema_hash_is_order_stable_and_content_sensitive() {
+        let mut a = CatalogSnapshot {
+            format_version: DOC_TEXT_FORMAT_VERSION,
+            tables: vec![
+                SnapshotTable {
+                    schema: "public".into(),
+                    name: "b".into(),
+                    row_count_estimate: 0,
+                    partition_info: None,
+                },
+                SnapshotTable {
+                    schema: "public".into(),
+                    name: "a".into(),
+                    row_count_estimate: 0,
+                    partition_info: None,
+                },
+            ],
+            columns: vec![],
+            fks: vec![],
+        };
+        let h1 = compute_schema_hash(&a);
+        a.tables.reverse();
+        assert_eq!(h1, compute_schema_hash(&a), "ordering must not matter");
+        a.tables.push(SnapshotTable {
+            schema: "public".into(),
+            name: "c".into(),
+            row_count_estimate: 0,
+            partition_info: None,
+        });
+        assert_ne!(
+            h1,
+            compute_schema_hash(&a),
+            "schema change must change the hash"
+        );
+    }
+
+    #[tokio::test]
+    async fn enrich_loads_cached_tier2_with_zero_embeds() {
+        let dir = std::env::temp_dir().join(format!("lucent-enrich-cached-{}", std::process::id()));
+        let cache = PersistentVectorCache::open_at(dir.join("embeddings_v1.db")).unwrap();
+        let (graph, snapshot) = test_graph_and_snapshot();
+        let mut tier2 = graph.clone();
+        tier2.tier = IndexingTier::FullyEnriched;
+        tier2.columns[0].embedding = vec![0.5, 0.5];
+        let blob = encode_persisted_graph(&tier2).unwrap();
+        let key = "test-connection-key".to_string();
+        cache
+            .put_connection_cache(&key, &compute_schema_hash(&snapshot), &blob)
+            .await
+            .unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let embedder = SingleFlightEmbedder::new(Arc::new(CountingEmbed2 {
+            calls: calls.clone(),
+        }));
+        let out = SchemaIndexer::enrich(
+            ConnectionId(Uuid::new_v4()),
+            &snapshot,
+            &graph,
+            None,
+            None,
+            &embedder,
+            &cache,
+            &key,
+            false,
+            &fake_capabilities(),
+            &|_s, _p, _t, _h, _c| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.tier, IndexingTier::FullyEnriched);
+        assert_eq!(out.columns[0].embedding, vec![0.5, 0.5]);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "cached path must not embed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn enrich_embeds_exactly_the_missing_columns() {
+        let dir =
+            std::env::temp_dir().join(format!("lucent-enrich-missing-{}", std::process::id()));
+        let cache = PersistentVectorCache::open_at(dir.join("embeddings_v1.db")).unwrap();
+        let (graph, snapshot) = test_graph_and_snapshot();
+        // Prime the cache for column 0 only.
+        let h0 = PersistentVectorCache::compute_doc_hash(&graph.columns[0].doc_text);
+        cache
+            .put_embeddings(&[EmbeddingRow {
+                doc_hash: h0,
+                model_name: MODEL_NAME.into(),
+                doc_text: graph.columns[0].doc_text.clone(),
+                embedding: vec![1.0, 0.0],
+            }])
+            .await
+            .unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let embedder = SingleFlightEmbedder::new(Arc::new(CountingEmbed2 {
+            calls: calls.clone(),
+        }));
+        let out = SchemaIndexer::enrich(
+            ConnectionId(Uuid::new_v4()),
+            &snapshot,
+            &graph,
+            None,
+            None,
+            &embedder,
+            &cache,
+            "key2",
+            false,
+            &fake_capabilities(),
+            &|_s, _p, _t, _h, _c| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "exactly one ONNX invocation"
+        );
+        assert_eq!(out.columns[0].embedding, vec![1.0, 0.0]);
+        assert!(!out.columns[1].embedding.is_empty());
+        // Persisted: a second enrich for the same fingerprint is a cache hit.
+        let out2 = SchemaIndexer::enrich(
+            ConnectionId(Uuid::new_v4()),
+            &snapshot,
+            &graph,
+            None,
+            None,
+            &embedder,
+            &cache,
+            "key2",
+            false,
+            &fake_capabilities(),
+            &|_s, _p, _t, _h, _c| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(out2.columns[1].embedding, out.columns[1].embedding);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "second run is a full cache hit"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn enrich_falls_through_on_a_corrupt_cached_blob_and_deletes_it() {
+        let dir =
+            std::env::temp_dir().join(format!("lucent-enrich-corrupt-{}", std::process::id()));
+        let cache = PersistentVectorCache::open_at(dir.join("embeddings_v1.db")).unwrap();
+        let (graph, snapshot) = test_graph_and_snapshot();
+        let key = "corrupt-key".to_string();
+        // A valid fingerprint with garbage bytes — bincode cannot decode it.
+        cache
+            .put_connection_cache(&key, &compute_schema_hash(&snapshot), b"not-a-graph")
+            .await
+            .unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let embedder = SingleFlightEmbedder::new(Arc::new(CountingEmbed2 {
+            calls: calls.clone(),
+        }));
+        let out = SchemaIndexer::enrich(
+            ConnectionId(Uuid::new_v4()),
+            &snapshot,
+            &graph,
+            None,
+            None,
+            &embedder,
+            &cache,
+            &key,
+            false,
+            &fake_capabilities(),
+            &|_s, _p, _t, _h, _c| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out.tier,
+            IndexingTier::FullyEnriched,
+            "corrupt blob falls through to a fresh re-index"
+        );
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "re-index embedded the columns"
+        );
+        // The corrupt row was deleted and replaced by a valid versioned blob.
+        let entry = cache.get_connection_cache(&key).await.unwrap().unwrap();
+        let decoded = decode_persisted_graph(&entry.graph_blob).unwrap();
+        assert_eq!(decoded.tier, IndexingTier::FullyEnriched);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn enrich_persists_sample_values_but_never_at_rest() {
+        let dir =
+            std::env::temp_dir().join(format!("lucent-enrich-samples-{}", std::process::id()));
+        let cache = PersistentVectorCache::open_at(dir.join("embeddings_v1.db")).unwrap();
+        let (mut graph, snapshot) = test_graph_and_snapshot();
+        // Give the tier-1 fixture live sample values (as sampling would).
+        graph.columns[0].sample_values = vec!["alice".to_string(), "bob".to_string()];
+        graph.columns[1].sample_values = vec!["active".to_string()];
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let embedder = SingleFlightEmbedder::new(Arc::new(CountingEmbed2 {
+            calls: calls.clone(),
+        }));
+        let out = SchemaIndexer::enrich(
+            ConnectionId(Uuid::new_v4()),
+            &snapshot,
+            &graph,
+            None,
+            None,
+            &embedder,
+            &cache,
+            "samples-key",
+            false,
+            &fake_capabilities(),
+            &|_s, _p, _t, _h, _c| {},
+        )
+        .await
+        .unwrap();
+        // The in-memory swapped graph keeps the samples for this session.
+        assert!(!out.columns[0].sample_values.is_empty());
+        assert!(!out.columns[1].sample_values.is_empty());
+
+        // The persisted blob must carry NO sample values (privacy at rest).
+        let entry = cache
+            .get_connection_cache("samples-key")
+            .await
+            .unwrap()
+            .unwrap();
+        let decoded = decode_persisted_graph(&entry.graph_blob).unwrap();
+        assert!(
+            decoded.columns.iter().all(|c| c.sample_values.is_empty()),
+            "persisted graph must not contain live row values"
+        );
+        // And a cache-hit reload yields an in-memory graph with empty samples.
+        let out2 = SchemaIndexer::enrich(
+            ConnectionId(Uuid::new_v4()),
+            &snapshot,
+            &graph,
+            None,
+            None,
+            &embedder,
+            &cache,
+            "samples-key",
+            false,
+            &fake_capabilities(),
+            &|_s, _p, _t, _h, _c| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "cache hit after first run");
+        assert!(
+            out2.columns[0].sample_values.is_empty(),
+            "cache-hit connections load the persisted graph with empty sample_values — the privacy fix strips samples from the blob, and the cache-hit fast path never re-harvests, so value hints stay empty until a schema change invalidates the fingerprint and triggers re-indexing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn test_graph_and_snapshot() -> (SchemaGraph, CatalogSnapshot) {
+        let tables = vec![TableEntry {
+            id: 0,
+            schema: "public".into(),
+            name: "users".into(),
+            row_count_estimate: 0,
+            partition_info: None,
+        }];
+        let columns = vec![
+            ColumnEntry {
+                id: 0,
+                table_id: 0,
+                schema: "public".into(),
+                table: "users".into(),
+                name: "id".into(),
+                data_type: "int4".into(),
+                is_primary_key: true,
+                sample_values: vec![],
+                fk_ref: None,
+                embedding: vec![],
+                doc_text: doc_text_for("public", "users", "id", "int4"),
+            },
+            ColumnEntry {
+                id: 1,
+                table_id: 0,
+                schema: "public".into(),
+                table: "users".into(),
+                name: "status".into(),
+                data_type: "text".into(),
+                is_primary_key: false,
+                sample_values: vec![],
+                fk_ref: None,
+                embedding: vec![],
+                doc_text: doc_text_for("public", "users", "status", "text"),
+            },
+        ];
+        let graph = SchemaGraph {
+            tables: tables.clone(),
+            columns: columns.clone(),
+            columns_by_table: HashMap::from([(0usize, vec![0usize, 1usize])]),
+            fk_edges: vec![],
+            table_adjacency: HashMap::new(),
+            tier: IndexingTier::MetadataOnly,
+            built_at_unix: 0,
+        };
+        let snapshot = CatalogSnapshot {
+            format_version: DOC_TEXT_FORMAT_VERSION,
+            tables: vec![SnapshotTable {
+                schema: "public".into(),
+                name: "users".into(),
+                row_count_estimate: 0,
+                partition_info: None,
+            }],
+            columns: vec![
+                SnapshotColumn {
+                    schema: "public".into(),
+                    table: "users".into(),
+                    name: "id".into(),
+                    data_type: "int4".into(),
+                    is_primary_key: true,
+                },
+                SnapshotColumn {
+                    schema: "public".into(),
+                    table: "users".into(),
+                    name: "status".into(),
+                    data_type: "text".into(),
+                    is_primary_key: false,
+                },
+            ],
+            fks: vec![],
+        };
+        (graph, snapshot)
+    }
+
+    struct CountingEmbed2 {
+        calls: Arc<AtomicUsize>,
+    }
+    impl crate::ai::single_flight::Embed for CountingEmbed2 {
+        fn embed<'a>(
+            &'a self,
+            texts: &'a [String],
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<Vec<f32>>, String>> + Send + 'a>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(texts
+                    .iter()
+                    .map(|t| vec![t.len() as f32, 1.0, 0.0])
+                    .collect())
+            })
+        }
+    }
+
+    fn fake_capabilities() -> lucent_protocol::DriverCapabilities {
+        lucent_protocol::DriverCapabilities {
+            id: "fake".into(),
+            display_name: "Fake".into(),
+            sql_dialect: lucent_protocol::SqlDialect::PostgreSql,
+            namespace_model: lucent_protocol::NamespaceModel::DbSchemaObject,
+            readonly: lucent_protocol::ReadOnlyMode::TransactionScoped,
+            statement_timeout: lucent_protocol::TimeoutSupport::Statement,
+            cancel: lucent_protocol::CancelMode::Native,
+            paging: lucent_protocol::PagingStyle::LimitOffset,
+            identifier_quote: '"',
+            string_literal: lucent_protocol::StringLiteralStyle::StandardConforming,
+            auth: lucent_protocol::AuthModel::UserPassword,
+        }
+    }
+
+    /// Manual cold-start diagnostic (NOT CI): builds a 100-table tier-1
+    /// fixture and runs `enrich` against the REAL ONNX embedder. Timings are
+    /// logged as diagnostics only — never asserted. Run with:
+    /// `cargo test -p lucent --lib ai::schema_graph::tests::test_cold_100_tables -- --ignored`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires ONNX model download; timing is diagnostic"]
+    async fn test_cold_100_tables() {
+        let dir = std::env::temp_dir().join(format!("lucent-cold-start-{}", std::process::id()));
+        let cache = PersistentVectorCache::open_at(dir.join("embeddings_v1.db"))
+            .expect("cache opens at temp dir");
+
+        let mut tables = Vec::with_capacity(100);
+        let mut columns = Vec::with_capacity(100);
+        let mut columns_by_table = HashMap::new();
+        for i in 0..100 {
+            let name = format!("t{i:03}");
+            tables.push(TableEntry {
+                id: i,
+                schema: "public".into(),
+                name: name.clone(),
+                row_count_estimate: 0,
+                partition_info: None,
+            });
+            columns.push(ColumnEntry {
+                id: i,
+                table_id: i,
+                schema: "public".into(),
+                table: name,
+                name: "id".into(),
+                data_type: "int4".into(),
+                is_primary_key: true,
+                sample_values: vec![],
+                fk_ref: None,
+                embedding: vec![],
+                doc_text: doc_text_for("public", &format!("t{i:03}"), "id", "int4"),
+            });
+            columns_by_table.insert(i, vec![i]);
+        }
+        let graph = SchemaGraph {
+            tables: tables.clone(),
+            columns: columns.clone(),
+            columns_by_table,
+            fk_edges: vec![],
+            table_adjacency: HashMap::new(),
+            tier: IndexingTier::MetadataOnly,
+            built_at_unix: 0,
+        };
+        let snapshot = CatalogSnapshot {
+            format_version: DOC_TEXT_FORMAT_VERSION,
+            tables: tables
+                .iter()
+                .map(|t| SnapshotTable {
+                    schema: t.schema.clone(),
+                    name: t.name.clone(),
+                    row_count_estimate: t.row_count_estimate,
+                    partition_info: t.partition_info.clone(),
+                })
+                .collect(),
+            columns: columns
+                .iter()
+                .map(|c| SnapshotColumn {
+                    schema: c.schema.clone(),
+                    table: c.table.clone(),
+                    name: c.name.clone(),
+                    data_type: c.data_type.clone(),
+                    is_primary_key: c.is_primary_key,
+                })
+                .collect(),
+            fks: vec![],
+        };
+
+        let embedder = SingleFlightEmbedder::new(Arc::new(
+            crate::ai::embed::Embedder::new().expect("real ONNX embedder initializes"),
+        ));
+        let started = std::time::Instant::now();
+        let out = SchemaIndexer::enrich(
+            ConnectionId(Uuid::new_v4()),
+            &snapshot,
+            &graph,
+            None,
+            None,
+            &embedder,
+            &cache,
+            "cold-start-diagnostic-key",
+            false,
+            &fake_capabilities(),
+            &|_s, _p, _t, _h, _c| {},
+        )
+        .await
+        .expect("enrich completes on a cold cache");
+        let elapsed = started.elapsed();
+
+        assert_eq!(out.tier, IndexingTier::FullyEnriched);
+        assert_eq!(out.columns.len(), 100);
+        let embedded = out
+            .columns
+            .iter()
+            .filter(|c| !c.embedding.is_empty())
+            .count();
+        let ratio = if out.columns.is_empty() {
+            0.0
+        } else {
+            embedded as f64 / out.columns.len() as f64
+        };
+        log::info!(
+            "[diagnostic] cold-start 100-table enrich: {elapsed:?} elapsed, {embedded}/{} columns embedded (cache-hit ratio {ratio:.2})",
+            out.columns.len()
+        );
+        assert_eq!(embedded, out.columns.len(), "all columns embedded");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

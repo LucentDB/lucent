@@ -1,7 +1,7 @@
 use crate::sql_builder::SqlBuilder;
 use lucent_protocol::SqlDialect;
 use serde::Deserialize;
-use sqlparser::ast::Statement;
+use sqlparser::ast::{Query, SetExpr, Statement};
 use sqlparser::dialect::Dialect;
 use sqlparser::parser::Parser;
 
@@ -19,7 +19,33 @@ pub(crate) fn is_wrappable_with_parser(sql: &str, dialect: Option<Box<dyn Dialec
         return false;
     };
     match Parser::parse_sql(dialect.as_ref(), sql) {
-        Ok(statements) if statements.len() == 1 => matches!(statements[0], Statement::Query(_)),
+        Ok(statements) if statements.len() == 1 => {
+            matches!(statements[0], Statement::Query(ref q) if query_is_wrappable(q))
+        }
+        _ => false,
+    }
+}
+
+/// A query is wrappable only if PostgreSQL can legally wrap it as a
+/// subquery: no row-locking clauses (`Query.locks`) and no `SELECT … INTO`
+/// (creates a table; `Select.into`). Both parse as plain `Statement::Query`
+/// but the server rejects them inside a subquery — wrapping them turned a
+/// valid query into a syntax error, silently disabling paging for those
+/// shapes (C6).
+fn query_is_wrappable(q: &Query) -> bool {
+    if !q.locks.is_empty() {
+        return false;
+    }
+    !setexpr_has_into(&q.body)
+}
+
+fn setexpr_has_into(body: &SetExpr) -> bool {
+    match body {
+        SetExpr::Select(sel) => sel.into.is_some(),
+        SetExpr::Query(q) => query_is_wrappable(q),
+        SetExpr::SetOperation { left, right, .. } => {
+            setexpr_has_into(left) || setexpr_has_into(right)
+        }
         _ => false,
     }
 }
@@ -62,7 +88,9 @@ pub fn normalize_sql_body(sql: &str) -> &str {
 
 pub fn wrap_for_count(base_sql: &str, filters: &[FilterSpec], builder: &dyn SqlBuilder) -> String {
     let trimmed = normalize_sql_body(base_sql);
-    let mut sql = format!("SELECT COUNT(*) FROM ({trimmed}) AS _lucent_count_base");
+    // The newline after the body terminates a trailing `--` comment so it
+    // cannot swallow the closing paren (C6).
+    let mut sql = format!("SELECT COUNT(*) FROM ({trimmed}\n) AS _lucent_count_base");
     if !filters.is_empty() {
         sql.push(' ');
         sql.push_str(&filters_to_where_clause(filters, builder));
@@ -79,7 +107,8 @@ pub fn wrap_for_page(
     builder: &dyn SqlBuilder,
 ) -> String {
     let trimmed = normalize_sql_body(base_sql);
-    let mut sql = format!("SELECT * FROM ({trimmed}) AS _lucent_page");
+    // The newline after the body terminates a trailing `--` comment (C6).
+    let mut sql = format!("SELECT * FROM ({trimmed}\n) AS _lucent_page");
 
     if !filters.is_empty() {
         sql.push(' ');
@@ -184,6 +213,28 @@ mod tests {
     #[test]
     fn not_wrappable_for_empty_string() {
         assert!(!is_wrappable_query("", PG));
+    }
+
+    #[test]
+    fn not_wrappable_for_row_locking_clauses() {
+        // C6: PostgreSQL rejects FOR UPDATE/FOR SHARE inside a subquery, so
+        // wrapping turned a valid query into a syntax error. These must run
+        // unwrapped instead.
+        assert!(!is_wrappable_query("SELECT * FROM users FOR UPDATE", PG));
+        assert!(!is_wrappable_query("SELECT * FROM users FOR SHARE", PG));
+        assert!(!is_wrappable_query(
+            "SELECT * FROM users FOR NO KEY UPDATE",
+            PG
+        ));
+    }
+
+    #[test]
+    fn not_wrappable_for_select_into() {
+        // C6: SELECT INTO is rejected inside a subquery too.
+        assert!(!is_wrappable_query(
+            "SELECT * INTO copied_users FROM users",
+            PG
+        ));
     }
 
     #[test]
@@ -461,18 +512,37 @@ mod wrap_tests {
     }
 
     #[test]
+    fn a_trailing_line_comment_cannot_swallow_the_closing_paren() {
+        // C6: the body's trailing `-- done` used to comment out the closing
+        // paren, producing a syntax error on every paged query with a trailing
+        // comment. The newline after the body terminates the comment.
+        let sql = wrap_for_page("SELECT 1 -- done", &None, &[], 200, 0, &pg());
+        assert!(
+            sql.starts_with("SELECT * FROM (SELECT 1 -- done\n) AS _lucent_page"),
+            "closing paren must not be inside the comment: {sql}"
+        );
+        let count_sql = wrap_for_count("SELECT 1 -- done", &[], &pg());
+        assert!(
+            count_sql
+                .starts_with("SELECT COUNT(*) FROM (SELECT 1 -- done\n) AS _lucent_count_base"),
+            "count wrap must not be inside the comment: {count_sql}"
+        );
+    }
+
+    #[test]
     fn wraps_with_limit_and_offset_only() {
         let sql = wrap_for_page("SELECT * FROM users", &None, &[], 200, 0, &pg());
         assert_eq!(
             sql,
-            r#"SELECT * FROM (SELECT * FROM users) AS _lucent_page LIMIT 200 OFFSET 0"#
+            r#"SELECT * FROM (SELECT * FROM users
+) AS _lucent_page LIMIT 200 OFFSET 0"#
         );
     }
 
     #[test]
     fn strips_trailing_semicolon_and_whitespace_from_base() {
         let sql = wrap_for_page("SELECT * FROM users;  ", &None, &[], 200, 0, &pg());
-        assert!(sql.starts_with("SELECT * FROM (SELECT * FROM users) AS _lucent_page"));
+        assert!(sql.starts_with("SELECT * FROM (SELECT * FROM users\n) AS _lucent_page"));
     }
 
     #[test]
@@ -484,7 +554,8 @@ mod wrap_tests {
         let sql = wrap_for_page("SELECT * FROM users", &sort, &[], 200, 0, &pg());
         assert_eq!(
             sql,
-            r#"SELECT * FROM (SELECT * FROM users) AS _lucent_page ORDER BY "created_at" DESC LIMIT 200 OFFSET 0"#
+            r#"SELECT * FROM (SELECT * FROM users
+) AS _lucent_page ORDER BY "created_at" DESC LIMIT 200 OFFSET 0"#
         );
     }
 
@@ -508,7 +579,8 @@ mod wrap_tests {
         let sql = wrap_for_page("SELECT * FROM users", &None, &filters, 200, 0, &pg());
         assert_eq!(
             sql,
-            r#"SELECT * FROM (SELECT * FROM users) AS _lucent_page WHERE "active" = 'true' LIMIT 200 OFFSET 0"#
+            r#"SELECT * FROM (SELECT * FROM users
+) AS _lucent_page WHERE "active" = 'true' LIMIT 200 OFFSET 0"#
         );
     }
 
@@ -544,7 +616,8 @@ mod wrap_tests {
         let sql = wrap_for_page("SELECT * FROM users", &sort, &filters, 50, 100, &pg());
         assert_eq!(
             sql,
-            r#"SELECT * FROM (SELECT * FROM users) AS _lucent_page WHERE "active" = 'true' ORDER BY "id" ASC LIMIT 50 OFFSET 100"#
+            r#"SELECT * FROM (SELECT * FROM users
+) AS _lucent_page WHERE "active" = 'true' ORDER BY "id" ASC LIMIT 50 OFFSET 100"#
         );
     }
 
@@ -570,7 +643,8 @@ mod count_tests {
         let sql = wrap_for_count("SELECT * FROM users", &[], &pg());
         assert_eq!(
             sql,
-            r#"SELECT COUNT(*) FROM (SELECT * FROM users) AS _lucent_count_base"#
+            r#"SELECT COUNT(*) FROM (SELECT * FROM users
+) AS _lucent_count_base"#
         );
     }
 
@@ -584,7 +658,8 @@ mod count_tests {
         let sql = wrap_for_count("SELECT * FROM users", &filters, &pg());
         assert_eq!(
             sql,
-            r#"SELECT COUNT(*) FROM (SELECT * FROM users) AS _lucent_count_base WHERE "active" = 'true'"#
+            r#"SELECT COUNT(*) FROM (SELECT * FROM users
+) AS _lucent_count_base WHERE "active" = 'true'"#
         );
     }
 

@@ -85,6 +85,40 @@ pub fn parse(json: &str) -> Result<NotebookFileV2, String> {
     serde_json::from_str(json).map_err(|e| format!("invalid notebook file: {e}"))
 }
 
+/// Loads a notebook file, dispatching on the path's extension: `.sql` files
+/// (case-insensitive) import as a fresh notebook with a single SQL cell whose
+/// source is the whole file; anything else is parsed as the Lucent JSON
+/// format. Statement-splitting a `.sql` file into multiple cells is a
+/// documented future enhancement.
+pub fn parse_file(path: &str, content: &str) -> Result<NotebookFileV2, String> {
+    if path.to_ascii_lowercase().ends_with(".sql") {
+        Ok(NotebookFileV2 {
+            version: LUCENT_FORMAT_VERSION,
+            metadata: NotebookMetadata {
+                connection_id: None,
+                connection_name: None,
+                connection_host: None,
+                database: None,
+                created_at: String::new(),
+                updated_at: String::new(),
+                lucent_version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+            cells: vec![NotebookFileCell {
+                id: uuid::Uuid::new_v4().to_string(),
+                kind: CellKind::Sql,
+                source: content.to_string(),
+                alias: None,
+                collapsed: false,
+                execution_order: Some(1),
+                outputs: None,
+                ai_state: None,
+            }],
+        })
+    } else {
+        parse(content)
+    }
+}
+
 pub fn to_json(metadata: &NotebookMetadata, cells: &[CellModel]) -> Result<String, String> {
     let file = NotebookFileV2 {
         version: LUCENT_FORMAT_VERSION,
@@ -210,5 +244,52 @@ mod unit_tests {
                 "error should mention the rejected version {bogus}: got {err}"
             );
         }
+    }
+
+    #[test]
+    fn parse_file_imports_sql_as_single_cell_notebook() {
+        let sql = "-- comment\nselect 1;\nselect 2;\n";
+        let file = parse_file("/tmp/whatever.sql", sql).unwrap();
+
+        assert_eq!(file.version, LUCENT_FORMAT_VERSION);
+        assert_eq!(file.cells.len(), 1);
+        assert!(matches!(file.cells[0].kind, CellKind::Sql));
+        assert_eq!(file.cells[0].source, sql);
+        assert!(file.cells[0].outputs.is_none());
+        assert!(file.cells[0].execution_order.is_some());
+    }
+
+    #[test]
+    fn parse_file_sql_suffix_is_case_insensitive() {
+        let file = parse_file("/tmp/Q.SQL", "select 1").unwrap();
+        assert_eq!(file.cells.len(), 1);
+        assert!(matches!(file.cells[0].kind, CellKind::Sql));
+    }
+
+    #[test]
+    fn parse_file_non_sql_paths_keep_json_behavior() {
+        let v2 = r#"{"version":2,"metadata":{"connectionId":null,"connectionName":null,
+            "connectionHost":null,"database":null,"createdAt":"","updatedAt":"",
+            "lucentVersion":"0.1.0"},"cells":[]}"#;
+        let file = parse_file("/tmp/notebook.lucent", v2).unwrap();
+        assert!(file.cells.is_empty());
+
+        let err = parse_file("/tmp/notebook.lucent", "select 1").unwrap_err();
+        assert!(err.contains("invalid notebook file"), "got {err}");
+    }
+
+    #[test]
+    fn parse_file_sql_wins_over_json_content() {
+        let file = parse_file("/tmp/notes.sql", r#"{"version":2,"cells":[]}"#).unwrap();
+        assert_eq!(file.cells.len(), 1);
+        assert!(matches!(file.cells[0].kind, CellKind::Sql));
+    }
+
+    #[test]
+    fn parse_file_empty_sql_imports_as_single_empty_cell() {
+        let file = parse_file("/tmp/empty.sql", "").unwrap();
+        assert_eq!(file.cells.len(), 1);
+        assert!(matches!(file.cells[0].kind, CellKind::Sql));
+        assert_eq!(file.cells[0].source, "");
     }
 }

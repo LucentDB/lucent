@@ -70,7 +70,7 @@ mod integration {
 
     #[test]
     fn small_schema_verbose() {
-        let p = build_system_prompt(&schema(2), None, false, None);
+        let p = build_system_prompt(&schema(2), None, None);
         assert!(p.contains("t0") && p.contains("t1"));
     }
 
@@ -89,7 +89,7 @@ mod integration {
             server_version: "PG16".into(),
             schemas,
         };
-        let p = build_system_prompt(&schema, None, false, None);
+        let p = build_system_prompt(&schema, None, None);
         assert!(p.contains("10 tables"));
         assert!(!p.contains("t0_0"), "individual names must not appear");
     }

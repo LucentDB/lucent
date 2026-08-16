@@ -16,6 +16,20 @@ describe('NotebookToolbar', () => {
     expect(screen.getByText('Run All')).toBeTruthy();
   });
 
+  it('shows the current notebook interaction mode', () => {
+    const { container, rerender } = render(NotebookToolbar, {
+      props: { mode: 'command' },
+    });
+    expect(container.querySelector('.mode-indicator')?.textContent).toContain(
+      'Command',
+    );
+
+    rerender({ mode: 'edit' });
+    expect(container.querySelector('.mode-indicator')?.textContent).toContain(
+      'Edit',
+    );
+  });
+
   it('disables Run All when already running', () => {
     render(NotebookToolbar, { props: { onRunAll: vi.fn(), isRunning: true } });
     expect(

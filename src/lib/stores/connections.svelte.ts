@@ -28,6 +28,7 @@ export interface ConnectionCapabilities {
   displayName: string;
   engineEnforcedReadonly: boolean;
   readonlyDisclosure: string | null;
+  dialect: string;
 }
 
 export interface ConnectionProfile {

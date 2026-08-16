@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,15 +8,6 @@ use tempfile::TempDir;
 use tokio::io::AsyncBufReadExt;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
-
-// TODO: dead — remove or wire (see trust+quality pass spec)
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq)]
-pub enum SupervisorState {
-    Stopped,
-    Running,
-    Failed(String),
-}
 
 /// Shared in-memory ring buffer of worker stderr lines for the in-app Logs
 /// drawer. A background task per worker spawn drains `child.stderr` into it;
@@ -57,8 +48,9 @@ fn spawn_stderr_drain(child: &mut Child, logs: LogBuffer) {
 }
 
 pub struct Supervisor {
+    driver_id: String,
     child: Option<Child>,
-    socket_path: PathBuf,
+    endpoint: String,
     handshake_token: String,
     _temp_dir: Option<TempDir>,
     last_error: Option<String>,
@@ -71,30 +63,79 @@ impl Default for Supervisor {
     }
 }
 
+/// The worker binary for a driver id. One process per driver *type*, not per
+/// connection (see `AGENTS.md`).
+pub fn worker_binary_name(driver_id: &str) -> String {
+    format!("lucent-driver-{driver_id}")
+}
+
+/// The per-driver override env var.
+///
+/// Deliberately scoped: a single `LUCENT_WORKER_BINARY` would point every
+/// driver at one binary, which silently runs DuckDB queries against Postgres.
+pub fn worker_binary_env_var(driver_id: &str) -> String {
+    format!("LUCENT_WORKER_BINARY_{}", driver_id.to_uppercase())
+}
+
 impl Supervisor {
+    /// A supervisor for the Postgres worker — the original single-driver
+    /// behaviour. Driver-aware callers use [`Supervisor::for_driver`].
     pub fn new() -> Self {
-        Self::with_logs(new_log_buffer())
+        Self::for_driver("postgres", new_log_buffer())
     }
 
-    /// Constructs a supervisor that drains worker stderr into the given
-    /// shared buffer (owned by `AppState` so the Logs drawer sees it).
-    pub fn with_logs(logs: LogBuffer) -> Self {
-        let temp_dir = TempDir::new().expect("failed to create temp dir for worker socket");
-        let socket_path = temp_dir.path().join("worker.sock");
+    /// A supervisor for one driver.
+    pub fn for_driver(driver_id: &str, logs: LogBuffer) -> Self {
         let handshake_token = uuid::Uuid::new_v4().to_string();
+        let (endpoint, temp_dir) = Self::endpoint_for(&handshake_token);
 
         Self {
+            driver_id: driver_id.to_string(),
             child: None,
-            socket_path,
+            endpoint,
             handshake_token,
-            _temp_dir: Some(temp_dir),
+            _temp_dir: temp_dir,
             last_error: None,
             logs,
         }
     }
 
+    pub fn driver_id(&self) -> &str {
+        &self.driver_id
+    }
+
+    /// The worker's IPC endpoint: a socket file path on Unix, a named-pipe
+    /// name (`\\.\pipe\...`) on Windows. A filesystem path is NOT a valid
+    /// pipe name; the pipe name embeds a token prefix so it is unguessable
+    /// per launch.
+    fn endpoint_for(token: &str) -> (String, Option<TempDir>) {
+        #[cfg(unix)]
+        {
+            let _ = token; // unused on Unix; Windows embeds it in the pipe name
+            let temp_dir = TempDir::new().expect("failed to create temp dir for worker socket");
+            let endpoint = temp_dir
+                .path()
+                .join("worker.sock")
+                .to_string_lossy()
+                .into_owned();
+            (endpoint, Some(temp_dir))
+        }
+        #[cfg(windows)]
+        {
+            let token8: String = token.chars().take(8).collect();
+            let endpoint = format!(r"\\.\pipe\lucent-{}-{token8}", std::process::id());
+            (endpoint, None)
+        }
+    }
+
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
     fn worker_binary_path(&self) -> PathBuf {
-        if let Ok(path) = std::env::var("LUCENT_WORKER_BINARY") {
+        let name = worker_binary_name(&self.driver_id);
+
+        if let Ok(path) = std::env::var(worker_binary_env_var(&self.driver_id)) {
             return PathBuf::from(path);
         }
 
@@ -104,7 +145,7 @@ impl Supervisor {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(parent) = exe.parent() {
                 for rel in &["", "../", "../../"] {
-                    let candidate = parent.join(rel).join("lucent-driver-postgres");
+                    let candidate = parent.join(rel).join(&name);
                     if let Ok(canonical) = candidate.canonicalize() {
                         log::info!("Found worker binary at: {}", canonical.display());
                         return canonical;
@@ -116,7 +157,7 @@ impl Supervisor {
         // Also check from the current working directory (common during dev).
         if let Ok(cwd) = std::env::current_dir() {
             for rel in &["target/debug/", "../target/debug/"] {
-                let candidate = cwd.join(rel).join("lucent-driver-postgres");
+                let candidate = cwd.join(rel).join(&name);
                 if let Ok(canonical) = candidate.canonicalize() {
                     log::info!("Found worker binary at: {}", canonical.display());
                     return canonical;
@@ -124,11 +165,11 @@ impl Supervisor {
             }
         }
 
-        log::warn!("Worker binary not found; falling back to PATH lookup");
-        PathBuf::from("lucent-driver-postgres")
+        log::warn!("Worker binary {name:?} not found; falling back to PATH lookup");
+        PathBuf::from(name)
     }
 
-    pub async fn ensure_running(&mut self) -> Result<&Path, String> {
+    pub async fn ensure_running(&mut self) -> Result<(), String> {
         // Check if existing worker is still alive
         if let Some(ref mut child) = self.child {
             match child.try_wait() {
@@ -138,11 +179,16 @@ impl Supervisor {
                     self.child = None;
                 }
                 Ok(None) => {
-                    // Worker is alive — verify the socket actually works
-                    // by checking if it exists (worker may have exited between
-                    // try_wait and our socket check due to the async gap).
-                    if self.socket_path.exists() {
-                        return Ok(&self.socket_path);
+                    // Worker is alive — verify the endpoint actually works
+                    // (worker may have exited between try_wait and our check
+                    // due to the async gap). On Unix that means the socket
+                    // file exists; on Windows a live process owns the pipe.
+                    #[cfg(unix)]
+                    let endpoint_ok = std::path::Path::new(&self.endpoint).exists();
+                    #[cfg(windows)]
+                    let endpoint_ok = true;
+                    if endpoint_ok {
+                        return Ok(());
                     }
                     // Socket gone even though process reports alive — race.
                     // Fall through to respawn.
@@ -159,7 +205,7 @@ impl Supervisor {
 
         let binary = self.worker_binary_path();
         let spawn_result = Command::new(&binary)
-            .arg(&self.socket_path)
+            .arg(&self.endpoint)
             .arg(&self.handshake_token)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -182,18 +228,45 @@ impl Supervisor {
 
         self.child = Some(child);
 
-        for _ in 0..50 {
-            if self.socket_path.exists() {
+        // On Windows the pipe is created synchronously in the worker's main()
+        // before serve(); give the freshly spawned process a beat to bind it
+        // (opening the pipe to probe it would consume the worker's single
+        // client).
+        #[cfg(windows)]
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Budget for the worker to exec and bind. The debug DuckDB binary is
+        // ~120 MB and can take seconds to start under memory pressure; the old
+        // 1s budget failed first connects spuriously. 5s is generous for both
+        // drivers and the loop still returns as soon as the endpoint appears.
+        for _ in 0..250 {
+            #[cfg(unix)]
+            let ready = std::path::Path::new(&self.endpoint).exists();
+            #[cfg(windows)]
+            let ready = self
+                .child
+                .as_mut()
+                .map(|child| child.try_wait().map(|s| s.is_none()).unwrap_or(false))
+                .unwrap_or(false);
+            if ready {
                 self.last_error = None;
-                return Ok(&self.socket_path);
+                return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
-        // The socket never appeared. The drain task has been capturing worker
-        // stderr into the shared logs buffer all along; point at it.
-        let msg = "worker socket did not appear within 1s (see Logs drawer for worker stderr)"
-            .to_string();
+        // The endpoint never became ready. The drain task has been capturing
+        // worker stderr into the shared logs buffer all along; point at it.
+        // Kill the half-started worker: leaving it running would leak an idle
+        // worker process whose endpoint can never be connected to.
+        if let Some(mut child) = self.child.take() {
+            log::warn!("Worker never became ready; killing it");
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        let msg =
+            "worker endpoint did not become ready within 5s (see Logs drawer for worker stderr)"
+                .to_string();
         self.last_error = Some(msg.clone());
         Err(msg)
     }
@@ -203,26 +276,31 @@ impl Supervisor {
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
-        let _ = std::fs::remove_file(&self.socket_path);
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(&self.endpoint);
+        }
         self._temp_dir = None;
         self.last_error = None;
         Ok(())
     }
 
-    // TODO: dead — remove or wire (see trust+quality pass spec)
-    #[allow(dead_code)]
-    pub fn state(&self) -> SupervisorState {
-        if self.child.is_some() {
-            SupervisorState::Running
-        } else if let Some(ref err) = self.last_error {
-            SupervisorState::Failed(err.clone())
-        } else {
-            SupervisorState::Stopped
-        }
-    }
-
     pub fn handshake_token(&self) -> &str {
         &self.handshake_token
+    }
+}
+
+impl Drop for Supervisor {
+    fn drop(&mut self) {
+        // Best-effort kill of a live worker when the supervisor is dropped
+        // without an explicit shutdown (panic paths, early returns). `kill`
+        // is async, so `start_kill` is the synchronous form: it sends SIGKILL
+        // and the worker dies even though the exit status is never awaited.
+        // Explicit paths (shutdown, driver switch) already take+kill+wait;
+        // this is the safety net for the rest.
+        if let Some(mut child) = self.child.take() {
+            let _ = child.start_kill();
+        }
     }
 }
 
@@ -268,5 +346,31 @@ mod tests {
         let buf = logs.lock().await;
         let lines: Vec<String> = buf.iter().cloned().collect();
         assert_eq!(lines, vec!["first".to_string(), "second".to_string()]);
+    }
+
+    #[test]
+    fn the_worker_binary_name_is_derived_from_the_driver_id() {
+        assert_eq!(worker_binary_name("postgres"), "lucent-driver-postgres");
+        assert_eq!(worker_binary_name("duckdb"), "lucent-driver-duckdb");
+    }
+
+    #[test]
+    fn the_env_override_is_scoped_per_driver() {
+        // A single LUCENT_WORKER_BINARY would point both drivers at one
+        // binary, which silently runs every DuckDB query against Postgres.
+        assert_eq!(
+            worker_binary_env_var("postgres"),
+            "LUCENT_WORKER_BINARY_POSTGRES"
+        );
+        assert_eq!(
+            worker_binary_env_var("duckdb"),
+            "LUCENT_WORKER_BINARY_DUCKDB"
+        );
+    }
+
+    #[test]
+    fn a_supervisor_remembers_which_driver_it_runs() {
+        let sup = Supervisor::for_driver("duckdb", new_log_buffer());
+        assert_eq!(sup.driver_id(), "duckdb");
     }
 }

@@ -9,6 +9,10 @@ pub struct NotebookSession {
     pub database: String,
     pub profile_id: Option<String>,
     pub active_query_id: Option<QueryId>,
+    /// The AI cell currently running (if any) and its cancellation token.
+    /// AI cells cannot register a DB query id — the agent loop owns its own
+    /// queries — so the Stop button cancels the loop via this token (E2).
+    pub active_ai_cell: Option<(String, tokio_util::sync::CancellationToken)>,
     /// Monotonic execution counter. An execution number records *when* a cell
     /// ran, so it must be owned by the session that owns the timeline — deriving
     /// it from how many cells are currently green cannot be correct.
@@ -24,6 +28,7 @@ impl NotebookSession {
             database,
             profile_id: None,
             active_query_id: None,
+            active_ai_cell: None,
             exec_counter: 0,
         }
     }

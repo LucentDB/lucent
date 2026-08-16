@@ -69,6 +69,12 @@ describe('command-mode keymap', () => {
     expect(model.cells[0].kind).toBe('sql');
   });
 
+  it('i converts the selected cell to AI', () => {
+    const { model, handle } = setup();
+    expect(handle(key('i'))).toBe(true);
+    expect(model.cells[0].kind).toBe('ai');
+  });
+
   it('Space toggles collapse', () => {
     const { model, handle } = setup();
     expect(handle(key(' '))).toBe(true);

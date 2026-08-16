@@ -2,6 +2,7 @@
   import type { ChatMessage as T } from '../../stores/chat.svelte.ts';
   import { renderMarkdown } from './markdown.ts';
   import DmlApprovalCard from './DmlApprovalCard.svelte';
+  import PermissionRequestCard from './PermissionRequestCard.svelte';
   import WorkSession from './WorkSession.svelte';
   import { chat, setSessionExpanded } from '../../stores/chat.svelte.ts';
 
@@ -9,12 +10,16 @@
     message,
     onRunDml,
     onCancelDml,
+    onAllowPermission,
+    onRejectPermission,
     grouped = false,
     conversationId,
   }: {
     message: T;
     onRunDml?: () => void;
     onCancelDml?: () => void;
+    onAllowPermission?: () => void;
+    onRejectPermission?: () => void;
     grouped?: boolean; // consecutive message from the same role — tighter spacing
     conversationId?: string; // NEW — for updating thinking state
   } = $props();
@@ -55,12 +60,17 @@
       />
     {/if}
 
-    {#if message.usage}
+    {#if message.permissionRequest}
+      <PermissionRequestCard
+        permission={message.permissionRequest}
+        onAllow={onAllowPermission}
+        onReject={onRejectPermission}
+      />
+    {/if}
+
+    {#if message.usage && message.usage.promptTokens + message.usage.completionTokens > 0}
       <div class="usage">
         ~{message.usage.promptTokens + message.usage.completionTokens} tokens
-        {#if message.usage.estimatedCostUsd !== null}
-          · ${message.usage.estimatedCostUsd.toFixed(4)}
-        {/if}
       </div>
     {/if}
   </div>

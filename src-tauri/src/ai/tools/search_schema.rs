@@ -483,7 +483,8 @@ mod rerank_wiring_tests {
             columns,
             fk_edges: vec![],
             table_adjacency: HashMap::new(),
-            built_at: std::time::Instant::now(),
+            built_at_unix: 0,
+            tier: crate::ai::schema_graph::IndexingTier::MetadataOnly,
         };
         let query = vec![1.0, 0.0];
         let pool: Vec<ScoredColumn> = Retriever::top_matches(&graph, &query, 20);

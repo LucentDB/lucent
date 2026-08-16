@@ -110,6 +110,10 @@ async fn a_slow_catalog_request_does_not_delay_query_results() {
         .await
         .unwrap();
 
+    // ack must arrive before Connect
+    let ack: WorkerResponse = read_message(&mut framed).await.unwrap().unwrap();
+    assert!(matches!(ack, WorkerResponse::HandshakeAccepted));
+
     let connection_id = ConnectionId(Uuid::new_v4());
     let request_id = QueryId(Uuid::new_v4());
     let query_id = QueryId(Uuid::new_v4());

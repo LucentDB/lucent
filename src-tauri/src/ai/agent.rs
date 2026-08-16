@@ -11,7 +11,7 @@ use crate::ai::truncate_utf8;
 
 // ── Message types ─────────────────────────────────────────────────────────
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub role: MessageRole,
     pub content: MessageContent,
@@ -63,7 +63,7 @@ pub enum MessageRole {
     Tool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum MessageContent {
     Text(String),
@@ -73,7 +73,7 @@ pub enum MessageContent {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -128,7 +128,7 @@ mod tests {
             staged_at: Instant::now(),
         };
         let sql = state.take_staged_sql();
-        assert_eq!(sql, Some("DELETE FROM t".into()));
+        assert!(matches!(sql, Some((s, _)) if s == "DELETE FROM t"));
         assert!(matches!(state.state, AgentState::Idle));
     }
 
@@ -136,6 +136,56 @@ mod tests {
     fn take_staged_sql_returns_none_if_idle() {
         let mut state = ConversationState::new("conn_1".into());
         assert!(state.take_staged_sql().is_none());
+    }
+
+    #[test]
+    fn take_staged_sql_reports_the_staging_time() {
+        // E6: the staging timestamp must travel with the SQL so the approval
+        // path can refuse stale DML.
+        let mut state = ConversationState::new("conn_1".into());
+        let staged_at = Instant::now();
+        state.state = AgentState::PausedForDml {
+            staged_sql: "DELETE FROM t".into(),
+            staged_at,
+        };
+        let (sql, got) = state
+            .take_staged_sql()
+            .expect("staged SQL must be returned");
+        assert_eq!(sql, "DELETE FROM t");
+        assert_eq!(got, staged_at);
+    }
+
+    #[test]
+    fn try_begin_turn_claims_an_idle_conversation() {
+        let mut state = ConversationState::new("conn_1".into());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        state.try_begin_turn(cancel.clone()).unwrap();
+        assert!(matches!(state.state, AgentState::Running { .. }));
+    }
+
+    #[test]
+    fn try_begin_turn_rejects_a_running_conversation() {
+        // E1: two concurrent ai_chat calls used to start two agent loops on
+        // one conversation (interleaved history, doubled spend). The CAS
+        // must refuse the second.
+        let mut state = ConversationState::new("conn_1".into());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        state.try_begin_turn(cancel.clone()).unwrap();
+        let err = state.try_begin_turn(cancel).unwrap_err();
+        assert!(err.contains("already in progress"), "{err}");
+    }
+
+    #[test]
+    fn try_begin_turn_rejects_a_dml_paused_conversation() {
+        let mut state = ConversationState::new("conn_1".into());
+        state.state = AgentState::PausedForDml {
+            staged_sql: "DELETE FROM t".into(),
+            staged_at: Instant::now(),
+        };
+        let err = state
+            .try_begin_turn(tokio_util::sync::CancellationToken::new())
+            .unwrap_err();
+        assert!(err.contains("pending DML"), "{err}");
     }
 
     #[test]
@@ -150,7 +200,6 @@ mod tests {
             usage: TokenUsage {
                 prompt_tokens: 10,
                 completion_tokens: 5,
-                estimated_cost_usd: None,
                 cached_prompt_tokens: 0,
             },
             thinking: Some("I need to check the schema".into()),
@@ -158,6 +207,154 @@ mod tests {
         assert!(response.text.is_some());
         assert!(response.thinking.is_some());
         assert_eq!(response.tool_calls.len(), 1);
+    }
+
+    #[test]
+    fn compact_history_keeps_small_histories_unchanged() {
+        let h: Vec<Message> = (0..5).map(|i| Message::user(format!("m{i}"))).collect();
+        let out = compact_history(h.clone());
+        assert_eq!(out.len(), 5);
+        assert_eq!(out, h);
+    }
+
+    #[test]
+    fn compact_history_windows_oversized_histories_with_a_summary_prefix() {
+        // E4: unbounded history guarantees a context-window failure on long
+        // conversations. The window must keep the newest messages and tell
+        // the model the past was collapsed.
+        let h: Vec<Message> = (0..30).map(|i| Message::user(format!("m{i}"))).collect();
+        let out = compact_history(h);
+        assert_eq!(
+            out.len(),
+            HISTORY_WINDOW + 1,
+            "window + summary placeholder"
+        );
+        let summary = &out[0];
+        match &summary.content {
+            MessageContent::Text(t) => {
+                assert!(
+                    t.contains("14 earlier messages"),
+                    "summary must count the omitted: {t}"
+                );
+            }
+            other => panic!("expected text summary, got {other:?}"),
+        }
+        let tail: Vec<&str> = out[1..]
+            .iter()
+            .map(|m| match &m.content {
+                MessageContent::Text(t) => t.as_str(),
+                other => panic!("expected text, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(tail, (14..30).map(|i| format!("m{i}")).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn compact_history_never_starts_on_an_orphaned_tool_result() {
+        // D5: 5 tool rounds × (assistant + 3 tools) + user + final assistant
+        // = 22 messages. The newest-16 window lands on a `tool` result whose
+        // assistant(tool_calls) was cut — strict providers reject a request
+        // whose first message is role 'tool' (tool_call_id must follow a
+        // message that declared it).
+        let mut h: Vec<Message> = Vec::new();
+        for r in 0..5 {
+            h.push(Message::with_tool_calls(vec![ToolCall {
+                id: format!("call_{r}_0"),
+                name: "run_readonly_query".into(),
+                args: serde_json::json!({ "sql": "SELECT 1" }),
+            }]));
+            for t in 0..3 {
+                h.push(Message::tool_result(
+                    format!("call_{r}_{t}"),
+                    format!("row {r}_{t}"),
+                ));
+            }
+        }
+        h.push(Message::user("wrap up"));
+        h.push(Message::assistant("done"));
+        assert_eq!(h.len(), 22, "the 22-message trigger shape");
+
+        let out = compact_history(h);
+        assert_eq!(out[0].role, MessageRole::User, "summary must lead");
+        let tail = &out[1..];
+        assert!(
+            tail[0].role != MessageRole::Tool,
+            "window must not start on an orphaned tool result"
+        );
+        for (i, m) in tail.iter().enumerate() {
+            if m.role == MessageRole::Tool {
+                // Parallel tool calls produce several consecutive `tool`
+                // results in one round — scan back to the round's start.
+                let mut j = i;
+                while j > 0 && tail[j - 1].role == MessageRole::Tool {
+                    j -= 1;
+                }
+                assert!(
+                    j > 0,
+                    "tool result at index {i} must follow its assistant(tool_calls) message"
+                );
+                assert_eq!(
+                    tail[j - 1].role,
+                    MessageRole::Assistant,
+                    "tool result at index {i} must follow its assistant(tool_calls) message"
+                );
+                assert!(
+                    tail[j - 1].tool_calls.is_some(),
+                    "the assistant message before a tool result must carry tool_calls"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compact_history_keeps_exactly_history_window_messages() {
+        // D5 boundary: exactly HISTORY_WINDOW messages is not a collapse —
+        // this pins the off-by-one so the window lock is at >16, not >=16.
+        let h: Vec<Message> = (0..HISTORY_WINDOW)
+            .map(|i| Message::user(format!("m{i}")))
+            .collect();
+        let out = compact_history(h.clone());
+        assert_eq!(
+            out, h,
+            "exactly HISTORY_WINDOW messages pass through untouched"
+        );
+    }
+
+    #[test]
+    fn compact_history_collapses_at_history_window_plus_one() {
+        // D5 boundary: HISTORY_WINDOW + 1 is the first size that collapses.
+        let h: Vec<Message> = (0..HISTORY_WINDOW + 1)
+            .map(|i| Message::user(format!("m{i}")))
+            .collect();
+        let out = compact_history(h);
+        assert_eq!(
+            out.len(),
+            HISTORY_WINDOW + 1,
+            "summary placeholder + the full window tail"
+        );
+        match &out[0].content {
+            MessageContent::Text(t) => {
+                assert!(
+                    t.contains("1 earlier messages"),
+                    "summary must count the omitted: {t}"
+                )
+            }
+            other => panic!("expected text summary, got {other:?}"),
+        }
+        // The newest HISTORY_WINDOW messages pass through in order.
+        let tail: Vec<&str> = out[1..]
+            .iter()
+            .map(|m| match &m.content {
+                MessageContent::Text(t) => t.as_str(),
+                other => panic!("expected text, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            tail,
+            (1..HISTORY_WINDOW + 1)
+                .map(|i| format!("m{i}"))
+                .collect::<Vec<_>>()
+        );
     }
 }
 
@@ -185,6 +382,15 @@ pub enum LlmError {
 
 pub struct ConversationState {
     pub connection_id: String,
+    /// The chat conversation key (the frontend's `conversationId`, the key
+    /// of this entry in `AppState.conversations`). Set by `run_agent_turn`
+    /// right after the turn claim. The ACP driver keys its
+    /// session-per-conversation map by this — several conversations can
+    /// share one `connection_id`, so the connection id alone would merge
+    /// their ACP sessions. `None` for conversations that never ran a turn
+    /// (the driver then falls back to `connection_id`, which is what tests
+    /// that drive the driver directly use).
+    pub conversation_id: Option<String>,
     pub history: Vec<Message>,
     pub state: AgentState,
     pub created_at: Instant,
@@ -202,6 +408,7 @@ impl ConversationState {
     pub fn new(connection_id: String) -> Self {
         Self {
             connection_id,
+            conversation_id: None,
             history: vec![],
             state: AgentState::Idle,
             created_at: Instant::now(),
@@ -210,13 +417,41 @@ impl ConversationState {
         }
     }
 
-    pub fn take_staged_sql(&mut self) -> Option<String> {
-        if let AgentState::PausedForDml { ref staged_sql, .. } = self.state {
+    /// Take the staged DML and its staging time. `None` when no DML is
+    /// paused. The time lets the approval path refuse stale statements (E6).
+    pub fn take_staged_sql(&mut self) -> Option<(String, std::time::Instant)> {
+        if let AgentState::PausedForDml {
+            ref staged_sql,
+            staged_at,
+        } = self.state
+        {
             let sql = staged_sql.clone();
             self.state = AgentState::Idle;
-            Some(sql)
+            Some((sql, staged_at))
         } else {
             None
+        }
+    }
+
+    /// Atomically claim the conversation for one agent turn. Returns an
+    /// error when a turn is already running or a DML approval is pending —
+    /// two concurrent `ai_chat` calls must never interleave two agent loops
+    /// on one history (E1).
+    pub fn try_begin_turn(
+        &mut self,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<(), String> {
+        match &self.state {
+            AgentState::Idle => {
+                self.state = AgentState::Running { cancel };
+                Ok(())
+            }
+            AgentState::Running { .. } => {
+                Err("An AI response is already in progress for this conversation.".into())
+            }
+            AgentState::PausedForDml { .. } => {
+                Err("Approve or cancel the pending DML before sending another message.".into())
+            }
         }
     }
 }
@@ -240,6 +475,9 @@ pub enum AgentState {
 pub trait AgentSink: Send + Sync {
     fn event(&self, event: crate::ai::events::AiEvent);
     fn dml_approval(&self, payload: crate::ai::events::DmlApprovalPayload);
+    /// The agent asks the user for permission to run one of its own tools
+    /// (spec §3 D6). Default no-op so existing test sinks keep compiling.
+    fn permission_request(&self, _payload: crate::ai::events::AgentPermissionPayload) {}
 }
 
 #[cfg(test)]
@@ -251,6 +489,28 @@ impl AgentSink for CollectorSink {
         self.0.lock().unwrap().push(event);
     }
     fn dml_approval(&self, _payload: crate::ai::events::DmlApprovalPayload) {}
+}
+
+// ── AgentDriver seam ──────────────────────────────────────────────────────
+
+/// The one-turn agent contract shared by the rig loop (`DatabaseAgent`) and
+/// the ACP path (`AcpChatDriver`) — the seam `ai_chat` branches on (spec
+/// §3 D3). The rig loop owns its completion round-trips; the ACP driver
+/// owns the agent's prompt turn. Same signature, same sink/cancel contract.
+#[async_trait::async_trait]
+pub trait AgentDriver: Send + Sync {
+    async fn chat(
+        &self,
+        message: String,
+        config: &AiConfig,
+        system_prompt: String,
+        conv_state: Arc<Mutex<ConversationState>>,
+        sink: Arc<dyn AgentSink>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<(), String>;
+
+    /// Type-identity hook so tests can assert which driver a branch chose.
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 // ── DatabaseAgent ─────────────────────────────────────────────────────────
@@ -278,6 +538,7 @@ impl DatabaseAgent {
     /// Uses Rig's native tool framework. After tool execution, pushes a follow-up
     /// user message to prompt the model's response, so the API never receives
     /// tool results without a subsequent user turn.
+
     pub async fn chat(
         &self,
         message: String,
@@ -325,13 +586,17 @@ impl DatabaseAgent {
             }
             turn_count += 1;
 
-            // Send full conversation history to the LLM.
+            // Send the WINDOWED conversation history to the LLM: the stored
+            // history stays complete for eviction and the UI, but only the
+            // newest HISTORY_WINDOW messages (plus a summary of the omitted
+            // past) reach the model (E4).
             // Turn 1: history is empty, prompt is the user's message.
             // Turn 2+: history contains user message + assistant(tool_calls) + tool results,
             // and prompt is an empty user message to avoid ending on `tool` role.
             let history = conv_state.lock().await.history.clone();
+            let history = compact_history(history);
             let history_len = history.len();
-            log::debug!("Turn {turn_count}: calling LLM with {history_len} history messages");
+            log::debug!("Turn {turn_count}: calling LLM with {history_len} windowed messages");
 
             let on_delta = |delta: crate::ai::provider::AgentDelta| match delta {
                 crate::ai::provider::AgentDelta::Thinking(chunk) => {
@@ -673,7 +938,69 @@ impl DatabaseAgent {
     }
 }
 
+#[async_trait::async_trait]
+impl AgentDriver for DatabaseAgent {
+    /// Pure delegation — the rig loop's body is unchanged; the trait exists
+    /// so `run_agent_turn` can branch between the two drivers at one seam.
+    async fn chat(
+        &self,
+        message: String,
+        config: &AiConfig,
+        system_prompt: String,
+        conv_state: Arc<Mutex<ConversationState>>,
+        sink: Arc<dyn AgentSink>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<(), String> {
+        self.chat(message, config, system_prompt, conv_state, sink, cancel)
+            .await
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 // ── History-recording helpers ──────────────────────────────────────────────
+
+/// Maximum messages sent to the LLM per turn. Older tool rounds are
+/// replaced by a summary placeholder — the system prompt already carries
+/// the schema and each tool result is individually capped at 5 KB, so a
+/// bounded window keeps long conversations inside the context window (E4).
+const HISTORY_WINDOW: usize = 16;
+
+/// Window the conversation history for one LLM call. Returns the history
+/// unchanged when it fits; otherwise the oldest messages collapse into a
+/// single summary placeholder so the model still knows the conversation
+/// has a past. The STORED history is never modified — only the request is
+/// windowed.
+fn compact_history(history: Vec<Message>) -> Vec<Message> {
+    if history.len() <= HISTORY_WINDOW {
+        return history;
+    }
+    let total = history.len();
+    let mut tail: Vec<Message> = history.into_iter().skip(total - HISTORY_WINDOW).collect();
+    // D5: never let the window start on a `tool` result whose
+    // assistant(tool_calls) message was cut — strict providers reject a
+    // request whose first message is role 'tool' (tool_call_id must follow
+    // a message that declared it). The summary already tells the model the
+    // past was collapsed; the window may be slightly under HISTORY_WINDOW.
+    while tail
+        .first()
+        .map(|m| m.role == MessageRole::Tool)
+        .unwrap_or(false)
+    {
+        tail.remove(0);
+    }
+    let omitted = total - tail.len();
+    let mut out = Vec::with_capacity(tail.len() + 1);
+    out.push(Message::user(format!(
+        "[Earlier context: {omitted} earlier messages were omitted to stay within \
+         the context window. Continue the conversation normally; the pending task \
+         is in the latest messages below.]"
+    )));
+    out.extend(tail);
+    out
+}
 
 /// Cap a single tool output at 5000 bytes for the LLM context window.
 fn truncate_tool_output(raw: &str) -> String {

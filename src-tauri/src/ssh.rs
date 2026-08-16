@@ -1,11 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
-use tokio::sync::Mutex;
+
+use tokio::net::TcpListener;
+use tokio::sync::{watch, Mutex};
 
 // ─── SshConfig ──────────────────────────────────────────────────────────────
 
@@ -40,45 +39,42 @@ pub enum SshAuthMethod {
     Key { key_path: String },
 }
 
-// ─── Keyboard-Interactive Passthrough ──────────────────────────────────────
+// ─── Handler ───────────────────────────────────────────────────────────────
 
-/// Returns the saved password for keyboard-interactive auth challenges.
-/// Many SSH servers (especially PAM-backed) disable password auth and only
-/// offer keyboard-interactive — this passthrough lets us handle both.
-struct PassthroughPrompt {
-    password: String,
+#[derive(Clone)]
+struct TunnelHandler {
+    _accepted: Arc<AtomicBool>,
 }
 
-impl ssh2::KeyboardInteractivePrompt for PassthroughPrompt {
-    fn prompt(
+impl russh::client::Handler for TunnelHandler {
+    type Error = russh::Error;
+
+    /// Current policy: accept all host keys (matches the previous ssh2
+    /// behavior of no verification). Follow-up: strict mode via
+    /// russh::keys::known_hosts::check_known_hosts_path behind a setting.
+    async fn check_server_key(
         &mut self,
-        _username: &str,
-        _instructions: &str,
-        _prompts: &[ssh2::Prompt<'_>],
-    ) -> Vec<String> {
-        vec![self.password.clone()]
+        _server_public_key: &russh::keys::PublicKey,
+    ) -> Result<bool, Self::Error> {
+        Ok(true)
     }
 }
 
-// ─── SshTunnel ─────────────────────────────────────────────────────────────
+// ─── Tunnel ────────────────────────────────────────────────────────────────
 
 /// Manages an SSH tunnel that forwards a remote database port through a
-/// local TCP port. Because `ssh2::Session` is `!Send`, the forwarding
-/// loop runs on a `std::thread`, not a Tokio task.
+/// local TCP port. The forwarding loop runs as a Tokio task (russh is fully
+/// async); `disconnect()` signals it to stop via a watch channel.
 pub struct SshTunnel {
-    local_port: u16,
-    /// Holds the SSH session; take() on disconnect to drop it.
-    session: Arc<Mutex<Option<ssh2::Session>>>,
-    /// Join handle for the forwarding thread.
-    handle: Option<thread::JoinHandle<()>>,
-    /// Shared flag to signal the forwarding thread to stop.
-    stopped: Arc<AtomicBool>,
+    pub local_port: u16,
+    shutdown: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl SshTunnel {
     /// Connect via SSH, authenticate, and start port forwarding.
     ///
-    /// Returns the local port number that tunnels to `(remote_host, remote_port)`.
+    /// Returns a tunnel whose `local_port` forwards to `(remote_host, remote_port)`.
     pub async fn connect(
         config: &SshConfig,
         secret: &str, // password or key passphrase from keychain
@@ -88,184 +84,205 @@ impl SshTunnel {
         let addr = format!("{}:{}", config.host, config.port);
         log::info!("SSH tunnel connecting to {addr}");
 
-        // 1. TCP connect to SSH server
-        let tcp = TcpStream::connect(&addr)
-            .map_err(|e| format!("SSH connection to {addr} failed: {e}"))?;
-        tcp.set_read_timeout(Some(Duration::from_secs(10)))
-            .map_err(|e| format!("set read timeout failed: {e}"))?;
-        tcp.set_write_timeout(Some(Duration::from_secs(10)))
-            .map_err(|e| format!("set write timeout failed: {e}"))?;
-
-        // 2. Create SSH session and handshake
-        let mut session =
-            ssh2::Session::new().map_err(|e| format!("failed to create SSH session: {e}"))?;
-        session.set_tcp_stream(tcp);
-        session
-            .handshake()
-            .map_err(|e| format!("SSH handshake failed: {e}"))?;
-
-        // 3. Authenticate
-        let authenticated = match &config.auth_method {
-            SshAuthMethod::Password => {
-                // Try password auth first
-                let pw_result = session.userauth_password(&config.user, secret);
-                if pw_result.is_ok() && session.authenticated() {
-                    true
-                } else {
-                    // Fall back to keyboard-interactive
-                    log::debug!("SSH password auth failed, trying keyboard-interactive");
-                    let mut prompt = PassthroughPrompt {
-                        password: secret.to_string(),
-                    };
-                    session
-                        .userauth_keyboard_interactive(&config.user, &mut prompt)
-                        .map_err(|e| {
-                            format!("SSH auth failed (password + keyboard-interactive): {e}")
-                        })?;
-                    session.authenticated()
-                }
-            }
-            SshAuthMethod::Key { key_path } => {
-                session
-                    .userauth_pubkey_file(
-                        &config.user,
-                        None,
-                        std::path::Path::new(key_path),
-                        if secret.is_empty() {
-                            None
-                        } else {
-                            Some(secret)
-                        },
-                    )
-                    .map_err(|e| format!("SSH key auth failed: {e}"))?;
-                session.authenticated()
-            }
+        let client_cfg = russh::client::Config {
+            keepalive_interval: Some(Duration::from_secs(30)),
+            ..Default::default()
         };
+        let client_cfg = Arc::new(client_cfg);
 
-        if !authenticated {
-            return Err("SSH authentication rejected by server".into());
-        }
-        log::info!("SSH tunnel authenticated to {addr}");
+        // russh 0.62: client::connect returns the Handle directly (the old
+        // (Session, Handle) split was removed); the handle owns the connection
+        // task and dropping it closes the session. The WHOLE connect+auth
+        // phase is time-bounded: a server that stalls post-handshake (never
+        // answering the auth exchange) would otherwise hang authenticate_*
+        // forever — the old ssh2 code had socket timeouts covering this.
+        let (handle, authenticated) = tokio::time::timeout(
+            Duration::from_secs(20),
+            async {
+                let mut handle = russh::client::connect(
+                    client_cfg,
+                    addr.as_str(),
+                    TunnelHandler {
+                        _accepted: Arc::new(AtomicBool::new(false)),
+                    },
+                )
+                .await
+                .map_err(|e| format!("SSH connect to {addr} failed: {e}"))?;
 
-        // 4. Bind local port
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .map_err(|e| format!("failed to bind local port: {e}"))?;
-        let local_port = listener.local_addr().unwrap().port();
-        log::info!("SSH tunnel local port: {local_port}");
-
-        // 5. Start forwarding thread
-        let stopped = Arc::new(AtomicBool::new(false));
-        let stopped_clone = stopped.clone();
-
-        let session_arc = Arc::new(Mutex::new(Some(session)));
-        let session_for_thread = session_arc.clone();
-        let remote_host = remote_host.to_string();
-
-        let handle = thread::spawn(move || {
-            // Accept connections in non-blocking mode to check stopped flag
-            listener
-                .set_nonblocking(true)
-                .expect("set_nonblocking on listener");
-
-            for stream in listener.incoming() {
-                if stopped_clone.load(Ordering::Relaxed) {
-                    break;
-                }
-                match stream {
-                    Ok(mut local_stream) => {
-                        let sess_lock = session_for_thread.blocking_lock();
-                        let sess_opt = sess_lock.as_ref();
-                        if let Some(sess) = sess_opt {
-                            if let Ok(mut channel) =
-                                sess.channel_direct_tcpip(&remote_host, remote_port, None)
-                            {
-                                // MVP forwarding: simple bidirectional copy
-                                // using a buffer loop. For production, this should
-                                // use two threads with select/poll.
-                                let mut buf = [0u8; 8192];
+                let authenticated = match &config.auth_method {
+                    SshAuthMethod::Password => {
+                        let pw = handle
+                            .authenticate_password(&config.user, secret)
+                            .await
+                            .map_err(|e| format!("SSH password auth failed: {e}"))?;
+                        match pw {
+                            russh::client::AuthResult::Success => true,
+                            _ => {
+                                // Fall back to keyboard-interactive (mirrors the old
+                                // PassthroughPrompt behavior: answer every prompt with
+                                // the secret).
+                                log::debug!(
+                                    "SSH password auth failed, trying keyboard-interactive"
+                                );
+                                let mut resp = handle
+                                    .authenticate_keyboard_interactive_start(&config.user, None)
+                                    .await
+                                    .map_err(|e| {
+                                        format!("SSH keyboard-interactive failed: {e}")
+                                    })?;
                                 loop {
-                                    // Try reading from local socket -> write to channel
-                                    match local_stream.read(&mut buf) {
-                                        Ok(0) | Err(_) => break,
-                                        Ok(n) => {
-                                            if channel.write(&buf[..n]).is_err() {
-                                                break;
-                                            }
+                                    match resp {
+                                        russh::client::KeyboardInteractiveAuthResponse::Success => {
+                                            break true;
                                         }
-                                    }
-                                    // Try reading from channel -> write to local socket
-                                    match channel.read(&mut buf) {
-                                        Ok(0) | Err(_) => break,
-                                        Ok(n) => {
-                                            if local_stream.write(&buf[..n]).is_err() {
-                                                break;
-                                            }
+                                        russh::client::KeyboardInteractiveAuthResponse::Failure {
+                                            ..
+                                        } => {
+                                            break false;
+                                        }
+                                        russh::client::KeyboardInteractiveAuthResponse::InfoRequest {
+                                            prompts,
+                                            ..
+                                        } => {
+                                            let answers: Vec<String> =
+                                                prompts.iter().map(|_| secret.to_string()).collect();
+                                            resp = handle
+                                                .authenticate_keyboard_interactive_respond(
+                                                    answers,
+                                                )
+                                                .await
+                                                .map_err(|e| {
+                                                    format!(
+                                                        "SSH keyboard-interactive respond failed: {e}"
+                                                    )
+                                                })?;
                                         }
                                     }
                                 }
                             }
                         }
-                        // Drop the lock explicitly
-                        drop(sess_lock);
                     }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(100));
+                    SshAuthMethod::Key { key_path } => {
+                        let key = russh::keys::load_secret_key(
+                            std::path::Path::new(key_path),
+                            if secret.is_empty() {
+                                None
+                            } else {
+                                Some(secret)
+                            },
+                        )
+                        .map_err(|e| format!("failed to load SSH key {key_path}: {e}"))?;
+                        let hash_alg = handle
+                            .best_supported_rsa_hash()
+                            .await
+                            .map_err(|e| format!("RSA hash negotiation failed: {e}"))?
+                            .flatten(); // Option<Option<HashAlg>> → Option<HashAlg>
+                        let key = russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg);
+                        matches!(
+                            handle
+                                .authenticate_publickey(&config.user, key)
+                                .await
+                                .map_err(|e| format!("SSH publickey auth failed: {e}"))?,
+                            russh::client::AuthResult::Success
+                        )
                     }
-                    Err(_) => break,
-                }
-            }
-            drop(listener);
-        });
+                };
+                Ok::<_, String>((handle, authenticated))
+            },
+        )
+        .await
+        .map_err(|_| format!("SSH connect+auth to {addr} timed out after 20s"))??;
+        if !authenticated {
+            return Err("SSH authentication rejected by server".into());
+        }
+        log::info!("SSH tunnel authenticated to {addr}");
 
-        Ok(Self {
+        // Bind local port
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| format!("failed to bind local port: {e}"))?;
+        let local_port = listener.local_addr().unwrap().port();
+        log::info!("SSH tunnel local port: {local_port}");
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let handle = Arc::new(Mutex::new(handle));
+        let task = tokio::spawn(forward_loop(
+            listener,
+            handle,
+            remote_host.to_string(),
+            remote_port,
             local_port,
-            session: session_arc,
-            handle: Some(handle),
-            stopped,
+            shutdown_rx,
+        ));
+
+        Ok(SshTunnel {
+            local_port,
+            shutdown: shutdown_tx,
+            task,
         })
     }
 
-    /// The local port number that forwards to the remote database.
-    pub fn local_port(&self) -> u16 {
-        self.local_port
-    }
-
-    /// Poll the local port until it accepts a TCP connection,
-    /// indicating the tunnel is ready.
-    pub async fn wait_ready(&self, timeout: Duration) -> Result<(), String> {
-        let start = std::time::Instant::now();
-        loop {
-            if start.elapsed() > timeout {
-                return Err("SSH tunnel readiness timed out".into());
-            }
-            if TcpStream::connect(format!("127.0.0.1:{}", self.local_port)).is_ok() {
-                return Ok(());
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    }
-
-    /// Disconnect the SSH session and join the forwarding thread.
-    pub async fn disconnect(mut self) {
-        log::info!("SSH tunnel disconnecting (port {})", self.local_port);
-        // Signal thread to stop
-        self.stopped.store(true, Ordering::Relaxed);
-        // Drop SSH session (closes connection)
-        *self.session.lock().await = None;
-        // Join thread
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-        log::info!("SSH tunnel disconnected");
+    /// Signal the forwarding loop to stop and wait up to 500 ms for it to
+    /// unwind (the accept loop observes the watch channel and breaks, closing
+    /// the SSH session). Best-effort: the task is detached if it outlives the
+    /// wait — the watch receiver drop closes the channel either way.
+    pub async fn disconnect(&mut self) {
+        let _ = self.shutdown.send(true);
+        let _ = tokio::time::timeout(Duration::from_millis(500), &mut self.task).await;
     }
 }
 
-impl Drop for SshTunnel {
-    fn drop(&mut self) {
-        // Best-effort cleanup if disconnect() wasn't called
-        self.stopped.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+/// Accept loop: one direct-tcpip channel per local connection, full-duplex
+/// copies in both directions (tokio::io::copy tasks). `eof()` semantics are
+/// handled by `shutdown()` on the channel's write half when the peer side
+/// finishes, which is what keeps large one-way streams from hanging.
+async fn forward_loop(
+    listener: TcpListener,
+    handle: Arc<Mutex<russh::client::Handle<TunnelHandler>>>,
+    remote_host: String,
+    remote_port: u16,
+    local_port: u16,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => break,
+            accepted = listener.accept() => {
+                let (local_stream, _) = match accepted {
+                    Ok(x) => x,
+                    Err(_) => continue,
+                };
+                let handle = handle.clone();
+                let remote_host = remote_host.clone();
+                tokio::spawn(async move {
+                    let channel = {
+                        let h = handle.lock().await;
+                        h.channel_open_direct_tcpip(
+                            remote_host.clone(),
+                            remote_port as u32,
+                            "127.0.0.1",
+                            local_port as u32,
+                        )
+                        .await
+                    };
+                    let mut channel = match channel {
+                        Ok(c) => Box::pin(c.into_stream()),
+                        Err(e) => {
+                            log::warn!("direct-tcpip channel open failed: {e}");
+                            return;
+                        }
+                    };
+                    // Full-duplex copy with half-close semantics: when one side
+                    // reaches EOF, copy_bidirectional shuts down the opposite
+                    // write half (which sends SSH Eof via poll_shutdown) while
+                    // continuing to drain the other direction. This is what
+                    // keeps large one-way streams (e.g. a big result set) from
+                    // hanging — the ssh2 code's alternating half-duplex loop
+                    // did exactly that.
+                    let mut local_stream = local_stream;
+                    let _ = tokio::io::copy_bidirectional(&mut local_stream, &mut channel).await;
+                });
+            }
         }
     }
 }
@@ -275,7 +292,6 @@ impl Drop for SshTunnel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ssh2::KeyboardInteractivePrompt;
 
     #[test]
     fn test_ssh_config_defaults() {
@@ -340,14 +356,5 @@ mod tests {
             "expected 'authMethod' or 'auth_method' field, got: {:?}",
             val
         );
-    }
-
-    #[test]
-    fn test_passthrough_prompt_returns_password() {
-        let mut prompt = PassthroughPrompt {
-            password: "hunter2".into(),
-        };
-        let result = prompt.prompt("user", "instructions", &[]);
-        assert_eq!(result, vec!["hunter2".to_string()]);
     }
 }

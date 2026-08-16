@@ -34,6 +34,12 @@ describe('Notebook', () => {
     expect(screen.getByText('Run All')).toBeTruthy();
   });
 
+  it('focuses the notebook surface in command mode', async () => {
+    const { container } = render(Notebook, { tabId: 'tab-a', ...SPEC });
+    await Promise.resolve();
+    expect(document.activeElement).toBe(container.querySelector('.notebook'));
+  });
+
   it('re-points to the new tab model when tabId changes', async () => {
     const { rerender } = render(Notebook, { tabId: 'tab-a', ...SPEC });
     const first = notebooks.get('tab-a');

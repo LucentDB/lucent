@@ -1,0 +1,10 @@
+[package]
+name = "lucent-driver-conformance"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lucent-protocol = { path = "../lucent-protocol" }
+lucent-worker-host = { path = "../lucent-worker-host" }
+tokio = { workspace = true }
+uuid = { workspace = true }

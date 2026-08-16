@@ -68,11 +68,8 @@ async fn probe_succeeds_while_a_live_connection_is_active() {
     // probe (reusing the state supervisor) sat unaccepted in the backlog,
     // timed out at 15s, and reported ConnectionFailed for a healthy database.
     let mut live_supervisor = Supervisor::new();
-    let live_socket = live_supervisor
-        .ensure_running()
-        .await
-        .unwrap()
-        .to_path_buf();
+    live_supervisor.ensure_running().await.unwrap();
+    let live_socket = live_supervisor.endpoint().to_string();
     let live_token = live_supervisor.handshake_token().to_owned();
     let (live_client, live_cid) =
         ConnectorClient::connect(&live_socket, &live_token, pg_config(port))

@@ -26,7 +26,7 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags: ['v*']
 
 permissions:
   contents: write
@@ -52,6 +52,17 @@ jobs:
           security import /tmp/apple-cert.p12 -k temp.keychain-db -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k temp temp.keychain-db
           security list-keychains -d user -s temp.keychain-db
+      # The ACP bridge ships inside the bundle as a Tauri sidecar
+      # (src-tauri/release-sidecar.json, merged via --config). tauri-build's
+      # build script only accepts the TRIPLE-SUFFIXED name, so stage the
+      # release binary as binaries/lucent-db-tools-mcp-<host-triple> BEFORE
+      # the tauri-action build runs — without it the bundle has no bridge
+      # (the app's runtime error points at `cargo build --bin lucent-db-tools-mcp`).
+      - name: Build & stage ACP bridge sidecar
+        run: |
+          cargo build --release --bin lucent-db-tools-mcp
+          mkdir -p src-tauri/binaries
+          cp target/release/lucent-db-tools-mcp "src-tauri/binaries/lucent-db-tools-mcp-$(rustc -vV | sed -n 's/host: //p')"
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -60,6 +71,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: "Lucent ${{ github.ref_name }}"
+          releaseName: 'Lucent ${{ github.ref_name }}'
           releaseDraft: true
           prerelease: false
+          args: --config ${{ github.workspace }}/src-tauri/release-sidecar.json

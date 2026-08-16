@@ -594,3 +594,189 @@ fn a_corrupt_file_yields_no_profiles_rather_than_a_panic() {
     assert!(read_all_profiles().is_empty());
     TEST_CONFIG_DIR.with(|c| *c.borrow_mut() = None);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_profile_and_ssh_writes_never_deadlock_or_lose_updates() {
+    // G2 regression: save_profile takes (profiles write → ssh read) while
+    // save_ssh_config takes (ssh write → profiles read) — a lock-order
+    // inversion that could deadlock — and both wrote the SAME fixed
+    // connections.json.tmp, so interleaved truncate/write could lose an
+    // update or fail the rename. The single write_lock serializes the whole
+    // read-modify-write cycle.
+    //
+    // current_thread flavor + join_all (no tokio::spawn): the mutators must
+    // run on THIS thread — TEST_CONFIG_DIR is thread_local, so spawned
+    // tasks would resolve the REAL config path. The async interleaving at
+    // the rw-lock awaits still reproduces the lock inversion pre-fix.
+    let (_dir, _config_path) = with_temp_config_dir();
+    let repo = ConnectionProfileRepository::load();
+    // Borrow: each `async move` block captures `repo` by value, and 20
+    // closures cannot each own it — a shared reference (Copy) lets them all
+    // call the same repository.
+    let repo = &repo;
+
+    let mut p = ConnectionProfile::new("P".into());
+    p.id = "p1".into();
+    let p_base = p.clone();
+    let s = crate::ssh::SshConfig::new("S".into(), "db.internal".into(), "alice".into());
+
+    let mut handles = Vec::new();
+    for i in 0..20 {
+        let p_base = p_base.clone();
+        let s = s.clone();
+        handles.push(async move {
+            if i % 2 == 0 {
+                let mut p = p_base;
+                p.name = format!("p1-{i}");
+                repo.save_profile(p).await
+            } else {
+                repo.save_ssh_config(s).await
+            }
+        });
+    }
+    for h in futures::future::join_all(handles).await {
+        h.expect("write must succeed");
+    }
+
+    // Both writes must have landed — the file holds the profile AND the ssh config.
+    let on_disk = read_all_profiles();
+    assert!(
+        on_disk.iter().any(|p| p.id == "p1"),
+        "profile must survive concurrent writes"
+    );
+    let ssh = std::fs::read_to_string(connections_file_path()).unwrap_or_default();
+    assert!(
+        ssh.contains("db.internal"),
+        "ssh config must survive concurrent writes"
+    );
+}
+
+#[test]
+fn the_duckdb_descriptor_asks_for_a_path_and_no_secret() {
+    let d = crate::drivers::descriptor("duckdb").expect("duckdb must be registered");
+    assert_eq!(d.display_name, "DuckDB");
+    assert!(
+        !d.has_secret,
+        "a file-based driver has no password to store in the keychain"
+    );
+
+    let path = d.fields.iter().find(|f| f.key == "path").expect("path field");
+    assert!(path.required);
+    assert!(
+        matches!(path.kind, crate::drivers::FieldKind::Path),
+        "the form must offer a file picker, not a bare text box"
+    );
+
+    // Read-only is offered because for DuckDB it is the ONLY way to get
+    // engine-enforced protection (see the driver's capability declaration).
+    assert!(
+        d.fields.iter().any(|f| f.key == "read_only"),
+        "the read-only option must be offered"
+    );
+}
+
+#[tokio::test]
+async fn probing_a_duckdb_profile_uses_the_duckdb_worker() {
+    // Regression test: the connection probe used to spawn a Postgres worker
+    // unconditionally, so testing a DuckDB profile failed with
+    // "password authentication failed for user postgres".
+    //
+    // Requires `cargo build --workspace` first: the probe spawns the real
+    // lucent-driver-duckdb binary (same contract as duckdb_e2e_test).
+    let result = crate::commands::probe_connection(
+        lucent_protocol::ConnectionConfig::new("duckdb").with("path", ":memory:"),
+        "DuckDB".to_string(),
+    )
+    .await
+    .expect("the duckdb probe must succeed, not fail with postgres auth");
+
+    assert!(result.success, "{}", result.message);
+    assert!(
+        result.message.contains("DuckDB"),
+        "the probe must report the DuckDB server, got: {}",
+        result.message
+    );
+}
+
+#[test]
+fn display_database_derives_from_the_driver_params() {
+    // Postgres names itself by the database param; DuckDB by the path param.
+    // The explorer and the connect log use this label — for DuckDB it must
+    // not come back empty (which made the sidebar show the disconnected
+    // empty state while connected).
+    let duck = lucent_protocol::ConnectionConfig::new("duckdb").with("path", "/tmp/x.duckdb");
+    assert_eq!(crate::commands::display_database(&duck), "/tmp/x.duckdb");
+
+    let pg = lucent_protocol::ConnectionConfig::new("postgres").with("database", "appdb");
+    assert_eq!(crate::commands::display_database(&pg), "appdb");
+
+    let bare = lucent_protocol::ConnectionConfig::new("duckdb");
+    assert_eq!(crate::commands::display_database(&bare), "");
+}
+
+#[test]
+fn namespaces_to_schema_info_keeps_the_path_segments() {
+    use lucent_protocol::Namespace;
+
+    let info = crate::commands::namespaces_to_schema_info(vec![Namespace {
+        path: vec!["analytics".into(), "main".into()],
+        object_count: Some(2),
+    }]);
+    assert_eq!(info.len(), 1);
+    // Dotted name is for display only…
+    assert_eq!(info[0].name, "analytics.main");
+    // …the segments are what the sidebar must pass back to list objects.
+    assert_eq!(info[0].path, vec!["analytics", "main"]);
+    assert_eq!(info[0].object_count, 2);
+}
+
+#[test]
+fn table_base_sql_quotes_every_namespace_segment_separately() {
+    use crate::sql_builder::for_driver;
+    use lucent_protocol::{DriverCapabilities, SqlDialect};
+
+    // The two builders the registry can hand out — postgres and duckdb.
+    let caps = |id: &str, dialect: SqlDialect| DriverCapabilities {
+        id: id.into(),
+        display_name: id.into(),
+        sql_dialect: dialect,
+        namespace_model: lucent_protocol::NamespaceModel::CatalogSchema,
+        readonly: lucent_protocol::ReadOnlyMode::GuardOnly,
+        statement_timeout: lucent_protocol::TimeoutSupport::Interrupt,
+        cancel: lucent_protocol::CancelMode::Interrupt,
+        paging: lucent_protocol::PagingStyle::LimitOffset,
+        identifier_quote: '"',
+        string_literal: lucent_protocol::StringLiteralStyle::StandardConforming,
+        auth: lucent_protocol::AuthModel::FilePath,
+    };
+    let pg = for_driver(&caps("postgres", SqlDialect::PostgreSql));
+    let duck = for_driver(&caps("duckdb", SqlDialect::DuckDb));
+
+    // Postgres: single segment — the builder quotes identifiers, so the
+    // shape is `"public"."users"` (same as before the segments change).
+    assert_eq!(
+        crate::commands::table_base_sql(pg.as_ref(), &["public".into()], "users"),
+        r#"SELECT * FROM "public"."users""#
+    );
+
+    // DuckDB: catalog.schema, each segment quoted SEPARATELY — quoting the
+    // dotted display name as one identifier would match nothing.
+    assert_eq!(
+        crate::commands::table_base_sql(duck.as_ref(), &["analytics".into(), "main".into()], "users"),
+        r#"SELECT * FROM "analytics"."main"."users""#
+    );
+
+    // A segment containing special characters is quoted; segments stay split.
+    assert_eq!(
+        crate::commands::table_base_sql(duck.as_ref(), &["a.b".into(), "c".into()], "t"),
+        r#"SELECT * FROM "a.b"."c"."t""#
+    );
+
+    // The old failure mode, pinned at the shape level: quoting the dotted
+    // display name as ONE identifier must never be produced from proper
+    // path segments.
+    assert_eq!(
+        crate::commands::table_base_sql(duck.as_ref(), &["analytics.main".into()], "users"),
+        r#"SELECT * FROM "analytics.main"."users""#
+    );
+}

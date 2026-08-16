@@ -301,7 +301,8 @@ mod tests {
                 }, // segments.flight_id → flights.flight_id
             ],
             table_adjacency: HashMap::new(),
-            built_at: std::time::Instant::now(),
+            built_at_unix: 0,
+            tier: crate::ai::schema_graph::IndexingTier::MetadataOnly,
         }
     }
 

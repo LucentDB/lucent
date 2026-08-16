@@ -26,27 +26,29 @@ function objectsFor(tables: { name: string; rows?: unknown }[]) {
 
 /**
  * Routes the two commands the store issues. `schemas` maps a schema name to
- * the tables it contains, and drives get_schemas' counts too.
+ * the tables it contains, and drives get_schemas' counts too. The wire shape
+ * carries the namespace `path` — the store passes those segments back.
  */
 function mockDatabase(schemas: Record<string, { name: string }[]>) {
   invoke.mockImplementation(async (cmd: string, args: any) => {
     if (cmd === 'get_schemas') {
       return Object.entries(schemas).map(([name, tables]) => ({
         name,
+        path: [name],
         object_count: tables.length,
       }));
     }
     if (cmd === 'get_schema_objects') {
-      return objectsFor(schemas[args.schema] ?? []);
+      return objectsFor(schemas[args.namespace?.join('.')] ?? []);
     }
     throw new Error(`unexpected command ${cmd}`);
   });
 }
 
-function objectCalls(): string[] {
+function objectCalls(): string[][] {
   return invoke.mock.calls
     .filter(([cmd]) => cmd === 'get_schema_objects')
-    .map(([, args]) => args.schema);
+    .map(([, args]) => args.namespace);
 }
 
 beforeEach(() => {
@@ -55,44 +57,55 @@ beforeEach(() => {
 });
 
 describe('pickSchemas', () => {
+  const names = (schemas: { name: string }[]) => schemas.map((s) => s.name);
+
   it('prefers public when it has objects', () => {
     expect(
-      pickSchemas([
-        { name: 'bookings', object_count: 9 },
-        { name: 'public', object_count: 2 },
-      ]),
+      names(
+        pickSchemas([
+          { name: 'bookings', path: ['bookings'], object_count: 9 },
+          { name: 'public', path: ['public'], object_count: 2 },
+        ]),
+      ),
     ).toEqual(['public', 'bookings']);
   });
 
   it('skips empty schemas — probing them can only return nothing', () => {
     expect(
-      pickSchemas([
-        { name: 'public', object_count: 0 },
-        { name: 'bookings', object_count: 9 },
-      ]),
+      names(
+        pickSchemas([
+          { name: 'public', path: ['public'], object_count: 0 },
+          { name: 'bookings', path: ['bookings'], object_count: 9 },
+        ]),
+      ),
     ).toEqual(['bookings']);
   });
 
   it('orders non-public schemas by size', () => {
     expect(
-      pickSchemas([
-        { name: 'small', object_count: 1 },
-        { name: 'big', object_count: 50 },
-        { name: 'mid', object_count: 7 },
-      ]),
+      names(
+        pickSchemas([
+          { name: 'small', path: ['small'], object_count: 1 },
+          { name: 'big', path: ['big'], object_count: 50 },
+          { name: 'mid', path: ['mid'], object_count: 7 },
+        ]),
+      ),
     ).toEqual(['big', 'mid', 'small']);
   });
 
   it('probes at most three schemas', () => {
     const many = Array.from({ length: 20 }, (_, i) => ({
       name: `s${i}`,
+      path: [`s${i}`],
       object_count: i + 1,
     }));
     expect(pickSchemas(many)).toHaveLength(3);
   });
 
   it('returns nothing when every schema is empty', () => {
-    expect(pickSchemas([{ name: 'public', object_count: 0 }])).toEqual([]);
+    expect(
+      pickSchemas([{ name: 'public', path: ['public'], object_count: 0 }]),
+    ).toEqual([]);
   });
 });
 
@@ -119,13 +132,15 @@ describe('schemaSummary', () => {
     mockDatabase({ public: [{ name: 'orders' }], other: [{ name: 'x' }] });
     await schemaSummary.load('shop');
 
-    expect(objectCalls()).toEqual(['public']);
+    expect(objectCalls()).toEqual([['public']]);
   });
 
   it('coerces a non-numeric row count to null rather than NaN', async () => {
     mockDatabase({ public: [] });
     invoke.mockImplementation(async (cmd: string) => {
-      if (cmd === 'get_schemas') return [{ name: 'public', object_count: 1 }];
+      if (cmd === 'get_schemas') {
+        return [{ name: 'public', path: ['public'], object_count: 1 }];
+      }
       return objectsFor([{ name: 'orders', rows: undefined }]);
     });
     await schemaSummary.load('shop');

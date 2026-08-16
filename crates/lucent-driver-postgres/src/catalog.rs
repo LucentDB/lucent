@@ -589,7 +589,7 @@ async fn object_ddl(client: &Client, reference: &ObjectRef) -> Result<String, Lu
                     "SELECT pg_get_functiondef(p.oid) \
                      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
                      WHERE n.nspname = $1 AND p.proname = $2 \
-                     LIMIT 1",
+                     ORDER BY p.oid LIMIT 1",
                     &[&schema, &name],
                 )
                 .await

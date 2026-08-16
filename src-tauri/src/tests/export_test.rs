@@ -292,6 +292,57 @@ fn csv_export_renders_typed_values_without_quoting_numbers() {
 }
 
 #[test]
+fn csv_neutralizes_spreadsheet_formula_triggers() {
+    // S2 / CWE-1236: Excel/Sheets evaluate cells beginning with = + - @
+    // (or tab/CR) as formulas — attacker-influenced DB data could exfiltrate
+    // or phish. The leading ' marks the cell literal.
+    let columns = sample_columns();
+    let rows = vec![
+        vec![
+            serde_json::json!("=1+1"),
+            serde_json::json!("+cmd"),
+            serde_json::json!("-2"),
+            serde_json::json!("@sum"),
+        ],
+        vec![
+            serde_json::json!("\t=1"),
+            serde_json::json!("\r=1"),
+            serde_json::json!("normal"),
+            serde_json::json!("="),
+        ],
+    ];
+    let options = ExportOptions::default();
+    let csv = format_csv(&columns, &rows, &options);
+    let lines: Vec<&str> = csv.lines().collect();
+    assert_eq!(lines[1], "'=1+1,'+cmd,'-2,'@sum");
+    // The \t cell stays unquoted (tab is not an RFC-4180 quote trigger);
+    // the \r cell IS quoted — but the neutralization already landed inside
+    // the quotes, so the formula trigger is still dead.
+    assert_eq!(lines[2], "'\t=1,\"\'\r=1\",normal,'=");
+}
+
+#[test]
+fn csv_neutralization_applies_before_quoting() {
+    // A formula trigger that ALSO needs RFC-4180 quoting must still be
+    // neutralized. The prefix lands INSIDE the quotes (neutralization
+    // happens before the quoting decision), so the quoted cell reads
+    // "'=1,2" — the apostrophe is still the cell's first content char.
+    // (Controller pre-flight ruling: same principle as the \r cell in
+    // csv_neutralizes_spreadsheet_formula_triggers.)
+    let columns = sample_columns();
+    let rows = vec![vec![
+        serde_json::json!("=1,2"),
+        serde_json::json!("x"),
+        serde_json::json!("y"),
+        serde_json::json!("z"),
+    ]];
+    let options = ExportOptions::default();
+    let csv = format_csv(&columns, &rows, &options);
+    let lines: Vec<&str> = csv.lines().collect();
+    assert_eq!(lines[1], "\"'=1,2\",x,y,z");
+}
+
+#[test]
 fn csv_export_quotes_a_decimal_that_contains_the_delimiter() {
     // Some locales emit grouped numerics; the value is a JSON string, so the
     // RFC 4180 quoting path must still engage.

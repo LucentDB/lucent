@@ -19,7 +19,10 @@ const PREFERRED_SCHEMA = 'public';
 const MAX_SCHEMA_PROBES = 3;
 
 interface SchemaInfo {
+  /** Dotted display name (`catalog.schema` for DuckDB). For display only. */
   name: string;
+  /** The namespace path segments — pass these back to list objects. */
+  path: string[];
   /** Tables + views + functions + sequences. Snake_case on the wire. */
   object_count: number;
 }
@@ -29,13 +32,13 @@ interface SchemaInfo {
  * most populated ones. Empty schemas are skipped entirely — probing them can
  * only return nothing.
  */
-export function pickSchemas(schemas: SchemaInfo[]): string[] {
+export function pickSchemas(schemas: SchemaInfo[]): SchemaInfo[] {
   const populated = schemas.filter((s) => (s.object_count ?? 0) > 0);
   const preferred = populated.filter((s) => s.name === PREFERRED_SCHEMA);
   const rest = populated
     .filter((s) => s.name !== PREFERRED_SCHEMA)
     .sort((a, b) => (b.object_count ?? 0) - (a.object_count ?? 0));
-  return [...preferred, ...rest].slice(0, MAX_SCHEMA_PROBES).map((s) => s.name);
+  return [...preferred, ...rest].slice(0, MAX_SCHEMA_PROBES);
 }
 
 function tablesFrom(result: unknown): SchemaTable[] {
@@ -89,11 +92,13 @@ class SchemaSummaryStore {
 
     try {
       const candidates = pickSchemas(await getSchemas());
-      for (const name of candidates) {
-        const found = tablesFrom(await getSchemaObjects(name));
+      for (const s of candidates) {
+        // List by the namespace PATH, never the dotted display name — a
+        // multi-segment driver would read `analytics.main` as one segment.
+        const found = tablesFrom(await getSchemaObjects(s.path));
         if (found.length > 0) {
           tables = found;
-          schema = name;
+          schema = s.name;
           break;
         }
       }

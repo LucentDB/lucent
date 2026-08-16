@@ -136,11 +136,13 @@ impl GetObjectsInfo {
         let object_names: Vec<String> = objects
             .iter()
             .map(|o| {
-                format!(
-                    "{}.{}",
-                    o["schema"].as_str().unwrap_or("public"),
-                    o["name"].as_str().unwrap_or("?")
-                )
+                let s = o["schema"].as_str().unwrap_or("");
+                let name = o["name"].as_str().unwrap_or("?");
+                if s.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{s}.{name}")
+                }
             })
             .collect();
         log::info!("Tool 'get_objects_info' called — objects: {object_names:?}, sample_rows: {sample_rows:?}");
@@ -156,14 +158,23 @@ impl GetObjectsInfo {
 
         let refs: Vec<ObjectRef> = objects
             .iter()
-            .map(|o| ObjectRef {
-                namespace: vec![o["schema"].as_str().unwrap_or("public").to_string()],
-                name: o["name"].as_str().unwrap_or("?").to_string(),
-                // The driver corrects this from the server's own metadata.
-                kind: o["kind"]
-                    .as_str()
-                    .map(ObjectKind::from_label)
-                    .unwrap_or(ObjectKind::Table),
+            .map(|o| {
+                let schema_str = o["schema"].as_str().unwrap_or("");
+                let namespace = if schema_str.is_empty() {
+                    Vec::new()
+                } else if schema_str.contains('.') {
+                    schema_str.split('.').map(String::from).collect()
+                } else {
+                    vec![schema_str.to_string()]
+                };
+                ObjectRef {
+                    namespace,
+                    name: o["name"].as_str().unwrap_or("?").to_string(),
+                    kind: o["kind"]
+                        .as_str()
+                        .map(ObjectKind::from_label)
+                        .unwrap_or(ObjectKind::Table),
+                }
             })
             .collect();
 
@@ -180,11 +191,21 @@ impl GetObjectsInfo {
             for (result_obj, detail) in results.iter_mut().zip(details.iter()) {
                 // Sample rows are user data, not catalog data — this stays an
                 // ordinary query. Plan C moves the quoting behind SqlBuilder.
-                let qualified = format!(
-                    "\"{}\".\"{}\"",
-                    detail.reference.namespace.join(".").replace('"', "\"\""),
-                    detail.reference.name.replace('"', "\"\""),
-                );
+                let qualified = if detail.reference.namespace.is_empty()
+                    || detail.reference.namespace.iter().all(|s| s.is_empty())
+                {
+                    format!("\"{}\"", detail.reference.name.replace('"', "\"\""))
+                } else {
+                    let ns = detail
+                        .reference
+                        .namespace
+                        .iter()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| format!("\"{}\"", s.replace('"', "\"\"")))
+                        .collect::<Vec<_>>()
+                        .join(".");
+                    format!("{ns}.\"{}\"", detail.reference.name.replace('"', "\"\""))
+                };
                 match client
                     .execute(conn_id, &format!("SELECT * FROM {qualified} LIMIT {n}"))
                     .await

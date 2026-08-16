@@ -1,13 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const save = vi.fn();
-const open = vi.fn();
 const confirm = vi.fn();
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
-  save: (...a: unknown[]) => save(...a),
-  open: (...a: unknown[]) => open(...a),
   confirm: (...a: unknown[]) => confirm(...a),
+}));
+
+const invoke = vi.fn<(...args: unknown[]) => Promise<unknown>>(
+  async () => '/tmp/demo.lucent',
+);
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (...a: unknown[]) => invoke(...a),
 }));
 
 const notebookSave = vi.fn(async (..._args: unknown[]) => '/tmp/demo.lucent');
@@ -32,8 +35,7 @@ const spec = { filePath: null, connectionId: 'p1', database: 'postgres' };
 describe('notebook file actions', () => {
   beforeEach(async () => {
     if (notebooks.has('t1')) await notebooks.release('t1');
-    save.mockReset();
-    open.mockReset();
+    invoke.mockReset();
     confirm.mockReset();
     notebookSave.mockClear();
     notebookSave.mockResolvedValue('/tmp/demo.lucent');
@@ -41,18 +43,18 @@ describe('notebook file actions', () => {
 
   it('an untitled notebook prompts for a path before saving', async () => {
     notebooks.ensure('t1', spec);
-    save.mockResolvedValue('/tmp/demo.lucent');
+    invoke.mockResolvedValue('/tmp/demo.lucent');
 
     const path = await saveNotebook('t1');
 
-    expect(save).toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledWith('choose_save_path', expect.anything());
     expect(notebookSave).toHaveBeenCalled();
     expect(path).toBe('/tmp/demo.lucent');
   });
 
   it('cancelling the save dialog writes nothing', async () => {
     notebooks.ensure('t1', spec);
-    save.mockResolvedValue(null);
+    invoke.mockResolvedValue(null);
 
     const path = await saveNotebook('t1');
 
@@ -67,44 +69,64 @@ describe('notebook file actions', () => {
 
     const path = await saveNotebook('t1');
 
-    expect(save).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalledWith(
+      'choose_save_path',
+      expect.anything(),
+    );
     expect(notebookSave).toHaveBeenCalled();
     expect(path).toBe('/tmp/demo.lucent');
+  });
+
+  it('a notebook imported from a .sql file never overwrites the .sql source', async () => {
+    const model = notebooks.ensure('t1', spec);
+    model.filePath = '/tmp/imported.SQL';
+    model.sessionKey = 'sk';
+    invoke.mockResolvedValue('/tmp/imported.lucent');
+    notebookSave.mockResolvedValue('/tmp/imported.lucent');
+
+    const path = await saveNotebook('t1');
+
+    expect(invoke).toHaveBeenCalledWith('choose_save_path', expect.anything());
+    const savedPaths = notebookSave.mock.calls.map((c) => String(c[1]));
+    expect(savedPaths.some((p) => p.toLowerCase().endsWith('.sql'))).toBe(
+      false,
+    );
+    expect(path).toBe('/tmp/imported.lucent');
   });
 
   it('saveNotebookAs always prompts even when titled', async () => {
     const model = notebooks.ensure('t1', spec);
     model.filePath = '/tmp/existing.lucent';
-    save.mockResolvedValue('/tmp/copy.lucent');
+    invoke.mockResolvedValue('/tmp/copy.lucent');
 
     await saveNotebookAs('t1');
 
-    expect(save).toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledWith('choose_save_path', expect.anything());
   });
 
   it('saving clears the dirty flag', async () => {
     const model = notebooks.ensure('t1', spec);
     model.setCellSource(model.cells[0].id, 'SELECT 1');
     expect(model.isDirty).toBe(true);
-    save.mockResolvedValue('/tmp/demo.lucent');
+    invoke.mockResolvedValue('/tmp/demo.lucent');
 
     await saveNotebook('t1');
 
     expect(model.isDirty).toBe(false);
   });
 
-  it('pickNotebookToOpen filters to .lucent and returns the choice', async () => {
-    open.mockResolvedValue('/tmp/chosen.lucent');
+  it('pickNotebookToOpen approves through the Rust open dialog', async () => {
+    invoke.mockResolvedValue('/tmp/chosen.lucent');
     const picked = await pickNotebookToOpen();
     expect(picked).toBe('/tmp/chosen.lucent');
-    const opts = open.mock.calls[0][0] as {
-      filters: { extensions: string[] }[];
-    };
-    expect(opts.filters[0].extensions).toEqual(['lucent']);
+    expect(invoke).toHaveBeenCalledWith('choose_open_path', {
+      filterName: 'Lucent Notebook / SQL File',
+      extensions: ['lucent', 'sql'],
+    });
   });
 
   it('pickNotebookToOpen returns null when cancelled', async () => {
-    open.mockResolvedValue(null);
+    invoke.mockResolvedValue(null);
     expect(await pickNotebookToOpen()).toBeNull();
   });
 

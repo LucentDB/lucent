@@ -43,3 +43,26 @@ export function tokenizeSql(code: string): SqlToken[] {
   emit(code.length, '');
   return tokens;
 }
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * Returns syntax-highlighted, escaped HTML for a read-only SQL code block.
+ * Token text is escaped before it is wrapped in Lezer's trusted class names,
+ * so SQL containing markup remains text rather than becoming DOM content.
+ */
+export function highlightSqlHtml(code: string): string {
+  return tokenizeSql(code)
+    .map(({ text, cls }) => {
+      const escapedText = escapeHtml(text);
+      return cls
+        ? `<span class="${escapeHtml(cls)}">${escapedText}</span>`
+        : escapedText;
+    })
+    .join('');
+}

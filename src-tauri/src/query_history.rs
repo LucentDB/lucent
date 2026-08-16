@@ -90,8 +90,14 @@ fn history_file_path() -> PathBuf {
 /// Append one entry with exclusive file lock. Deduplicates consecutive
 /// identical queries (same connection_id + database + sql).
 pub fn append_entry(entry: QueryHistoryEntry) -> Result<(), String> {
+    append_entry_at(&history_file_path(), entry)
+}
+
+/// The locked read-modify-write body. Takes the path explicitly so async
+/// callers can resolve it on the calling thread before crossing into the
+/// blocking pool (G1).
+fn append_entry_at(path: &std::path::Path, entry: QueryHistoryEntry) -> Result<(), String> {
     let _guard = history_guard();
-    let path = history_file_path();
 
     let mut file = std::fs::OpenOptions::new()
         .read(true)
@@ -99,7 +105,7 @@ pub fn append_entry(entry: QueryHistoryEntry) -> Result<(), String> {
         .create(true)
         // read-modify-write: file is read fully before being rewritten in place
         .truncate(false)
-        .open(&path)
+        .open(path)
         .map_err(|e| format!("history file open: {e}"))?;
 
     // Exclusive lock before touching the file
@@ -159,6 +165,16 @@ pub fn append_entry(entry: QueryHistoryEntry) -> Result<(), String> {
 
     // Lock released when file is dropped
     Ok(())
+}
+
+/// Async wrapper: the fs2-locked read-modify-write must not run on the
+/// Tokio runtime — it blocks a worker thread per query (G1). Runs on the
+/// blocking pool instead. The path is resolved HERE, on the calling thread.
+pub async fn append_entry_async(entry: QueryHistoryEntry) -> Result<(), String> {
+    let path = history_file_path();
+    tokio::task::spawn_blocking(move || append_entry_at(&path, entry))
+        .await
+        .map_err(|e| format!("history append task panicked: {e}"))?
 }
 
 /// Read all entries, newest first. Serialized by the in-process history

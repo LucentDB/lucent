@@ -54,6 +54,7 @@ Ask questions in plain English — *"which customers churned last quarter and wh
 - **Grounded answers.** Preflight literal probing, a join linter, and a blast-radius check catch wrong-column and cross-table mistakes before they reach you.
 - **Verified, not vibes.** A headless eval harness grades retrieval accuracy and query correctness against a real Postgres — every change ships with measured results, not anecdotes.
 - **Your keys, your models.** OpenAI, Anthropic, or a local Ollama endpoint. Configure provider, model, and limits in-app.
+- **Or bring your own agent.** No API key? Install a coding agent (opencode, Claude Code, …) from the ACP registry in AI Settings, and Lucent's four database tools reach it through a bundled MCP bridge — the same read-only guardrails, row caps, and DML approval keep running in Lucent.
 
 ### SQL Notebooks
 
@@ -81,6 +82,11 @@ Then: **Connect** → add your Postgres connection (SSH tunnels supported) → o
 The API key uses a fallback chain: `~/.lucent/ai-key.txt` → environment variable →
 OS keychain. Provider, model, and safety limits are configured in-app and persisted
 to `~/.lucent/ai-config.json`.
+
+No API key? The **Agents (ACP)** panel in AI Settings installs coding agents
+(opencode, Claude Code, …) straight from the ACP registry — a snapshot ships with the
+app so the list works offline — and the installed agent shows up in the provider
+picker. ACP needs no key: the agent owns its own auth and model choice.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
@@ -120,6 +126,29 @@ src/                   # Svelte 5 frontend
 
 CI (`.github/workflows/ci.yml`) runs the frontend and Rust unit tiers, `svelte-check`,
 Prettier, and `cargo clippy -D warnings` on every push.
+
+### Releases
+
+Tagged releases are built by `.github/workflows/release.yml` (sign + notarize +
+GitHub Release). The ACP bridge binary (`lucent-db-tools-mcp`) ships inside the
+bundle as a Tauri sidecar. The committed `tauri.conf.json` deliberately has **no**
+`externalBin` (tauri-build's build script requires the sidecar file to exist for
+every cargo build, which would break fresh-checkout dev/test); the sidecar is
+scoped to the release invocation only via `src-tauri/release-sidecar.json`
+(merged with `--config`). To build a release bundle **with** the bridge locally,
+stage the sidecar first, then pass the release-only config:
+
+```bash
+cargo build --release --bin lucent-db-tools-mcp
+mkdir -p src-tauri/binaries
+cp target/release/lucent-db-tools-mcp "src-tauri/binaries/lucent-db-tools-mcp-$(rustc -vV | sed -n 's/host: //p')"
+cd src-tauri && tauri build --config release-sidecar.json
+```
+
+`tauri build` **without** `--config release-sidecar.json` produces a bundle
+without the bridge — the app's runtime error when an agent tries to use Lucent's
+DB tools is loud and points at exactly this fix (`cargo build --bin
+lucent-db-tools-mcp`).
 
 ## Roadmap
 

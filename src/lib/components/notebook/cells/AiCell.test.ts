@@ -89,4 +89,18 @@ describe('AiCell', () => {
     expect(container.querySelector('.plain')).toBeTruthy();
     expect(container.querySelector('.markdown-body')).toBeNull();
   });
+
+  it('follows notebook-controlled edit mode', async () => {
+    const model = createNotebookModel();
+    model.cells[0].kind = 'ai';
+    const { container, rerender } = render(AiCell, {
+      props: { cell: model.cells[0], model, editing: false },
+    });
+
+    await rerender({ cell: model.cells[0], model, editing: true });
+    expect(container.querySelector('textarea')).toBeTruthy();
+
+    await rerender({ cell: model.cells[0], model, editing: false });
+    expect(container.querySelector('.display')).toBeTruthy();
+  });
 });

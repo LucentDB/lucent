@@ -30,6 +30,17 @@
 
   let textareaEl: HTMLTextAreaElement | undefined = $state();
 
+  // Entering edit mode is a focus transition, not just a rendering transition.
+  // This keeps keyboard entry consistent when command mode activates a cell.
+  $effect(() => {
+    if (!editing || !textareaEl) return;
+    if (document.activeElement !== textareaEl) {
+      textareaEl.focus();
+      const end = textareaEl.value.length;
+      textareaEl.setSelectionRange(end, end);
+    }
+  });
+
   // 'auto' renders markdown only when the text actually looks like markdown, so a
   // plain AI prompt displays as the user typed it.
   let asMarkdown = $derived(

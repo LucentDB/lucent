@@ -5,39 +5,67 @@
   let {
     source,
     status,
+    editing: controlledEditing,
     onSourceChange,
+    onRun,
+    onRunAndAdvance,
+    onEnterEdit,
+    onExitEdit,
   }: {
     source: string;
     status: string;
+    /** When supplied, notebook mode owns whether this cell is being edited. */
+    editing?: boolean;
     onSourceChange?: (val: string) => void;
+    onRun?: () => void;
+    onRunAndAdvance?: () => void;
+    onEnterEdit?: () => void;
+    onExitEdit?: () => void;
   } = $props();
 
-  let editing = $state(false);
+  let localEditing = $state(false);
   let userClosed = $state(false);
+  let isEditing = $derived(
+    controlledEditing === undefined ? localEditing : controlledEditing,
+  );
 
-  // Auto-enter editing only for a brand-new empty cell.
+  // Standalone MarkdownCell usage keeps its original empty-cell convenience;
+  // Notebook.svelte passes `editing` and owns the mode when embedded.
   $effect(() => {
-    if (!editing && !userClosed && status === 'pending' && !source) {
-      editing = true;
+    if (controlledEditing !== undefined) return;
+    if (!localEditing && !userClosed && status === 'pending' && !source) {
+      localEditing = true;
     }
   });
+
+  function enterEdit() {
+    if (controlledEditing === undefined) {
+      localEditing = true;
+      userClosed = false;
+    }
+    onEnterEdit?.();
+  }
+
+  function exitEdit() {
+    if (controlledEditing === undefined) {
+      localEditing = false;
+      userClosed = true;
+    }
+    onExitEdit?.();
+  }
 </script>
 
 <TextCellEditor
   {source}
-  {editing}
+  editing={isEditing}
   placeholder="Empty markdown cell — click to edit"
   renderMode="markdown"
   showToolbar={true}
   {onSourceChange}
-  onEnterEdit={() => {
-    editing = true;
-    userClosed = false;
-  }}
-  onExitEdit={() => {
-    editing = false;
-    userClosed = true;
-  }}
+  {onRun}
+  {onRunAndAdvance}
+  onEnterEdit={enterEdit}
+  onExitEdit={exitEdit}
   onToggleTask={(index, checked) =>
     onSourceChange?.(toggleTaskAtIndex(source, index, checked))}
 />

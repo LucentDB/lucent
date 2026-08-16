@@ -140,11 +140,6 @@ export type NotebookEvent =
         output: ToolOutputPayload | null;
       };
     }
-  | { type: 'sql_preview'; payload: { cell_id: string; sql: string } }
-  | {
-      type: 'rows_streamed';
-      payload: { cell_id: string; rows: unknown[][]; is_end: boolean };
-    }
   | {
       type: 'cell_done';
       payload: {
@@ -488,7 +483,8 @@ export class NotebookModel {
    * A cell with no statement in it has nothing to execute. Running it anyway
    * burns an execution counter and stores the backend's empty result envelope,
    * which the UI then renders as a "no rows found" panel on a cell the user
-   * never typed into. Silently skipped, not an error.
+   * never typed into. Markdown is display-only, so it advances without entering
+   * the database session. Both cases are silently skipped, not errors.
    */
   private _isBlank(cell: CellModel): boolean {
     return cell.source.trim().length === 0;
@@ -496,7 +492,7 @@ export class NotebookModel {
 
   async runCell(id: string): Promise<void> {
     const cell = this._cells.find((c) => c.id === id);
-    if (cell && this._isBlank(cell)) return;
+    if (cell && (cell.kind === 'markdown' || this._isBlank(cell))) return;
     await this.session.runCell(id);
   }
 

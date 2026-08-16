@@ -69,7 +69,8 @@ async fn setup() -> (
     wait_for_postgres(port).await;
 
     let mut supervisor = Supervisor::new();
-    let socket_path_buf = supervisor.ensure_running().await.unwrap().to_path_buf();
+    supervisor.ensure_running().await.unwrap();
+    let socket_path_buf = supervisor.endpoint().to_string();
     let token = supervisor.handshake_token().to_owned();
 
     let (client, conn_id) = ConnectorClient::connect(&socket_path_buf, &token, pg_config(port))
@@ -201,6 +202,39 @@ async fn capped_execute_cancels_query_server_side() {
             }
         }
     }
+
+    let _ = supervisor.shutdown().await;
+}
+
+/// A multi-statement script whose LAST statement overflows the cap must
+/// come back truncated WITH the UI notice — the worker's 10,001-row
+/// sentinel (HARD_ROW_CAP + 1) makes the client's truncation trigger
+/// (`all_rows.len() > cap`) fire. Without the sentinel this was a silent
+/// cut: the client saw exactly 10,000 rows, `>` never fired, truncated
+/// stayed false, and no notice reached the UI.
+#[tokio::test]
+async fn multi_statement_oversized_last_set_is_truncated_with_notice() {
+    let (mut supervisor, client, conn_id, _container) = setup().await;
+
+    let (result, _qid) = capped_execute(
+        &client,
+        conn_id,
+        "SELECT 1; SELECT g FROM generate_series(1, 50000) g",
+        Some(lucent_lib::client::HARD_ROW_CAP),
+    )
+    .await
+    .expect("multi-statement capped execute should succeed");
+
+    assert_eq!(
+        result.rows.len(),
+        lucent_lib::client::HARD_ROW_CAP,
+        "rows must be truncated at the cap"
+    );
+    assert_eq!(result.row_count, lucent_lib::client::HARD_ROW_CAP);
+    assert!(
+        result.truncated,
+        "an oversized multi-statement script must be flagged truncated — never a silent cut"
+    );
 
     let _ = supervisor.shutdown().await;
 }

@@ -73,7 +73,8 @@ async fn test_concurrent_execute_and_cancel() {
     wait_for_postgres(port).await;
 
     let mut supervisor = Supervisor::new();
-    let socket_path_buf = supervisor.ensure_running().await.unwrap().to_path_buf();
+    supervisor.ensure_running().await.unwrap();
+    let socket_path_buf = supervisor.endpoint().to_string();
     let token = supervisor.handshake_token().to_owned();
 
     let stream = UnixStream::connect(&socket_path_buf).await.unwrap();
@@ -84,6 +85,10 @@ async fn test_concurrent_execute_and_cancel() {
         .await
         .unwrap();
     write_message(&mut framed, &token).await.unwrap();
+
+    // ack must arrive before Connect
+    let ack: WorkerResponse = read_message(&mut framed).await.unwrap().unwrap();
+    assert!(matches!(ack, WorkerResponse::HandshakeAccepted));
 
     let connection_id = ConnectionId(uuid::Uuid::new_v4());
     write_message(
@@ -155,7 +160,8 @@ async fn test_execute_with_id_cancel_aborts_query() {
     wait_for_postgres(port).await;
 
     let mut supervisor = Supervisor::new();
-    let socket_path_buf = supervisor.ensure_running().await.unwrap().to_path_buf();
+    supervisor.ensure_running().await.unwrap();
+    let socket_path_buf = supervisor.endpoint().to_string();
     let token = supervisor.handshake_token().to_owned();
 
     let (client, conn_id) = ConnectorClient::connect(&socket_path_buf, &token, pg_config(port))
@@ -202,7 +208,8 @@ async fn test_multiple_connection_ids_on_one_client() {
     wait_for_postgres(port).await;
 
     let mut supervisor = Supervisor::new();
-    let socket_path_buf = supervisor.ensure_running().await.unwrap().to_path_buf();
+    supervisor.ensure_running().await.unwrap();
+    let socket_path_buf = supervisor.endpoint().to_string();
     let token = supervisor.handshake_token().to_owned();
 
     let (client, conn_a) = ConnectorClient::connect(&socket_path_buf, &token, pg_config(port))
@@ -279,7 +286,8 @@ async fn test_preflight_probe_cannot_leak_statement_timeout() {
     wait_for_postgres(port).await;
 
     let mut supervisor = Supervisor::new();
-    let socket_path_buf = supervisor.ensure_running().await.unwrap().to_path_buf();
+    supervisor.ensure_running().await.unwrap();
+    let socket_path_buf = supervisor.endpoint().to_string();
     let token = supervisor.handshake_token().to_owned();
 
     let (client, conn_a) = ConnectorClient::connect(&socket_path_buf, &token, pg_config(port))
@@ -326,7 +334,8 @@ async fn test_preflight_probe_cannot_leak_statement_timeout() {
         columns_by_table: HashMap::from([(0, vec![0])]),
         fk_edges: vec![],
         table_adjacency: HashMap::new(),
-        built_at: std::time::Instant::now(),
+        built_at_unix: 0,
+        tier: lucent_lib::ai::schema_graph::IndexingTier::MetadataOnly,
     };
     let caps = lucent_protocol::DriverCapabilities {
         id: "postgres".into(),
@@ -427,7 +436,8 @@ async fn test_ai_rollback_cannot_touch_user_transaction() {
     wait_for_postgres(port).await;
 
     let mut supervisor = Supervisor::new();
-    let socket_path_buf = supervisor.ensure_running().await.unwrap().to_path_buf();
+    supervisor.ensure_running().await.unwrap();
+    let socket_path_buf = supervisor.endpoint().to_string();
     let token = supervisor.handshake_token().to_owned();
 
     let (client, conn_a) = ConnectorClient::connect(&socket_path_buf, &token, pg_config(port))
@@ -491,7 +501,8 @@ async fn test_app_client_handle_does_not_serialize_queries() {
     wait_for_postgres(port).await;
 
     let mut supervisor = Supervisor::new();
-    let socket_path_buf = supervisor.ensure_running().await.unwrap().to_path_buf();
+    supervisor.ensure_running().await.unwrap();
+    let socket_path_buf = supervisor.endpoint().to_string();
     let token = supervisor.handshake_token().to_owned();
 
     let (client, conn_a) = ConnectorClient::connect(&socket_path_buf, &token, pg_config(port))
@@ -551,7 +562,8 @@ async fn test_get_objects_info_batches_columns_queries() {
     wait_for_postgres(port).await;
 
     let mut supervisor = Supervisor::new();
-    let socket_path_buf = supervisor.ensure_running().await.unwrap().to_path_buf();
+    supervisor.ensure_running().await.unwrap();
+    let socket_path_buf = supervisor.endpoint().to_string();
     let token = supervisor.handshake_token().to_owned();
 
     let (client, conn_a) = ConnectorClient::connect(&socket_path_buf, &token, pg_config(port))
@@ -612,7 +624,8 @@ async fn test_fast_multibatch_result_does_not_hang() {
     wait_for_postgres(port).await;
 
     let mut supervisor = Supervisor::new();
-    let socket_path_buf = supervisor.ensure_running().await.unwrap().to_path_buf();
+    supervisor.ensure_running().await.unwrap();
+    let socket_path_buf = supervisor.endpoint().to_string();
     let token = supervisor.handshake_token().to_owned();
 
     let (client, conn_id) = ConnectorClient::connect(&socket_path_buf, &token, pg_config(port))

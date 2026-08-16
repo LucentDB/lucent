@@ -3,8 +3,11 @@
 mod common;
 use common::seeded;
 
-use lucent_protocol::{CatalogRequest, CatalogResult, ForeignKey, ObjectKind, ObjectRef};
+use lucent_protocol::{CatalogRequest, CatalogResult, ForeignKey, ObjectKind, QueryId};
+// ObjectRef is used fully-qualified (lucent_protocol::ObjectRef) in this file.
 use lucent_worker_host::Connector;
+use tokio::sync::mpsc;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn lists_user_namespaces_and_counts_objects_including_matviews() {
@@ -586,4 +589,46 @@ async fn kinds_with_no_relkinds_fall_back_instead_of_syntax_error() {
         matches!(result, CatalogResult::SearchHits(_)),
         "expected SearchHits, got {result:?}"
     );
+}
+
+#[tokio::test]
+async fn function_ddl_is_deterministic_across_overloads() {
+    // G4: pg_get_functiondef with LIMIT 1 and no ORDER BY returned an
+    // ARBITRARY overload's source when a name was overloaded. The oldest
+    // overload (lowest oid) must win, deterministically.
+    let (_c, connector, cid) = seeded().await;
+
+    for sql in [
+        "CREATE FUNCTION app.ddl_probe() RETURNS int LANGUAGE sql AS 'SELECT 1'",
+        "CREATE FUNCTION app.ddl_probe(int) RETURNS int LANGUAGE sql AS 'SELECT $1 + 100'",
+    ] {
+        let (tx, _rx) = mpsc::channel(4);
+        connector
+            .execute(cid, QueryId(Uuid::new_v4()), sql.to_string(), tx)
+            .await;
+    }
+
+    let ddl = connector
+        .catalog(
+            cid,
+            CatalogRequest::GetObjectDdl {
+                reference: lucent_protocol::ObjectRef {
+                    namespace: vec!["app".into()],
+                    name: "ddl_probe".into(),
+                    kind: ObjectKind::Function,
+                },
+            },
+        )
+        .await
+        .expect("function DDL must resolve");
+
+    match ddl {
+        CatalogResult::Ddl(sql) => {
+            assert!(
+                sql.contains("SELECT 1") && !sql.contains("100"),
+                "the OLDEST overload must win, got: {sql}"
+            );
+        }
+        other => panic!("expected Ddl, got {other:?}"),
+    }
 }

@@ -3,6 +3,7 @@
     onRunAll,
     onClearOutputs,
     onRestartSession,
+    mode = 'command',
     isRunning = false,
     runAllProgress = null as { current: number; total: number } | null,
     connectionName = '',
@@ -11,6 +12,7 @@
     onRunAll?: () => void;
     onClearOutputs?: () => void | Promise<void>;
     onRestartSession?: () => void;
+    mode?: 'command' | 'edit';
     isRunning?: boolean;
     runAllProgress?: { current: number; total: number } | null;
     connectionName?: string;
@@ -96,17 +98,32 @@
       <span class="btn-label">Restart</span>
     </button>
   </div>
-  {#if connectionName || databaseName}
-    <div class="connection-badge">
-      <span class="badge-dot" class:running={isRunning}></span>
-      <span class="badge-text">
-        {#if connectionName}<span class="conn-name">{connectionName}</span>{/if}
-        {#if databaseName}<span class="db-separator">/</span><span
-            class="db-name">{databaseName}</span
-          >{/if}
-      </span>
+  <div class="toolbar-right">
+    <div
+      class="mode-indicator"
+      class:edit-mode={mode === 'edit'}
+      role="status"
+      aria-live="polite"
+      title={mode === 'command'
+        ? 'Command mode: Arrow keys navigate · Enter edits · Y SQL · I AI · M Markdown'
+        : 'Edit mode: Esc returns to command mode · Shift+Enter runs and advances'}
+    >
+      <kbd>{mode === 'command' ? 'Esc' : 'Enter'}</kbd>
+      <span>{mode === 'command' ? 'Command' : 'Edit'}</span>
     </div>
-  {/if}
+    {#if connectionName || databaseName}
+      <div class="connection-badge">
+        <span class="badge-dot" class:running={isRunning}></span>
+        <span class="badge-text">
+          {#if connectionName}<span class="conn-name">{connectionName}</span
+            >{/if}
+          {#if databaseName}<span class="db-separator">/</span><span
+              class="db-name">{databaseName}</span
+            >{/if}
+        </span>
+      </div>
+    {/if}
+  </div>
 </div>
 
 <style>
@@ -129,6 +146,39 @@
     display: flex;
     align-items: center;
     gap: 4px;
+  }
+
+  .toolbar-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .mode-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-subtle);
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+    white-space: nowrap;
+  }
+  .mode-indicator.edit-mode {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+  .mode-indicator kbd {
+    padding: 1px 4px;
+    border: 1px solid currentColor;
+    border-radius: 3px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    line-height: 1.2;
   }
 
   .divider {

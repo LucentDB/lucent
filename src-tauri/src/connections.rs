@@ -254,16 +254,44 @@ pub fn write_all(
     profiles: &[ConnectionProfile],
     ssh_configs: &[crate::ssh::SshConfig],
 ) -> Result<(), String> {
-    let path = connections_file_path();
-    let tmp = path.with_extension("json.tmp");
+    write_all_at(&connections_file_path(), profiles, ssh_configs)
+}
+
+/// The atomic write body. Takes the path explicitly so async callers can
+/// resolve it on the calling thread before crossing into the blocking pool
+/// (G1) — the test override is thread-local.
+fn write_all_at(
+    path: &std::path::Path,
+    profiles: &[ConnectionProfile],
+    ssh_configs: &[crate::ssh::SshConfig],
+) -> Result<(), String> {
+    // Process-unique tmp name: even a stray concurrent writer (or a
+    // crashed process's leftover) cannot be truncated under another
+    // writer's rename (G2). The repository's write_lock already serializes
+    // writers within this process; the unique name is defense-in-depth.
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
     let file = ConnectionsFile {
         profiles: profiles.to_vec(),
         ssh_tunnels: ssh_configs.to_vec(),
     };
     let content = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
     std::fs::write(&tmp, &content).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Async wrapper: file I/O must not run on the Tokio runtime (G1). Runs on
+/// the blocking pool; the repository's write_lock is held by the caller
+/// across this await, which is safe (the lock is a tokio mutex and the
+/// guard is Send). Path resolved on the calling thread.
+pub async fn write_all_async(
+    profiles: Vec<ConnectionProfile>,
+    ssh_configs: Vec<crate::ssh::SshConfig>,
+) -> Result<(), String> {
+    let path = connections_file_path();
+    tokio::task::spawn_blocking(move || write_all_at(&path, &profiles, &ssh_configs))
+        .await
+        .map_err(|e| format!("persistence task panicked: {e}"))?
 }
 
 // ─── Keychain Helpers ───────────────────────────────────────────────────────
@@ -365,6 +393,13 @@ use tokio::sync::RwLock;
 pub struct ConnectionProfileRepository {
     profiles: RwLock<Vec<ConnectionProfile>>,
     ssh_configs: RwLock<Vec<crate::ssh::SshConfig>>,
+    /// Serializes the read-modify-write persistence cycle. Without it,
+    /// `save_profile` (profiles write → ssh read) and `save_ssh_config`
+    /// (ssh write → profiles read) take the two rw-locks in OPPOSITE order
+    /// — a classic lock-order inversion that can deadlock — and both write
+    /// the same fixed `connections.json.tmp`, racing truncate/write/rename
+    /// (G2).
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 impl ConnectionProfileRepository {
@@ -380,6 +415,7 @@ impl ConnectionProfileRepository {
         Self {
             profiles: RwLock::new(profiles),
             ssh_configs: RwLock::new(ssh_configs),
+            write_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -399,6 +435,7 @@ impl ConnectionProfileRepository {
     }
 
     pub async fn save_profile(&self, profile: ConnectionProfile) -> Result<(), String> {
+        let _write = self.write_lock.lock().await;
         let mut profiles = self.profiles.write().await;
         if let Some(existing) = profiles.iter_mut().find(|p| p.id == profile.id) {
             *existing = profile;
@@ -406,26 +443,28 @@ impl ConnectionProfileRepository {
             profiles.push(profile);
         }
         let ssh = self.ssh_configs.read().await.clone();
-        write_all(&profiles, &ssh)
+        write_all_async(profiles.clone(), ssh).await
     }
 
     pub async fn delete_profile(&self, id: &str) -> Result<(), String> {
+        let _write = self.write_lock.lock().await;
         let mut profiles = self.profiles.write().await;
         profiles.retain(|p| p.id != id);
         let ssh = self.ssh_configs.read().await.clone();
-        write_all(&profiles, &ssh)?;
+        write_all_async(profiles.clone(), ssh).await?;
         delete_password(id).ok(); // best-effort
         Ok(())
     }
 
     pub async fn mark_used(&self, id: &str) -> Result<(), String> {
+        let _write = self.write_lock.lock().await;
         let mut profiles = self.profiles.write().await;
         if let Some(p) = profiles.iter_mut().find(|p| p.id == id) {
             p.last_used = Some(chrono::Utc::now().to_rfc3339());
             p.updated_at = chrono::Utc::now().to_rfc3339();
         }
         let ssh = self.ssh_configs.read().await.clone();
-        write_all(&profiles, &ssh)
+        write_all_async(profiles.clone(), ssh).await
     }
 
     // ─── SSH config operations ───────────────────────────────────────────
@@ -444,6 +483,7 @@ impl ConnectionProfileRepository {
     }
 
     pub async fn save_ssh_config(&self, config: crate::ssh::SshConfig) -> Result<(), String> {
+        let _write = self.write_lock.lock().await;
         let mut ssh = self.ssh_configs.write().await;
         if let Some(existing) = ssh.iter_mut().find(|c| c.id == config.id) {
             *existing = config;
@@ -451,14 +491,15 @@ impl ConnectionProfileRepository {
             ssh.push(config);
         }
         let profiles = self.profiles.read().await.clone();
-        write_all(&profiles, &ssh)
+        write_all_async(profiles.clone(), ssh.clone()).await
     }
 
     pub async fn delete_ssh_config(&self, id: &str) -> Result<(), String> {
+        let _write = self.write_lock.lock().await;
         let mut ssh = self.ssh_configs.write().await;
         ssh.retain(|c| c.id != id);
         let profiles = self.profiles.read().await.clone();
-        write_all(&profiles, &ssh)?;
+        write_all_async(profiles.clone(), ssh.clone()).await?;
         delete_ssh_secret(id).ok();
         Ok(())
     }

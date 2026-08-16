@@ -70,11 +70,11 @@ mod integration {
         wait_for_postgres(port).await;
 
         let mut supervisor = Supervisor::new();
-        let socket_path = supervisor
+        supervisor
             .ensure_running()
             .await
-            .expect("supervisor running")
-            .to_path_buf();
+            .expect("supervisor running");
+        let socket_path = supervisor.endpoint().to_string();
         let token = supervisor.handshake_token().to_owned();
 
         let (mut client, conn_id) = ConnectorClient::connect(&socket_path, &token, pg_config(port))
@@ -103,11 +103,11 @@ mod integration {
         wait_for_postgres(port).await;
 
         let mut supervisor = Supervisor::new();
-        let socket_path = supervisor
+        supervisor
             .ensure_running()
             .await
-            .expect("supervisor running")
-            .to_path_buf();
+            .expect("supervisor running");
+        let socket_path = supervisor.endpoint().to_string();
         let token = supervisor.handshake_token().to_owned();
 
         let (mut client, conn_id) = ConnectorClient::connect(&socket_path, &token, pg_config(port))
@@ -183,11 +183,11 @@ mod integration {
         wait_for_postgres(port).await;
 
         let mut supervisor = Supervisor::new();
-        let socket_path = supervisor
+        supervisor
             .ensure_running()
             .await
-            .expect("supervisor running")
-            .to_path_buf();
+            .expect("supervisor running");
+        let socket_path = supervisor.endpoint().to_string();
         let token = supervisor.handshake_token().to_owned();
 
         let (mut client, conn_id) = ConnectorClient::connect(&socket_path, &token, pg_config(port))
@@ -220,11 +220,11 @@ mod integration {
         wait_for_postgres(port).await;
 
         let mut supervisor = Supervisor::new();
-        let socket_path = supervisor
+        supervisor
             .ensure_running()
             .await
-            .expect("supervisor running")
-            .to_path_buf();
+            .expect("supervisor running");
+        let socket_path = supervisor.endpoint().to_string();
         let token = supervisor.handshake_token().to_owned();
 
         let (mut client, conn_id) = ConnectorClient::connect(&socket_path, &token, pg_config(port))
@@ -268,11 +268,11 @@ mod integration {
         wait_for_postgres(port).await;
 
         let mut supervisor = Supervisor::new();
-        let socket_path = supervisor
+        supervisor
             .ensure_running()
             .await
-            .expect("supervisor running")
-            .to_path_buf();
+            .expect("supervisor running");
+        let socket_path = supervisor.endpoint().to_string();
         let token = supervisor.handshake_token().to_owned();
 
         let (mut client, conn_id) = ConnectorClient::connect(&socket_path, &token, pg_config(port))

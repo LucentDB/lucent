@@ -1,5 +1,5 @@
 use lucent_protocol::SqlDialect;
-use sqlparser::ast::{FromTable, Query, SetExpr, Statement};
+use sqlparser::ast::{FromTable, Query, SetExpr, Statement, UtilityOption};
 use sqlparser::dialect::Dialect;
 use sqlparser::parser::Parser;
 use thiserror::Error;
@@ -52,8 +52,10 @@ pub(crate) fn validate_readonly_with_parser(
 
     match &statements[0] {
         Statement::Query(q) => check_query_readonly(q),
-        Statement::Explain { analyze, .. } if !analyze => Ok(()),
-        Statement::Explain { analyze: true, .. } => Err(GuardError::ExplainAnalyze),
+        Statement::Explain {
+            analyze, options, ..
+        } if !analyze && !explain_options_contain_analyze(options) => Ok(()),
+        Statement::Explain { .. } => Err(GuardError::ExplainAnalyze),
         _ => Err(GuardError::NotReadOnly),
     }
 }
@@ -74,16 +76,40 @@ fn check_query_readonly(q: &Query) -> Result<(), GuardError> {
     check_setexpr_readonly(&q.body)
 }
 
+/// sqlparser 0.62 parses `EXPLAIN (ANALYZE true) …` into the parenthesized
+/// `options` list and leaves the `analyze` field false — checking only the
+/// field would let a statement that ACTUALLY EXECUTES through the guard
+/// (C4). Any mention of ANALYZE is rejected: the guard fails closed, and
+/// `EXPLAIN (ANALYZE false)` is vanishingly rare next to the cost of a
+/// wrong answer.
+fn explain_options_contain_analyze(options: &Option<Vec<UtilityOption>>) -> bool {
+    options
+        .as_ref()
+        .map(|opts| {
+            opts.iter()
+                .any(|o| o.name.value.eq_ignore_ascii_case("analyze"))
+        })
+        .unwrap_or(false)
+}
+
 fn check_setexpr_readonly(body: &SetExpr) -> Result<(), GuardError> {
     match body {
-        SetExpr::Select(_) | SetExpr::Values(_) | SetExpr::Table(_) => Ok(()),
+        SetExpr::Select(sel) => {
+            if sel.into.is_some() {
+                // `SELECT … INTO table` creates a table — a write, even
+                // though the statement parses as a Select (C4).
+                return Err(GuardError::NotReadOnly);
+            }
+            Ok(())
+        }
+        SetExpr::Values(_) | SetExpr::Table(_) => Ok(()),
         SetExpr::Query(q) => check_query_readonly(q),
         SetExpr::SetOperation { left, right, .. } => {
             check_setexpr_readonly(left)?;
             check_setexpr_readonly(right)
         }
-        // DML inside a query body (writing CTEs) — reject. Anything unrecognised
-        // is rejected too: a read-only guard must fail closed.
+        // DML inside a query body (writing CTEs) — reject. Anything
+        // unrecognised is rejected too: a read-only guard must fail closed.
         _ => Err(GuardError::NotReadOnly),
     }
 }
@@ -192,6 +218,46 @@ mod tests {
             validate_readonly("EXPLAIN ANALYZE SELECT 1", PG).unwrap_err(),
             GuardError::ExplainAnalyze
         ));
+    }
+
+    #[test]
+    fn rejects_select_into_which_creates_a_table() {
+        // C4: `SELECT … INTO` parses as a Select with `into: Some(..)` — it
+        // creates a table, a write. The old guard matched `SetExpr::Select(_)`
+        // without inspecting `into` and let it through; on Postgres only the
+        // engine layer (BEGIN READ ONLY) caught it, and a GuardOnly driver had
+        // no defense at all.
+        assert!(matches!(
+            validate_readonly("SELECT * INTO copied_users FROM users", PG).unwrap_err(),
+            GuardError::NotReadOnly
+        ));
+    }
+
+    #[test]
+    fn rejects_explain_with_analyze_in_parenthesized_options() {
+        // C4: `EXPLAIN (ANALYZE true) …` actually EXECUTES the statement.
+        // sqlparser 0.62 stores ANALYZE in the parenthesized `options` list and
+        // leaves the `analyze` field false, so the field-only check let
+        // `EXPLAIN (ANALYZE true) DELETE FROM t` through. Verified against the
+        // vendored parser: `parse_explain` routes `(…)` to
+        // `parse_utility_options`.
+        assert!(matches!(
+            validate_readonly("EXPLAIN (ANALYZE true) DELETE FROM t", PG).unwrap_err(),
+            GuardError::ExplainAnalyze
+        ));
+        // Bare `EXPLAIN (ANALYZE)` is the same as ANALYZE true.
+        assert!(matches!(
+            validate_readonly("EXPLAIN (ANALYZE) SELECT 1", PG).unwrap_err(),
+            GuardError::ExplainAnalyze
+        ));
+    }
+
+    #[test]
+    fn explain_without_analyze_still_passes() {
+        // Guard against over-blocking: plain EXPLAIN and non-ANALYZE options
+        // plan but never execute.
+        assert!(validate_readonly("EXPLAIN SELECT * FROM users", PG).is_ok());
+        assert!(validate_readonly("EXPLAIN (COSTS false) SELECT 1", PG).is_ok());
     }
 
     #[test]

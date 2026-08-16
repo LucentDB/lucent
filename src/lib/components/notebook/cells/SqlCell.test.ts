@@ -63,3 +63,27 @@ it('mounts the editor when the cell is focused', async () => {
   await Promise.resolve();
   expect(container.querySelector('.cm-editor')).toBeTruthy();
 });
+
+it('blurs CodeMirror when the cell leaves edit mode', async () => {
+  const model = createNotebookModel();
+  const cellId = model.cells[0].id;
+  const props = {
+    source: 'SELECT 1',
+    status: 'ok',
+    cellId,
+    model,
+    selected: true,
+    focused: true,
+  };
+  const { container, rerender } = render(SqlCell, { props });
+  await Promise.resolve();
+
+  const content = container.querySelector('.cm-content') as HTMLElement;
+  content.focus();
+  expect(document.activeElement).toBe(content);
+
+  await rerender({ ...props, focused: false });
+  await Promise.resolve();
+
+  expect(document.activeElement).not.toBe(content);
+});

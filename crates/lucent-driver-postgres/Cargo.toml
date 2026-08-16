@@ -44,3 +44,7 @@ testcontainers = { version = "0.27", features = ["watchdog"] }
 testcontainers-modules = { version = "0.15", features = ["postgres"] }
 tempfile = "3"
 uuid = { workspace = true }
+lucent-driver-conformance = { path = "../lucent-driver-conformance" }
+# The e2e tests drive the REAL `ConnectorClient` through the real compiled
+# worker binary. Cycle-free: `lucent` depends only on `lucent-protocol`.
+lucent = { path = "../../src-tauri" }

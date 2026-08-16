@@ -130,10 +130,6 @@ export function createNotebookSession(model: NotebookModel) {
             );
             break;
           }
-          case 'sql_preview':
-            break;
-          case 'rows_streamed':
-            break;
           case 'cell_done': {
             const p = event.payload;
             cell.outputs = p.output;

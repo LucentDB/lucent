@@ -2,6 +2,10 @@
 name = "lucent"
 version = "0.1.0"
 edition = "2021"
+# The package also ships auxilliary binaries (lucent-acp-stub-agent,
+# lucent-db-tools-mcp); `tauri dev` invokes plain `cargo run`, which needs
+# this to know which binary is the app.
+default-run = "lucent"
 
 [lib]
 name = "lucent_lib"
@@ -13,7 +17,11 @@ tauri-build = { version = "2", features = [] }
 [features]
 default = []
 evals = ["dep:tokio-postgres"]
-integration-tests = ["testcontainers", "testcontainers-modules", "dep:tokio-postgres"]
+integration-tests = [
+  "testcontainers",
+  "testcontainers-modules",
+  "dep:tokio-postgres",
+]
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -44,7 +52,13 @@ log = "0.4"
 # the log bridge inside `.init()`; we install it explicitly in trace.rs
 # instead so there is a single source of truth.
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "env-filter", "std", "registry"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+  "fmt",
+  "ansi",
+  "env-filter",
+  "std",
+  "registry",
+] }
 tracing-log = "0.2"
 tracing-appender = "0.2"
 
@@ -55,17 +69,30 @@ tracing-appender = "0.2"
 # test-only features plus the dev-dependencies section below.
 tokio-postgres = { version = "0.7", optional = true }
 testcontainers = { version = "0.27", features = ["watchdog"], optional = true }
-testcontainers-modules = { version = "0.15", features = ["postgres"], optional = true }
+testcontainers-modules = { version = "0.15", features = [
+  "postgres",
+], optional = true }
 
 # Re-use workspace dependencies for common crates
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 
+# ACP registry: registry fetch (reqwest), binary distribution extraction
+reqwest = { workspace = true }
+flate2 = { workspace = true }
+bzip2 = { workspace = true }
+tar = { workspace = true }
+zip = { workspace = true }
+agent-client-protocol = { workspace = true }
+
 # New dependencies for MVP v2
 chrono = { version = "0.4", features = ["serde"] }
-ssh2 = "0.9"
+russh = "0.62"
 fs2 = "0.4"
 dirs = "6"
+rusqlite = { version = "0.40", features = ["bundled"] }
+blake3 = "1.8"
+sha2 = "0.10"
 
 # Tauri plugins
 tauri-plugin-clipboard-manager = "2"
@@ -77,3 +104,8 @@ tauri-plugin-dialog = "2"
 # feature-gated integration tests. Dev-dependencies are never part of the
 # production binary.
 tokio-postgres = "0.7"
+# The `test` feature (mock app/runtime) is needed by the D5 full-turn test to
+# drive `run_agent_turn` with a real AppHandle and no windows. As a
+# dev-dependency it only enables when building for tests — the production
+# binary keeps the lean default feature set.
+tauri = { version = "2", features = ["test"] }

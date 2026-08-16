@@ -49,32 +49,43 @@ export async function getSchemas() {
   return invoke('get_schemas');
 }
 
-export async function getSchemaObjects(schema) {
-  return invoke('get_schema_objects', { schema });
+export async function getSchemaObjects(namespace) {
+  return invoke('get_schema_objects', { namespace });
+}
+
+export async function getEditorSchema() {
+  return invoke('get_editor_schema');
 }
 
 export async function disconnect() {
   return invoke('disconnect');
 }
 
-export async function getFunctionSource(schema, name) {
-  return invoke('get_function_source', { schema, name });
+export async function getFunctionSource(namespace, name) {
+  return invoke('get_function_source', { namespace, name });
 }
 
-export async function getViewSource(schema, name, kind = 'view') {
-  return invoke('get_view_source', { schema, name, kind });
+export async function getViewSource(namespace, name, kind = 'view') {
+  return invoke('get_view_source', { namespace, name, kind });
 }
 
-export async function getSequenceInfo(schema, name) {
-  return invoke('get_sequence_info', { schema, name });
+export async function getSequenceInfo(namespace, name) {
+  return invoke('get_sequence_info', { namespace, name });
 }
 
 export async function browseTable(
-  schema,
+  namespace,
   name,
   { limit, offset, sort = null, filters = [] },
 ) {
-  return invoke('browse_table', { schema, name, limit, offset, sort, filters });
+  return invoke('browse_table', {
+    namespace,
+    name,
+    limit,
+    offset,
+    sort,
+    filters,
+  });
 }
 
 export async function countAllRows(sql, filters = []) {

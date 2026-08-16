@@ -140,10 +140,12 @@ async fn reports_bad_sql_as_a_failed_event() {
 }
 
 #[tokio::test]
-async fn rejects_multi_statement_sql_explicitly() {
-    // prepare() rejects multi-command bodies — this is intended (metadata
-    // requires a single statement). The failure must be a Failed event,
-    // never a hang or a partial execution.
+async fn executes_multi_statement_returning_the_last_result_set() {
+    // C3: multi-statement scripts are documented as executing (HARD_ROW_CAP
+    // doc, row-cap tests, AGENTS.md) but prepare() rejected them with
+    // "cannot insert multiple commands into a prepared statement". The
+    // simple-query fallback executes them; the grid shows the LAST result
+    // set (the single-grid contract), as text cells.
     let container = Postgres::default().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let (connector, connection_id) = connected(port).await;
@@ -151,10 +153,112 @@ async fn rejects_multi_statement_sql_explicitly() {
     let (tx, mut rx) = mpsc::channel(4);
     let qid = QueryId(Uuid::new_v4());
     connector
-        .execute(connection_id, qid, "SELECT 1; SELECT 2".to_string(), tx)
+        .execute(
+            connection_id,
+            qid,
+            "SELECT 1 AS a; SELECT 2 AS b, 3 AS c".to_string(),
+            tx,
+        )
         .await;
+
     let event = rx.recv().await.unwrap();
-    assert!(matches!(event, ExecutionEvent::Failed(_)));
+    match event {
+        ExecutionEvent::Batch(shape, true) => match shape {
+            ResultShape::Tabular { columns, rows } => {
+                let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+                assert_eq!(names, ["b", "c"], "the LAST result set defines the grid");
+                assert_eq!(rows.len(), 1);
+                match (&rows[0][0], &rows[0][1]) {
+                    (Value::Text(b), Value::Text(c)) => {
+                        assert_eq!(b, "2");
+                        assert_eq!(c, "3");
+                    }
+                    other => panic!("expected text cells, got {other:?}"),
+                }
+            }
+            other => panic!("expected Tabular, got {other:?}"),
+        },
+        _other => panic!("expected final Batch, got non-batch event"),
+    }
+}
+
+#[tokio::test]
+async fn multi_statement_with_a_non_query_last_statement_reports_rows_affected() {
+    // C3: when the LAST statement returns no rows, the script reports the
+    // last command's row count — a script of only non-query statements
+    // renders as "affected", exactly like a single DML statement.
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let (connector, connection_id) = connected(port).await;
+
+    let (tx, mut rx) = mpsc::channel(4);
+    let qid = QueryId(Uuid::new_v4());
+    connector
+        .execute(
+            connection_id,
+            qid,
+            "CREATE TEMP TABLE multi_test (id int); INSERT INTO multi_test VALUES (1), (2)"
+                .to_string(),
+            tx,
+        )
+        .await;
+
+    let event = rx.recv().await.unwrap();
+    match event {
+        ExecutionEvent::Batch(shape, true) => match shape {
+            ResultShape::Affected { rows_affected } => {
+                assert_eq!(rows_affected, 2, "the LAST command's count wins");
+            }
+            other => panic!("expected Affected, got {other:?}"),
+        },
+        _other => panic!("expected final Batch, got non-batch event"),
+    }
+}
+
+#[tokio::test]
+async fn oversized_multi_statement_result_sets_are_bounded_at_the_sentinel() {
+    // C3/E1: the last result set is buffered at HARD_ROW_CAP + 1 = 10,001
+    // rows — the sentinel that makes the client's truncation trigger
+    // (`all_rows.len() > cap`) fire. The worker must never buffer more, and
+    // the excess rows are counted, never silently merged.
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let (connector, connection_id) = connected(port).await;
+
+    let (tx, mut rx) = mpsc::channel(4);
+    let qid = QueryId(Uuid::new_v4());
+    connector
+        .execute(
+            connection_id,
+            qid,
+            "SELECT 1 AS a; SELECT generate_series(1, 20000) AS n".to_string(),
+            tx,
+        )
+        .await;
+
+    let event = rx.recv().await.unwrap();
+    match event {
+        ExecutionEvent::Batch(shape, true) => match shape {
+            ResultShape::Tabular { columns, rows } => {
+                let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+                assert_eq!(names, ["n"], "the LAST result set defines the grid");
+                assert_eq!(
+                    rows.len(),
+                    10_001,
+                    "the sentinel (HARD_ROW_CAP + 1) bounds the buffered set"
+                );
+                match &rows[0][0] {
+                    Value::Text(v) => assert_eq!(v, "1", "first value of generate_series"),
+                    other => panic!("expected text cells, got {other:?}"),
+                }
+            }
+            other => panic!("expected Tabular, got {other:?}"),
+        },
+        ExecutionEvent::Batch(_, false) => {
+            panic!("expected final Batch, got a non-final batch")
+        }
+        ExecutionEvent::Failed(e) => panic!("expected final Batch, got Failed: {e}"),
+    }
 }
 
 #[tokio::test]
@@ -231,4 +335,97 @@ async fn empty_select_stays_tabular_with_columns() {
         rx.recv().await.is_none(),
         "channel should close after the final batch"
     );
+}
+
+#[tokio::test]
+async fn wide_rows_survive_the_frame_ceiling() {
+    // C2 regression: 600 rows × 20 KB = 12 MiB — over the old 8 MiB IPC
+    // frame ceiling, which silently dropped the batch and reported "query
+    // task exited unexpectedly". The query must stream intact now.
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let (connector, connection_id) = connected(port).await;
+
+    let (tx, mut rx) = mpsc::channel(4);
+    let qid = QueryId(Uuid::new_v4());
+    connector
+        .execute(
+            connection_id,
+            qid,
+            "SELECT repeat('x', 20000) AS wide FROM generate_series(1, 600)".to_string(),
+            tx,
+        )
+        .await;
+
+    let mut total_rows = 0usize;
+    loop {
+        let event = rx.recv().await.unwrap();
+        match event {
+            ExecutionEvent::Batch(shape, is_final) => match shape {
+                ResultShape::Tabular { rows, .. } => {
+                    total_rows += rows.len();
+                    for row in &rows {
+                        match &row[0] {
+                            Value::Text(s) => {
+                                assert_eq!(s.len(), 20000, "20 KB cells must arrive intact");
+                                assert!(!s.contains("truncated"), "no truncation under the cap");
+                            }
+                            other => panic!("expected Text, got {other:?}"),
+                        }
+                    }
+                    if is_final {
+                        break;
+                    }
+                }
+                other => panic!("expected Tabular, got {other:?}"),
+            },
+            ExecutionEvent::Failed(e) => panic!("expected Batch, got Failed: {e}"),
+        }
+    }
+    assert_eq!(total_rows, 600);
+}
+
+#[tokio::test]
+async fn oversized_cells_are_truncated_with_a_visible_marker() {
+    // C2: a single > 1 MiB cell must not fail the query — it is truncated
+    // with a visible marker. (Before the cap, such a cell could blow the
+    // frame ceiling and kill the whole batch with a lying error.)
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let (connector, connection_id) = connected(port).await;
+
+    let (tx, mut rx) = mpsc::channel(4);
+    let qid = QueryId(Uuid::new_v4());
+    connector
+        .execute(
+            connection_id,
+            qid,
+            "SELECT repeat('x', 2 * 1024 * 1024) AS big".to_string(),
+            tx,
+        )
+        .await;
+
+    let event = rx.recv().await.unwrap();
+    match event {
+        ExecutionEvent::Batch(shape, true) => match shape {
+            ResultShape::Tabular { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                match &rows[0][0] {
+                    Value::Text(s) => {
+                        assert!(
+                            s.ends_with("[truncated at 1 MiB]"),
+                            "the truncation marker must be visible: {s:?}"
+                        );
+                        assert!(s.len() <= 1024 * 1024 + 64, "len = {}", s.len());
+                    }
+                    other => panic!("expected Text, got {other:?}"),
+                }
+            }
+            other => panic!("expected Tabular, got {other:?}"),
+        },
+        ExecutionEvent::Batch(_, false) => {
+            panic!("expected final Batch, got a non-final batch")
+        }
+        ExecutionEvent::Failed(e) => panic!("expected final Batch, got Failed: {e}"),
+    }
 }

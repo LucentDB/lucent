@@ -8,8 +8,17 @@ lucent-protocol = { path = "../lucent-protocol" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
+bincode = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# Windows named-pipe DACL: tokio's ServerOptions cannot express one.
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3"
 uuid = { workspace = true }
-bincode = { workspace = true }

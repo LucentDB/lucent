@@ -20,14 +20,41 @@ pub(crate) fn append_enforcement_notice(
     }
 }
 
+/// Find the LAST byte offset of the ASCII `needle` in `haystack`,
+/// case-insensitive over ASCII only.
+///
+/// Unlike `to_uppercase()` + `rfind`, this never changes byte lengths: some
+/// Unicode characters uppercase to a DIFFERENT number of bytes (`ſ`/`ı`/
+/// `ﬁ` shrink, `ΐ`/`ΰ`/`ŉ` grow), which misaligned the old
+/// uppercase-then-slice logic and either panicked at a char boundary or
+/// silently produced the wrong limit (C5). SQL keywords are pure ASCII, so
+/// an ASCII-only fold is exactly correct — and the returned offset is a
+/// valid char boundary in the original because the needle itself matched
+/// ASCII bytes.
+fn rfind_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    (0..=haystack.len() - needle.len())
+        .rev()
+        .find(|&i| haystack[i..i + needle.len()].eq_ignore_ascii_case(needle))
+}
+
+/// Find the FIRST byte offset of the ASCII `needle`, same semantics.
+fn find_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    (0..=haystack.len() - needle.len())
+        .find(|&i| haystack[i..i + needle.len()].eq_ignore_ascii_case(needle))
+}
+
 /// Extract the existing LIMIT value from a SQL statement, if present and trailing.
 /// Returns `Some(n)` if a trailing `LIMIT n` (optionally followed by `OFFSET m`)
 /// is the last clause, and there are no additional clauses after it.
 fn extract_existing_limit(sql: &str) -> Option<usize> {
     let s = sql.trim();
-    let upper = s.to_uppercase();
-    // Find the LAST occurrence of "LIMIT"
-    let pos = upper.rfind("LIMIT")?;
+    let pos = rfind_ascii_case_insensitive(s.as_bytes(), b"LIMIT")?;
     let after = s[pos + 6..].trim();
     let digits_end = after
         .find(|c: char| !c.is_ascii_digit())
@@ -38,7 +65,7 @@ fn extract_existing_limit(sql: &str) -> Option<usize> {
     let limit_val: usize = after[..digits_end].parse().ok()?;
     let mut rest = after[digits_end..].trim();
     // Allow optional OFFSET after LIMIT
-    if rest.to_uppercase().starts_with("OFFSET") {
+    if find_ascii_case_insensitive(rest.as_bytes(), b"OFFSET") == Some(0) {
         let ofs_digits = rest[6..].trim();
         let ofs_end = ofs_digits
             .find(|c: char| !c.is_ascii_digit())
@@ -64,9 +91,10 @@ fn apply_limit(sql: &str, cap: usize) -> String {
     match extract_existing_limit(trimmed) {
         Some(n) if n <= cap => trimmed.to_string(),
         Some(_) => {
-            // Replace the existing LIMIT value with cap
-            let upper = trimmed.to_uppercase();
-            let pos = upper.rfind("LIMIT").unwrap();
+            // Replace the existing LIMIT value with cap. `pos` is a byte
+            // offset into the ORIGINAL string — the ASCII scan guarantees
+            // alignment (C5).
+            let pos = rfind_ascii_case_insensitive(trimmed.as_bytes(), b"LIMIT").unwrap();
             let before = trimmed[..pos].trim_end();
             let after = &trimmed[pos + 6..];
             let digits_end = after
@@ -207,7 +235,7 @@ impl RunReadonlyQuery {
         // Layer 2: the strongest read-only scope this engine supports. May be
         // nothing at all — see the disclosure appended to the summary below.
         let timeout_ms = self.ctx.config.ai_query_timeout_secs.saturating_mul(1000);
-        let _readonly =
+        let readonly =
             crate::readonly::ReadOnlySession::begin(&client, conn_id, capabilities, timeout_ms)
                 .await
                 .map_err(ToolError::Execution)?;
@@ -223,12 +251,18 @@ impl RunReadonlyQuery {
         log::debug!("Executing (limited): {limited_sql}");
         let start = Instant::now();
         let query_result = client.execute(conn_id, &limited_sql).await;
+        let elapsed = start.elapsed().as_millis() as u64;
 
+        // D1: close the read-only scope on BOTH paths. The query-error path
+        // used to return early here, dropping the session so the spawned
+        // teardown could race the caller's next transaction — the C7 hazard
+        // on a common path. close() is awaited before the result is even
+        // inspected, so a failed query rolls back before we leave.
+        readonly.close().await;
         let result = query_result.map_err(|e| {
             log::error!("Query failed: {e}");
             ToolError::Execution(e)
         })?;
-        let elapsed = start.elapsed().as_millis() as u64;
         let row_count = result.rows.len();
         let truncated = row_count >= row_limit;
         log::debug!("Query returned {row_count} rows in {elapsed}ms (truncated={truncated})");
@@ -264,6 +298,8 @@ impl RunReadonlyQuery {
             }
         }
 
+        // The read-only scope was already closed (D1) before the result was
+        // inspected — nothing to tear down here; the session is consumed.
         Ok(ToolOutput::QueryResult {
             text_summary,
             columns,
@@ -341,11 +377,12 @@ impl PreviewDml {
                     // timeout emits no timeout statement, and the count is
                     // best-effort — a failure to open the scope means no
                     // estimate, not an error.
-                    if let Ok(_readonly) =
+                    if let Ok(readonly) =
                         crate::readonly::ReadOnlySession::begin(&client, conn_id, capabilities, 0)
                             .await
                     {
                         let result = client.execute(conn_id, &count_sql).await;
+                        readonly.close().await;
                         result
                             .ok()
                             .and_then(|r| {
@@ -437,6 +474,64 @@ mod tests {
 
     #[test]
     fn extract_limit_with_semicolon() {
+        assert_eq!(
+            extract_existing_limit("SELECT * FROM users LIMIT 5;"),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn unicode_before_limit_cannot_misalign_byte_indices() {
+        // C5: `to_uppercase()` changes byte length for some characters
+        // (`ΐ` grows 2→6 bytes; `ſ`/`ﬁ` shrink 2→1 / 3→2), so the old
+        // uppercase-then-slice search pointed at the wrong byte and either
+        // panicked at a char boundary or returned the wrong limit.
+        // Growth case: the old code sliced past the end of the string (panic
+        // in the spawned task wrapper → tool error).
+        assert_eq!(extract_existing_limit("SELECT 'ΐ' AS s LIMIT 5"), Some(5));
+        // Shrink cases must keep working exactly as before.
+        assert_eq!(extract_existing_limit("SELECT 'ſ' AS s LIMIT 7"), Some(7));
+        assert_eq!(extract_existing_limit("SELECT 'ﬁ' AS s LIMIT 9"), Some(9));
+    }
+
+    #[test]
+    fn unicode_misalignment_cannot_silently_bypass_the_row_cap() {
+        // C5, the silent case: `ŉ` uppercases to a 3-byte sequence (2→3 bytes),
+        // shifting the LIMIT offset +1 — the old code then parsed the digits
+        // starting at the SECOND digit: "LIMIT 500" → "00" → Some(0), and
+        // apply_limit treated 0 ≤ cap as "already bounded" and left the
+        // LIMIT 500 untouched: a silent cap bypass.
+        let sql = apply_limit("SELECT 'ŉ' AS s LIMIT 500", 50);
+        assert_eq!(sql, "SELECT 'ŉ' AS s LIMIT 50", "got: {sql}");
+    }
+
+    #[test]
+    fn ascii_inputs_keep_their_exact_previous_behavior() {
+        // The existing pinned cases must not move.
+        assert_eq!(extract_existing_limit("SELECT * FROM users"), None);
+        assert_eq!(
+            extract_existing_limit("SELECT * FROM users LIMIT 10"),
+            Some(10)
+        );
+        assert_eq!(
+            extract_existing_limit("SELECT * FROM t WHERE name = 'limit'"),
+            None
+        );
+        // An INNER limit is not a trailing limit — pins the pre-existing
+        // `extract_limit_ignores_inner_limit` behavior (the trailing
+        // ") sub" means the limit is not the last clause).
+        assert_eq!(
+            extract_existing_limit("SELECT * FROM (SELECT * FROM t LIMIT 5) sub"),
+            None
+        );
+        assert_eq!(
+            extract_existing_limit("SELECT * FROM users LIMIT 10 OFFSET 5"),
+            Some(10)
+        );
+        assert_eq!(
+            extract_existing_limit("select * from users limit 100"),
+            Some(100)
+        );
         assert_eq!(
             extract_existing_limit("SELECT * FROM users LIMIT 5;"),
             Some(5)
@@ -568,6 +663,76 @@ mod tests {
         assert_eq!(
             summary, "2 rows",
             "never add reassuring text — silence is the signal that all is well"
+        );
+    }
+
+    #[test]
+    fn readonly_scope_is_closed_before_the_query_error_path_can_return() {
+        // D1: the query-error path of run_readonly_query must not leave the
+        // read-only scope to be torn down by Drop. The old code `?`-ed the
+        // query result immediately after `execute`, dropping the session so
+        // the spawned teardown could race the caller's next transaction. The
+        // fix awaits `readonly.close()` BEFORE the result is inspected, so a
+        // failed query rolls back before the tool returns.
+        //
+        // No unit harness exists for the tool itself (it needs a live
+        // ConnectorClient / capabilities / schema graph), so this pins the
+        // observable source-level contract: there is no `?` or early return
+        // between `begin` and `close`, and `close()` precedes the
+        // `query_result.map_err(...)?` that the query-error path returns
+        // through. If that ordering regresses, this test fails at compile or
+        // assert time.
+        let src = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/ai/tools/execute.rs"
+        ));
+        let impl_start = src
+            .find("impl RunReadonlyQuery")
+            .expect("RunReadonlyQuery impl must exist");
+        let impl_end = src
+            .find("pub struct PreviewDml")
+            .expect("PreviewDml must follow RunReadonlyQuery");
+        let call = &src[impl_start..impl_end];
+
+        let begin = call
+            .find("ReadOnlySession::begin")
+            .expect("run_readonly_query must open the read-only scope");
+        let close = call
+            .find("readonly.close().await")
+            .expect("run_readonly_query must close the read-only scope");
+        assert!(close > begin, "close() must come after begin()");
+
+        // The begin statement ends at its terminating `;` — the `?` on that
+        // statement only propagates the failure to OPEN the scope, when there
+        // is nothing to close yet. Everything after it up to `close()` must
+        // not be able to skip the teardown.
+        let begin_stmt_end = call[begin..]
+            .find(';')
+            .map(|i| i + begin)
+            .expect("begin statement must terminate");
+        let between = &call[begin_stmt_end..close];
+        assert!(
+            !between.contains('?'),
+            "no early return between begin and close — a `?` here would skip \
+             the rollback on the query-error path: {between}"
+        );
+        assert!(
+            !between.contains("return Err")
+                && !between.contains("return ToolError")
+                && !between.contains("return;"),
+            "no early return statement between begin and close: {between}"
+        );
+
+        // And the query result is only inspected after the scope is closed
+        // (close() before map_err), so the query-error path cannot fire
+        // before the rollback is awaited.
+        let map_err = call
+            .find("query_result.map_err")
+            .expect("query result error mapping must exist");
+        assert!(
+            close < map_err,
+            "close() must precede query_result.map_err — the error path must \
+             not return before the scope is closed"
         );
     }
 }

@@ -97,7 +97,8 @@ async fn test_notebook_open_save_reopen() {
     wait_for_postgres(port).await;
 
     let mut supervisor = Supervisor::new();
-    let socket_path = supervisor.ensure_running().await.unwrap().to_path_buf();
+    supervisor.ensure_running().await.unwrap();
+    let socket_path = supervisor.endpoint().to_string();
     let token = supervisor.handshake_token().to_owned();
 
     let (client, conn_id) = ConnectorClient::connect(&socket_path, &token, pg_config(port))
@@ -180,7 +181,8 @@ async fn test_cell_reference_cte_composition() {
     wait_for_postgres(port).await;
 
     let mut supervisor = Supervisor::new();
-    let socket_path = supervisor.ensure_running().await.unwrap().to_path_buf();
+    supervisor.ensure_running().await.unwrap();
+    let socket_path = supervisor.endpoint().to_string();
     let token = supervisor.handshake_token().to_owned();
 
     let (client, conn_id) = ConnectorClient::connect(&socket_path, &token, pg_config(port))
@@ -267,7 +269,8 @@ async fn test_run_all_with_error_stops() {
     wait_for_postgres(port).await;
 
     let mut supervisor = Supervisor::new();
-    let socket_path = supervisor.ensure_running().await.unwrap().to_path_buf();
+    supervisor.ensure_running().await.unwrap();
+    let socket_path = supervisor.endpoint().to_string();
     let token = supervisor.handshake_token().to_owned();
 
     let (client, conn_id) = ConnectorClient::connect(&socket_path, &token, pg_config(port))

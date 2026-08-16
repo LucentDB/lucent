@@ -34,6 +34,7 @@ pub trait SqlBuilder: Send + Sync {
 pub fn for_driver(capabilities: &DriverCapabilities) -> Box<dyn SqlBuilder> {
     match capabilities.id.as_str() {
         "postgres" => Box::new(PostgresSqlBuilder),
+        "duckdb" => Box::new(DuckDbSqlBuilder),
         _ => {
             log::warn!(
                 "no SQL builder for driver {:?}; falling back to PostgreSQL syntax",
@@ -93,6 +94,53 @@ impl SqlBuilder for PostgresSqlBuilder {
 
     fn cast_to_text(&self, col: &str) -> String {
         format!("{col}::text")
+    }
+}
+
+pub struct DuckDbSqlBuilder;
+
+impl SqlBuilder for DuckDbSqlBuilder {
+    fn quote_identifier(&self, s: &str) -> String {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    }
+
+    fn quote_string(&self, s: &str) -> String {
+        // Same as Postgres: standard-conforming, so backslash is literal.
+        format!("'{}'", s.replace('\'', "''"))
+    }
+
+    fn page(&self, sql: &str, limit: i64, offset: i64) -> String {
+        format!("{sql} LIMIT {} OFFSET {}", limit.max(0), offset.max(0))
+    }
+
+    fn case_insensitive_contains(&self, col: &str, needle: &str) -> String {
+        format!(
+            "{} ILIKE {} ESCAPE '\\'",
+            self.cast_to_text(col),
+            self.quote_string(&format!("%{}%", escape_like_pattern(needle)))
+        )
+    }
+
+    fn case_insensitive_starts_with(&self, col: &str, needle: &str) -> String {
+        format!(
+            "{} ILIKE {} ESCAPE '\\'",
+            self.cast_to_text(col),
+            self.quote_string(&format!("{}%", escape_like_pattern(needle)))
+        )
+    }
+
+    fn case_insensitive_ends_with(&self, col: &str, needle: &str) -> String {
+        format!(
+            "{} ILIKE {} ESCAPE '\\'",
+            self.cast_to_text(col),
+            self.quote_string(&format!("%{}", escape_like_pattern(needle)))
+        )
+    }
+
+    fn cast_to_text(&self, col: &str) -> String {
+        // DuckDB accepts `::` as well, but CAST is unambiguous — and choosing
+        // per driver is the whole point of this trait.
+        format!("CAST({col} AS VARCHAR)")
     }
 }
 
@@ -164,5 +212,58 @@ mod tests {
     #[test]
     fn cast_to_text_is_a_builder_concern_not_a_hardcoded_double_colon() {
         assert_eq!(pg().cast_to_text("\"col\""), "\"col\"::text");
+    }
+
+    use super::DuckDbSqlBuilder;
+
+    fn duck() -> DuckDbSqlBuilder {
+        DuckDbSqlBuilder
+    }
+
+    #[test]
+    fn duckdb_quotes_and_pages_like_postgres() {
+        assert_eq!(duck().quote_identifier("we\"ird"), "\"we\"\"ird\"");
+        assert_eq!(duck().quote_string("O'Brien"), "'O''Brien'");
+        assert_eq!(duck().quote_string("hello\\world"), "'hello\\world'");
+        assert_eq!(
+            duck().page("SELECT * FROM t", 50, 100),
+            "SELECT * FROM t LIMIT 50 OFFSET 100"
+        );
+    }
+
+    #[test]
+    fn duckdb_casts_with_a_cast_call_not_a_double_colon() {
+        // DuckDB accepts `::` too, but CAST is unambiguous and is what the
+        // builder abstraction exists to let each driver choose.
+        assert_eq!(duck().cast_to_text("\"col\""), "CAST(\"col\" AS VARCHAR)");
+    }
+
+    #[test]
+    fn duckdb_contains_is_case_insensitive_and_escapes_wildcards() {
+        let sql = duck().case_insensitive_contains("\"col\"", "50%");
+        assert!(sql.contains("ILIKE"), "{sql}");
+        assert!(sql.contains("\\%"), "the % must be escaped: {sql}");
+    }
+
+    #[test]
+    fn the_registry_resolves_duckdb_to_its_own_builder() {
+        let caps = lucent_protocol::DriverCapabilities {
+            id: "duckdb".into(),
+            display_name: "DuckDB".into(),
+            sql_dialect: lucent_protocol::SqlDialect::DuckDb,
+            namespace_model: lucent_protocol::NamespaceModel::CatalogSchema,
+            readonly: lucent_protocol::ReadOnlyMode::GuardOnly,
+            statement_timeout: lucent_protocol::TimeoutSupport::Interrupt,
+            cancel: lucent_protocol::CancelMode::Interrupt,
+            paging: lucent_protocol::PagingStyle::LimitOffset,
+            identifier_quote: '"',
+            string_literal: lucent_protocol::StringLiteralStyle::StandardConforming,
+            auth: lucent_protocol::AuthModel::FilePath,
+        };
+        // Postgres's `::text` would be wrong here — proves the dispatch works.
+        assert_eq!(
+            super::for_driver(&caps).cast_to_text("\"c\""),
+            "CAST(\"c\" AS VARCHAR)"
+        );
     }
 }

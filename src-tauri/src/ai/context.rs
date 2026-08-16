@@ -57,7 +57,6 @@ pub(crate) fn enforcement_block(
 pub fn build_system_prompt(
     schema: &SchemaTree,
     graph: Option<&SchemaGraph>,
-    _send_results_to_ai: bool,
     capabilities: Option<&lucent_protocol::DriverCapabilities>,
 ) -> String {
     let mut lines: Vec<String> = vec![];
@@ -526,14 +525,15 @@ mod tests {
             columns,
             fk_edges: vec![],
             table_adjacency: HashMap::new(),
-            built_at: std::time::Instant::now(),
+            built_at_unix: 0,
+            tier: crate::ai::schema_graph::IndexingTier::MetadataOnly,
         }
     }
 
     #[test]
     fn push_tier_injects_full_column_detail_and_direct_sql_guidance() {
         let g = graph_for_prompt();
-        let p = build_system_prompt(&small(), Some(&g), false, None);
+        let p = build_system_prompt(&small(), Some(&g), None);
         assert!(
             p.contains("(status: text, examples: pending, paid)"),
             "push tier must carry the full M-Schema: {p}"
@@ -576,7 +576,8 @@ mod tests {
             columns_by_table: HashMap::new(),
             fk_edges: vec![],
             table_adjacency: HashMap::new(),
-            built_at: std::time::Instant::now(),
+            built_at_unix: 0,
+            tier: crate::ai::schema_graph::IndexingTier::MetadataOnly,
         };
         let tree = tree_from_graph("demo".into(), &graph);
         assert_eq!(tree.database_name, "demo");
@@ -590,7 +591,7 @@ mod tests {
 
     #[test]
     fn no_graph_falls_back_to_tree_rendering() {
-        let p = build_system_prompt(&small(), None, false, None);
+        let p = build_system_prompt(&small(), None, None);
         assert!(
             p.contains("users") && p.contains("orders"),
             "without a graph the legacy tree listing still works"
@@ -604,7 +605,7 @@ mod tests {
     #[test]
     fn static_prefix_still_precedes_dynamic_content_with_graph() {
         let g = graph_for_prompt();
-        let p = build_system_prompt(&small(), Some(&g), false, None);
+        let p = build_system_prompt(&small(), Some(&g), None);
         let tools_pos = p.find("AVAILABLE TOOLS").expect("tools section");
         let schema_pos = p
             .find("# Table: public.invoices")
@@ -617,7 +618,7 @@ mod tests {
 
     #[test]
     fn small_schema_verbose_lists_names() {
-        let p = build_system_prompt(&small(), None, false, None);
+        let p = build_system_prompt(&small(), None, None);
         assert!(p.contains("users") && p.contains("orders") && p.contains("testdb"));
     }
 
@@ -636,14 +637,14 @@ mod tests {
             server_version: "PG16".into(),
             schemas,
         };
-        let p = build_system_prompt(&schema, None, false, None);
+        let p = build_system_prompt(&schema, None, None);
         assert!(p.contains("10 tables"), "each schema must show count");
         assert!(!p.contains("table_0_0"), "must NOT list individual names");
     }
 
     #[test]
     fn tools_and_rules_precede_database_structure_for_cache_friendliness() {
-        let p = build_system_prompt(&small(), None, false, None);
+        let p = build_system_prompt(&small(), None, None);
         let tools_pos = p.find("AVAILABLE TOOLS").expect("tools section present");
         let structure_pos = p
             .find("Database schema")
@@ -670,7 +671,7 @@ mod tests {
             server_version: "PG16".into(),
             schemas,
         };
-        let p = build_system_prompt(&schema, None, false, None);
+        let p = build_system_prompt(&schema, None, None);
         assert!(
             p.contains("use search_schema to find tables"),
             "compact-schema hint must point at the tool that actually exists"
@@ -683,7 +684,7 @@ mod tests {
 
     #[test]
     fn no_dead_tool_call_marker_syntax() {
-        let p = build_system_prompt(&small(), None, false, None);
+        let p = build_system_prompt(&small(), None, None);
         assert!(
             !p.contains("[TOOL_CALL]"),
             "no parser for this marker exists — teaching the model dead syntax wastes a turn"
@@ -692,7 +693,7 @@ mod tests {
 
     #[test]
     fn rules_include_complete_query_and_parallel_call_guidance() {
-        let p = build_system_prompt(&small(), None, false, None);
+        let p = build_system_prompt(&small(), None, None);
         assert!(p.contains("COMPLETE QUERIES"), "must nudge the model toward one comprehensive query over iterative single-metric queries");
         assert!(
             p.contains("PARALLEL TOOL CALLS"),
@@ -712,15 +713,15 @@ mod tests {
     #[test]
     fn send_results_flag_adds_analysis_hint() {
         // Data preview hint is always included — preview is sent regardless of flag.
-        let p = build_system_prompt(&small(), None, true, None);
+        let p = build_system_prompt(&small(), None, None);
         assert!(p.contains("Markdown table preview"));
-        let p = build_system_prompt(&small(), None, false, None);
+        let p = build_system_prompt(&small(), None, None);
         assert!(p.contains("Markdown table preview"));
     }
 
     #[test]
     fn rules_cover_ambiguous_metrics_and_ties() {
-        let p = build_system_prompt(&small(), None, false, None);
+        let p = build_system_prompt(&small(), None, None);
         assert!(
             p.contains("AMBIGUOUS METRICS"),
             "must instruct: pick one interpretation, state it, offer the alternative"
@@ -737,7 +738,7 @@ mod tests {
 
     #[test]
     fn rules_cover_join_discipline_reformat_and_schema_trust() {
-        let p = build_system_prompt(&small(), None, false, None);
+        let p = build_system_prompt(&small(), None, None);
         assert!(p.contains("JOIN DISCIPLINE"), "FK-paths-only rule missing");
         assert!(
             p.contains("TIME-VERSIONED TABLES"),
@@ -749,7 +750,7 @@ mod tests {
 
     #[test]
     fn rules_discourage_redundant_parallel_semantic_searches() {
-        let p = build_system_prompt(&small(), None, false, None);
+        let p = build_system_prompt(&small(), None, None);
         assert!(
             p.contains("ONE well-chosen search_schema call")
                 || p.contains("already expands to related tables"),

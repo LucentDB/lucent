@@ -1,5 +1,6 @@
-import { marked } from 'marked';
+import { marked, type Tokens } from 'marked';
 import DOMPurify from 'dompurify';
+import { highlightSqlHtml } from '../../utils/sql-highlight.ts';
 
 // LLM output is rendered with {@html}, and it is NOT trusted: it can echo
 // attacker-influenced data (e.g. a table cell containing markup). In a
@@ -10,9 +11,32 @@ marked.setOptions({
   gfm: true,
 });
 
+const SQL_LANGUAGES = new Set([
+  'sql',
+  'postgres',
+  'postgresql',
+  'pgsql',
+  'duckdb',
+]);
+const markdownRenderer = new marked.Renderer();
+const defaultCodeRenderer = markdownRenderer.code.bind(markdownRenderer);
+
+markdownRenderer.code = (token: Tokens.Code) => {
+  const { text, lang } = token;
+  const normalizedLanguage = (lang ?? '').trim().toLowerCase();
+  if (!SQL_LANGUAGES.has(normalizedLanguage)) {
+    return defaultCodeRenderer(token);
+  }
+
+  return `<pre><code class="language-${normalizedLanguage}">${highlightSqlHtml(text)}</code></pre>\n`;
+};
+
 export function renderMarkdown(text: string): string {
   try {
-    const result = marked.parse(String(text ?? ''), { async: false });
+    const result = marked.parse(String(text ?? ''), {
+      async: false,
+      renderer: markdownRenderer,
+    });
     const html = typeof result === 'string' ? result : String(result);
     return DOMPurify.sanitize(html);
   } catch {
