@@ -1,0 +1,72 @@
+
+> lucent@0.1.0 dev
+> vite
+
+12:36:51 AM [vite] (client) Forced re-optimization of dependencies
+
+  VITE v6.4.3  ready in 708 ms
+
+  ➜  Local:   http://localhost:1421/
+  ➜  Network: use --host to expose
+12:37:51 AM [vite-plugin-svelte] src/App.svelte:926:10 `<div>` with a mousedown handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+12:37:51 AM [vite-plugin-svelte] src/App.svelte:926:10 Self-closing HTML tags for non-void elements are ambiguous — use `<div ...></div>` rather than `<div ... />`
+https://svelte.dev/e/element_invalid_self_closing_tag
+12:37:51 AM [vite-plugin-svelte] src/App.svelte:950:14 `<div>` with a mousedown handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+12:37:51 AM [vite-plugin-svelte] src/App.svelte:1109:10 `<div>` with a mousedown handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+12:37:51 AM [vite-plugin-svelte] src/App.svelte:1109:10 Self-closing HTML tags for non-void elements are ambiguous — use `<div ...></div>` rather than `<div ... />`
+https://svelte.dev/e/element_invalid_self_closing_tag
+12:37:51 AM [vite-plugin-svelte] src/App.svelte:1160:4 Visible, non-interactive element `<div>` with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+12:37:51 AM [vite-plugin-svelte] src/App.svelte:1160:4 `<div>` with a click handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+12:37:51 AM [vite-plugin-svelte] src/App.svelte:1161:6 Visible, non-interactive element `<div>` with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+12:37:51 AM [vite-plugin-svelte] src/App.svelte:1161:6 `<div>` with a click handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+12:37:51 AM [vite-plugin-svelte] src/App.svelte:1169:2 Visible, non-interactive element `<div>` with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+12:37:51 AM [vite-plugin-svelte] src/App.svelte:1169:2 `<div>` with a click handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+12:37:51 AM [vite-plugin-svelte] src/App.svelte:1174:2 Visible, non-interactive element `<div>` with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+12:37:51 AM [vite-plugin-svelte] src/App.svelte:1174:2 `<div>` with a click handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+12:37:52 AM [vite-plugin-svelte] src/lib/components/editor/QueryEditor.svelte:120:0 Non-interactive element `<div>` should not be assigned mouse or keyboard event listeners
+https://svelte.dev/e/a11y_no_noninteractive_element_interactions
+12:37:52 AM [vite-plugin-svelte] /app/src/lib/components/grid/ResultsGrid.svelte:1:8 `context="module"` is deprecated, use the `module` attribute instead
+https://svelte.dev/e/script_context_deprecated
+12:37:52 AM [vite-plugin-svelte] src/lib/components/grid/ResultsGrid.svelte:59:49 This reference only captures the initial value of `initFilters`. Did you mean to reference it inside a derived instead?
+https://svelte.dev/e/state_referenced_locally
+12:37:52 AM [vite-plugin-svelte] src/lib/components/grid/ResultsGrid.svelte:60:39 This reference only captures the initial value of `initSortCol`. Did you mean to reference it inside a derived instead?
+https://svelte.dev/e/state_referenced_locally
+12:37:52 AM [vite-plugin-svelte] src/lib/components/grid/ResultsGrid.svelte:61:39 This reference only captures the initial value of `initSortDir`. Did you mean to reference it inside a derived instead?
+https://svelte.dev/e/state_referenced_locally
+12:37:52 AM [vite-plugin-svelte] src/lib/components/AppHeader.svelte:197:0 Visible, non-interactive element `<div>` with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+12:37:52 AM [vite-plugin-svelte] src/lib/components/AppHeader.svelte:45:6 `tabsEl` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+12:37:52 AM [vite-plugin-svelte] src/lib/components/chat/ChatPanel.svelte:39:6 `msgsEl` is updated, but is not declared with `$state(...)`. Changing its value will not correctly trigger updates
+https://svelte.dev/e/non_reactive_update
+12:37:52 AM [vite-plugin-svelte] src/lib/components/connection/ConnectionList.svelte:78:0 `<div>` with a keydown handler must have an ARIA role
+https://svelte.dev/e/a11y_no_static_element_interactions
+12:37:52 AM [vite-plugin-svelte] src/lib/components/connection/ConnectionForm.svelte:19:20 This reference only captures the initial value of `profile`. Did you mean to reference it inside a derived instead?
+https://svelte.dev/e/state_referenced_locally
+12:37:52 AM [vite-plugin-svelte] src/lib/components/connection/ConnectionForm.svelte:20:22 This reference only captures the initial value of `profile`. Did you mean to reference it inside a derived instead?
+https://svelte.dev/e/state_referenced_locally
+12:37:52 AM [vite-plugin-svelte] src/lib/components/connection/ConnectionForm.svelte:21:52 This reference only captures the initial value of `profile`. Did you mean to reference it inside a derived instead?
+https://svelte.dev/e/state_referenced_locally
+12:37:52 AM [vite-plugin-svelte] src/lib/components/connection/ConnectionForm.svelte:22:21 This reference only captures the initial value of `profile`. Did you mean to reference it inside a derived instead?
+https://svelte.dev/e/state_referenced_locally
+12:37:52 AM [vite-plugin-svelte] src/lib/components/connection/ConnectionForm.svelte:24:21 This reference only captures the initial value of `profile`. Did you mean to reference it inside a derived instead?
+https://svelte.dev/e/state_referenced_locally
+12:37:52 AM [vite-plugin-svelte] src/lib/components/connection/ConnectionForm.svelte:25:21 This reference only captures the initial value of `profile`. Did you mean to reference it inside a derived instead?
+https://svelte.dev/e/state_referenced_locally
+12:37:52 AM [vite-plugin-svelte] src/lib/components/notebook/cells/SqlCell.svelte:241:4 Visible, non-interactive element `<pre>` with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
+12:37:53 AM [vite-plugin-svelte] src/lib/components/notebook/AddCellButton.svelte:56:4 Elements with the 'menu' interactive role must have a tabindex value
+https://svelte.dev/e/a11y_interactive_supports_focus
+12:37:53 AM [vite-plugin-svelte] src/lib/components/notebook/MarkdownBody.svelte:39:0 Visible, non-interactive element `<div>` with a click event must be accompanied by a keyboard event handler. Consider whether an interactive element such as `<button type="button">` or `<a>` might be more appropriate
+https://svelte.dev/e/a11y_click_events_have_key_events
