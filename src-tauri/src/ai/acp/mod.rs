@@ -223,10 +223,8 @@ impl AcpState {
                 bridge_bin, endpoint, token
             );
             if std::fs::write(&script_path, script).is_ok() {
-                let _ = std::fs::set_permissions(
-                    &script_path,
-                    std::fs::Permissions::from_mode(0o755),
-                );
+                let _ =
+                    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755));
             }
         }
         #[cfg(windows)]
@@ -342,11 +340,12 @@ type BridgeListener = tokio::net::UnixListener;
 #[cfg(windows)]
 type BridgeListener = tokio::net::windows::named_pipe::NamedPipeServer;
 
-/// Socket placement mirrors `supervisor.rs::endpoint_for` exactly: tempdir
-/// + `bridge.sock` on Unix (deep/corporate home paths hit macOS's 104-byte
-/// `sun_path` limit — never `~/.lucent`), `\\.\pipe\lucent-acp-<pid>-<token8>`
-/// on Windows. The returned `TempDir` must stay alive for the bridge
-/// connection's lifetime (`SessionEntry._endpoint_dir` holds it).
+/// Socket placement mirrors `supervisor.rs::endpoint_for` exactly: a tempdir
+/// holding `bridge.sock` on Unix (deep/corporate home paths hit macOS's
+/// 104-byte `sun_path` limit — never `~/.lucent`), or
+/// `\\.\pipe\lucent-acp-<pid>-<token8>` on Windows. The returned `TempDir`
+/// must stay alive for the bridge connection's lifetime
+/// (`SessionEntry._endpoint_dir` holds it).
 fn create_bridge_endpoint(token: &str) -> (BridgeListener, String, Option<tempfile::TempDir>) {
     #[cfg(unix)]
     {

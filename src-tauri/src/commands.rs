@@ -1801,7 +1801,10 @@ pub fn table_base_sql(
         .map(|s| builder.quote_identifier(s))
         .collect::<Vec<_>>()
         .join(".");
-    format!("SELECT * FROM {qualified}.{}", builder.quote_identifier(name))
+    format!(
+        "SELECT * FROM {qualified}.{}",
+        builder.quote_identifier(name)
+    )
 }
 
 #[tauri::command]
@@ -2685,7 +2688,9 @@ where
     let pending = take_pending_dml(handle).await?;
     let sql = pending.sql.clone();
     let rows_affected = execute(sql.clone()).await?;
-    let _ = pending.tx.send(Ok(crate::ai::acp::bridge::DmlOutcome { rows_affected }));
+    let _ = pending
+        .tx
+        .send(Ok(crate::ai::acp::bridge::DmlOutcome { rows_affected }));
     Ok((rows_affected, sql))
 }
 
@@ -3303,7 +3308,9 @@ mod acp_driver_branch_tests {
         let driver: Box<dyn AgentDriver> =
             pick_driver(&acp, None, Vec::new(), tool_ctx(), AcpState::new());
         assert!(
-            driver.as_any().is::<crate::ai::acp::driver::AcpChatDriver>(),
+            driver
+                .as_any()
+                .is::<crate::ai::acp::driver::AcpChatDriver>(),
             "acp configured → AcpChatDriver"
         );
     }
@@ -3333,9 +3340,7 @@ mod acp_dml_branch_tests {
     use crate::ai::acp::bridge::{BridgeHandle, PendingDml};
     use crate::ai::acp::permissions::PermissionPending;
     use crate::ai::acp::SessionEntry;
-    use agent_client_protocol::schema::v1::{
-        PermissionOptionId, RequestPermissionOutcome,
-    };
+    use agent_client_protocol::schema::v1::{PermissionOptionId, RequestPermissionOutcome};
 
     #[tokio::test]
     async fn execute_dml_acp_branch_resolves_bridge_oneshot() {
@@ -3408,7 +3413,12 @@ mod acp_dml_branch_tests {
             tools_notice: std::sync::atomic::AtomicBool::new(false),
             _endpoint_dir: None,
         });
-        state.acp.sessions.lock().await.insert("conv-1".into(), entry);
+        state
+            .acp
+            .sessions
+            .lock()
+            .await
+            .insert("conv-1".into(), entry);
 
         let sid = resolve_permission_session(&state, "conv-1")
             .await

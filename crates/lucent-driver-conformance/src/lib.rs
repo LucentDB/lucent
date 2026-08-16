@@ -72,17 +72,17 @@ async fn collect<C: Connector>(
 }
 
 /// Run every conformance check. An empty result means the driver conforms.
-pub async fn run_all<C: Connector>(
-    connector: &C,
-    cid: ConnectionId,
-) -> Vec<ConformanceFailure> {
+pub async fn run_all<C: Connector>(connector: &C, cid: ConnectionId) -> Vec<ConformanceFailure> {
     let mut failures = Vec::new();
 
     // 1. A trivial query returns exactly one row and one final batch.
     match collect(connector, cid, "SELECT 1").await {
         Ok((rows, _, saw_final)) => {
             if rows.len() != 1 {
-                failures.push(fail("trivial_query", format!("expected 1 row, got {}", rows.len())));
+                failures.push(fail(
+                    "trivial_query",
+                    format!("expected 1 row, got {}", rows.len()),
+                ));
             }
             if !saw_final {
                 failures.push(fail(
@@ -95,7 +95,13 @@ pub async fn run_all<C: Connector>(
     }
 
     // 2. An empty result still terminates.
-    match collect(connector, cid, "SELECT id FROM conformance_parent WHERE id < 0").await {
+    match collect(
+        connector,
+        cid,
+        "SELECT id FROM conformance_parent WHERE id < 0",
+    )
+    .await
+    {
         Ok((rows, _, saw_final)) => {
             if !rows.is_empty() {
                 failures.push(fail("empty_result", "expected no rows"));
@@ -175,11 +181,13 @@ pub async fn run_all<C: Connector>(
                 )),
                 None => failures.push(fail("list_objects", "conformance_parent not listed")),
             }
-            if !objects
-                .iter()
-                .any(|o| o.reference.name == "conformance_view" && o.reference.kind == ObjectKind::View)
-            {
-                failures.push(fail("list_objects", "conformance_view not listed as a view"));
+            if !objects.iter().any(|o| {
+                o.reference.name == "conformance_view" && o.reference.kind == ObjectKind::View
+            }) {
+                failures.push(fail(
+                    "list_objects",
+                    "conformance_view not listed as a view",
+                ));
             }
             parent.map(|o| o.reference.clone())
         }
@@ -196,7 +204,12 @@ pub async fn run_all<C: Connector>(
     // 8. Catalog: columns, ordinals, nullability, primary keys.
     if let Some(reference) = parent_ref {
         match connector
-            .catalog(cid, CatalogRequest::DescribeObjects { refs: vec![reference] })
+            .catalog(
+                cid,
+                CatalogRequest::DescribeObjects {
+                    refs: vec![reference],
+                },
+            )
             .await
         {
             Ok(CatalogResult::ObjectDetails(details)) => {
@@ -208,7 +221,9 @@ pub async fn run_all<C: Connector>(
                 let label = detail.columns.iter().find(|c| c.name == "label");
                 match id {
                     Some(c) if c.is_primary_key => {}
-                    Some(_) => failures.push(fail("describe_objects", "id is not flagged primary key")),
+                    Some(_) => {
+                        failures.push(fail("describe_objects", "id is not flagged primary key"))
+                    }
                     None => failures.push(fail("describe_objects", "id column missing")),
                 }
                 match label {
@@ -229,13 +244,19 @@ pub async fn run_all<C: Connector>(
                     ));
                 }
             }
-            Ok(other) => failures.push(fail("describe_objects", format!("wrong variant: {other:?}"))),
+            Ok(other) => failures.push(fail(
+                "describe_objects",
+                format!("wrong variant: {other:?}"),
+            )),
             Err(e) => failures.push(fail("describe_objects", e.to_string())),
         }
     }
 
     // 9. Catalog: the seeded foreign key is discoverable.
-    match connector.catalog(cid, CatalogRequest::ListForeignKeys).await {
+    match connector
+        .catalog(cid, CatalogRequest::ListForeignKeys)
+        .await
+    {
         Ok(CatalogResult::ForeignKeys(fks)) => {
             if !fks.iter().any(|f| {
                 f.from.table == "conformance_child"
@@ -243,10 +264,16 @@ pub async fn run_all<C: Connector>(
                     && f.to.table == "conformance_parent"
                     && f.to.column == "id"
             }) {
-                failures.push(fail("list_foreign_keys", format!("FK not found in {fks:?}")));
+                failures.push(fail(
+                    "list_foreign_keys",
+                    format!("FK not found in {fks:?}"),
+                ));
             }
         }
-        Ok(other) => failures.push(fail("list_foreign_keys", format!("wrong variant: {other:?}"))),
+        Ok(other) => failures.push(fail(
+            "list_foreign_keys",
+            format!("wrong variant: {other:?}"),
+        )),
         Err(e) => failures.push(fail("list_foreign_keys", e.to_string())),
     }
 
@@ -256,7 +283,10 @@ pub async fn run_all<C: Connector>(
         .await
         .is_err()
     {
-        failures.push(fail("stale_cancel", "cancelling an unknown query must not error"));
+        failures.push(fail(
+            "stale_cancel",
+            "cancelling an unknown query must not error",
+        ));
     }
 
     failures

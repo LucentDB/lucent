@@ -72,9 +72,7 @@
     } catch (e) {
       if (generation === catalogGeneration) {
         error =
-          typeof e === 'string'
-            ? e
-            : (e.message ?? 'Failed to load databases');
+          typeof e === 'string' ? e : (e.message ?? 'Failed to load databases');
       }
     } finally {
       if (generation === catalogGeneration) loading = false;
@@ -203,7 +201,12 @@
 
   function handleObjectClick(schema, obj) {
     activeObject = `${schema.name}.${obj.name}`;
-    onObjectClick({ schema: schema.name, path: schema.path, name: obj.name, kind: obj.kind });
+    onObjectClick({
+      schema: schema.name,
+      path: schema.path,
+      name: obj.name,
+      kind: obj.kind,
+    });
   }
 
   function formatCount(n) {
@@ -280,9 +283,7 @@
               onclick={() => switchConnection(p.id)}
             >
               <span class="switcher-item-name">{p.name}</span>
-              <span class="switcher-item-host"
-                >{connectionEndpoint(p)}</span
-              >
+              <span class="switcher-item-host">{connectionEndpoint(p)}</span>
             </button>
           {/each}
           {#if connections.status === 'connected'}

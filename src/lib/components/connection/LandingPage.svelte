@@ -102,9 +102,25 @@
   <div class="manager-header">
     <div class="brand">
       <div class="logo-container">
-        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="url(#logo-gradient)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="logo-svg">
+        <svg
+          width="36"
+          height="36"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="url(#logo-gradient)"
+          stroke-width="1.8"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          class="logo-svg"
+        >
           <defs>
-            <linearGradient id="logo-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+            <linearGradient
+              id="logo-gradient"
+              x1="0%"
+              y1="0%"
+              x2="100%"
+              y2="100%"
+            >
               <stop offset="0%" stop-color="var(--accent)" />
               <stop offset="100%" stop-color="#a78bfa" />
             </linearGradient>
@@ -270,7 +286,9 @@
     flex-shrink: 0;
   }
   .logo-svg {
-    filter: drop-shadow(0 2px 4px color-mix(in srgb, var(--accent) 30%, transparent));
+    filter: drop-shadow(
+      0 2px 4px color-mix(in srgb, var(--accent) 30%, transparent)
+    );
   }
   .title {
     font-size: 30px;
@@ -326,8 +344,7 @@
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
-    transition:
-      all var(--transition-normal);
+    transition: all var(--transition-normal);
     box-shadow: var(--shadow-sm);
   }
   .back-btn:hover {
@@ -351,8 +368,14 @@
     animation: slide-in 0.2s ease-out;
   }
   @keyframes slide-in {
-    from { opacity: 0; transform: translateY(-4px); }
-    to { opacity: 1; transform: translateY(0); }
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
   .dismiss-btn {
     width: 24px;
@@ -416,8 +439,9 @@
     border-radius: 5px;
     border: 1px solid var(--border);
     font-family: var(--font-mono);
-    box-shadow: 0 1px 0 var(--border), 0 1px 2px rgba(0,0,0,0.05);
+    box-shadow:
+      0 1px 0 var(--border),
+      0 1px 2px rgba(0, 0, 0, 0.05);
     margin: 0 1px;
   }
 </style>
-

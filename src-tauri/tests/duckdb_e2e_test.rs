@@ -27,10 +27,8 @@ fn warm_up_worker_binary() {
             let Some(binary) = worker_binary_path() else {
                 return; // Let the supervisor report the real resolution error.
             };
-            let dir = std::env::temp_dir().join(format!(
-                "lucent-duckdb-warmup-{}",
-                std::process::id()
-            ));
+            let dir =
+                std::env::temp_dir().join(format!("lucent-duckdb-warmup-{}", std::process::id()));
             std::fs::create_dir_all(&dir).ok();
             let socket = dir.join("warmup.sock");
             let mut child = match Command::new(&binary)
@@ -111,7 +109,10 @@ async fn the_duckdb_worker_binary_answers_queries_and_catalog_requests() {
         .await
         .expect("insert");
 
-    let result = client.execute(cid, "SELECT id, name FROM t ORDER BY id").await.unwrap();
+    let result = client
+        .execute(cid, "SELECT id, name FROM t ORDER BY id")
+        .await
+        .unwrap();
     assert_eq!(result.row_count, 2);
     // Typed all the way through Plan A's JSON mapping: an integer, not a string.
     assert_eq!(result.rows[0][0], serde_json::json!(1));
@@ -124,14 +125,20 @@ async fn the_duckdb_worker_binary_answers_queries_and_catalog_requests() {
         .list_all_objects(cid, vec![ObjectKind::Table])
         .await
         .expect("objects");
-    let t = objects.iter().find(|o| o.reference.name == "t").expect("table t");
+    let t = objects
+        .iter()
+        .find(|o| o.reference.name == "t")
+        .expect("table t");
 
     let details = client
         .describe_objects(cid, vec![t.reference.clone()])
         .await
         .expect("describe");
     assert_eq!(details[0].columns.len(), 2);
-    assert!(details[0].columns.iter().any(|c| c.name == "id" && c.is_primary_key));
+    assert!(details[0]
+        .columns
+        .iter()
+        .any(|c| c.name == "id" && c.is_primary_key));
 
     supervisor.shutdown().await.ok();
 }

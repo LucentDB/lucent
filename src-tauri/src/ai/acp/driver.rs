@@ -193,22 +193,17 @@ impl AcpChatDriver {
 
         // The stub emits every notification before the prompt response, so
         // anything still buffered belongs before `Done`.
-        loop {
-            match events_rx.try_recv() {
-                Ok(ev) => {
-                    self.dispatch_event(
-                        ev,
-                        &session.session_id,
-                        &session_key,
-                        &mut text_buf,
-                        &mut usage,
-                        &mut tool_names,
-                        &sink,
-                    )
-                    .await;
-                }
-                Err(_) => break,
-            }
+        while let Ok(ev) = events_rx.try_recv() {
+            self.dispatch_event(
+                ev,
+                &session.session_id,
+                &session_key,
+                &mut text_buf,
+                &mut usage,
+                &mut tool_names,
+                &sink,
+            )
+            .await;
         }
 
         let outcome = reply.map_err(|e| {
@@ -245,6 +240,7 @@ impl AcpChatDriver {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)] // private fan-out helper; grouping would obscure the call sites
     async fn dispatch_event(
         &self,
         ev: AgentEvent,

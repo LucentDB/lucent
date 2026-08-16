@@ -321,14 +321,16 @@
       background var(--transition-fast),
       transform var(--transition-fast),
       box-shadow var(--transition-fast);
-    box-shadow: 0 1px 3px color-mix(in srgb, var(--accent) 40%, transparent),
-                0 4px 12px color-mix(in srgb, var(--accent) 20%, transparent);
+    box-shadow:
+      0 1px 3px color-mix(in srgb, var(--accent) 40%, transparent),
+      0 4px 12px color-mix(in srgb, var(--accent) 20%, transparent);
   }
   .new-btn:hover {
     background: var(--accent-hover);
     transform: translateY(-1px);
-    box-shadow: 0 2px 6px color-mix(in srgb, var(--accent) 50%, transparent),
-                0 6px 16px color-mix(in srgb, var(--accent) 25%, transparent);
+    box-shadow:
+      0 2px 6px color-mix(in srgb, var(--accent) 50%, transparent),
+      0 6px 16px color-mix(in srgb, var(--accent) 25%, transparent);
   }
   .new-btn:active {
     transform: translateY(0);
@@ -354,7 +356,9 @@
     animation: spin 0.65s linear infinite;
   }
   @keyframes spin {
-    to { transform: rotate(360deg); }
+    to {
+      transform: rotate(360deg);
+    }
   }
   .empty-state {
     display: flex;

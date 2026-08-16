@@ -2,7 +2,11 @@ import { syntaxTree } from '@codemirror/language';
 import type { EditorState, Text } from '@codemirror/state';
 import { schemaCompletionSource } from '@codemirror/lang-sql';
 import type { SQLDialect } from '@codemirror/lang-sql';
-import type { Completion, CompletionContext, CompletionSource } from '@codemirror/autocomplete';
+import type {
+  Completion,
+  CompletionContext,
+  CompletionSource,
+} from '@codemirror/autocomplete';
 import { classifyClause, type SqlClause } from './sql-clause';
 
 export interface TableRef {
@@ -14,10 +18,31 @@ export interface TableRef {
 
 /** Clause keywords that terminate the FROM/JOIN table list. */
 const END_CLAUSE = new Set([
-  'where', 'group', 'having', 'order', 'limit', 'offset', 'union',
-  'intersect', 'except', 'using', 'set', 'values', 'returning', 'fetch', 'for',
+  'where',
+  'group',
+  'having',
+  'order',
+  'limit',
+  'offset',
+  'union',
+  'intersect',
+  'except',
+  'using',
+  'set',
+  'values',
+  'returning',
+  'fetch',
+  'for',
 ]);
-const JOIN_KEYWORDS = new Set(['join', 'inner', 'left', 'right', 'full', 'cross', 'natural']);
+const JOIN_KEYWORDS = new Set([
+  'join',
+  'inner',
+  'left',
+  'right',
+  'full',
+  'cross',
+  'natural',
+]);
 
 function idText(doc: Text, node: { from: number; to: number }): string {
   return doc.sliceString(node.from, node.to);
@@ -78,7 +103,9 @@ export function tablesInScope(state: EditorState, at: number): TableRef[] {
   for (let child = stmt.firstChild; child; child = child.nextSibling) {
     const name = child.name;
     const kw =
-      name === 'Keyword' ? doc.sliceString(child.from, child.to).toLowerCase() : null;
+      name === 'Keyword'
+        ? doc.sliceString(child.from, child.to).toLowerCase()
+        : null;
 
     if (kw) {
       if (!sawFrom && kw === 'from') {
@@ -139,8 +166,15 @@ export function tablesInScope(state: EditorState, at: number): TableRef[] {
 
 /** Clauses where bare column names are valid expression positions. */
 const COLUMN_CLAUSES: ReadonlySet<SqlClause> = new Set([
-  'select', 'where', 'having', 'on', 'order-by', 'group-by',
-  'case', 'case-when', 'case-else',
+  'select',
+  'where',
+  'having',
+  'on',
+  'order-by',
+  'group-by',
+  'case',
+  'case-when',
+  'case-else',
 ]);
 
 interface ResolvedColumn {
@@ -205,7 +239,8 @@ export function schemaColumnSource(options: {
     const seen = new Set<string>();
     const columnOptions: Completion[] = [];
     for (const r of resolved) {
-      const label = counts.get(r.name)! > 1 ? `${r.tableLabel}.${r.name}` : r.name;
+      const label =
+        counts.get(r.name)! > 1 ? `${r.tableLabel}.${r.name}` : r.name;
       if (seen.has(label)) continue;
       seen.add(label);
       columnOptions.push({ label, type: 'property', boost: 5 });

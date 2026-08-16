@@ -1,8 +1,8 @@
 pub mod ai;
 pub mod client;
 mod commands;
-pub use commands::probe_connection;
 pub use commands::namespaces_to_schema_info;
+pub use commands::probe_connection;
 pub mod dialect;
 pub mod drivers;
 pub use commands::AppState;

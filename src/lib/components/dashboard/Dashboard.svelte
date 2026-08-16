@@ -78,9 +78,20 @@
     <div class="metrics-row">
       <div class="metric-card">
         <div class="metric-icon-wrap">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
             <circle cx="12" cy="12" r="3" />
-            <path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14" />
+            <path
+              d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"
+            />
           </svg>
         </div>
         <div class="metric-body">
@@ -91,7 +102,16 @@
 
       <div class="metric-card">
         <div class="metric-icon-wrap">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
             <ellipse cx="12" cy="5" rx="9" ry="3" />
             <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
             <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
@@ -105,7 +125,16 @@
 
       <div class="metric-card">
         <div class="metric-icon-wrap">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
             <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
           </svg>
         </div>
@@ -117,7 +146,16 @@
 
       <div class="metric-card">
         <div class="metric-icon-wrap">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
             <circle cx="12" cy="12" r="10" />
             <polyline points="12 6 12 12 16 14" />
           </svg>
@@ -133,7 +171,20 @@
       <div class="panel">
         <div class="panel-header">
           <h3>Slowest queries</h3>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="panel-icon"><line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" /></svg>
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class="panel-icon"
+            ><line x1="5" y1="12" x2="19" y2="12" /><polyline
+              points="12 5 19 12 12 19"
+            /></svg
+          >
         </div>
         {#if metrics.slowQueries.length === 0}
           <div class="panel-empty">No slow queries detected</div>
@@ -157,7 +208,18 @@
         <div class="table-list">
           {#each metrics.tables as t}
             <div class="table-item">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="table-icon"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/></svg>
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                class="table-icon"
+                ><rect x="3" y="3" width="18" height="18" rx="2" /><path
+                  d="M3 9h18M3 15h18M9 3v18"
+                /></svg
+              >
               <span class="table-name">{t[0]}</span>
               <span class="table-rows">{formatCount(t[1])} rows</span>
             </div>
@@ -168,15 +230,57 @@
 
     <div class="actions-row">
       <button class="action-btn primary" onclick={onNewQuery}>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/></svg>
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          ><polyline points="16 3 21 3 21 8" /><line
+            x1="4"
+            y1="20"
+            x2="21"
+            y2="3"
+          /></svg
+        >
         New Query
       </button>
       <button class="action-btn" onclick={loadMetrics}>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          ><polyline points="23 4 23 10 17 10" /><path
+            d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"
+          /></svg
+        >
         Refresh
       </button>
       <button class="action-btn danger" onclick={onDisconnect}>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          ><line x1="18" y1="6" x2="6" y2="18" /><line
+            x1="6"
+            y1="6"
+            x2="18"
+            y2="18"
+          /></svg
+        >
         Disconnect
       </button>
     </div>
@@ -451,8 +555,7 @@
     font-size: var(--text-base);
     font-weight: var(--weight-medium);
     cursor: pointer;
-    transition:
-      all var(--transition-fast);
+    transition: all var(--transition-fast);
     box-shadow: var(--shadow-sm);
   }
   .action-btn:hover {
@@ -464,8 +567,9 @@
     background: var(--accent);
     color: #fff;
     border-color: transparent;
-    box-shadow: 0 1px 3px color-mix(in srgb, var(--accent) 40%, transparent),
-                0 4px 12px color-mix(in srgb, var(--accent) 20%, transparent);
+    box-shadow:
+      0 1px 3px color-mix(in srgb, var(--accent) 40%, transparent),
+      0 4px 12px color-mix(in srgb, var(--accent) 20%, transparent);
   }
   .action-btn.primary:hover {
     background: var(--accent-hover);

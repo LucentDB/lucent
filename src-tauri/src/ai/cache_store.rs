@@ -311,7 +311,10 @@ mod tests {
             }])
             .await
             .unwrap();
-        let got = cache.get_embeddings(&[hash.clone()]).await.unwrap();
+        let got = cache
+            .get_embeddings(std::slice::from_ref(&hash))
+            .await
+            .unwrap();
         assert_eq!(got[&hash], vec![1.0, 2.0, 3.0]);
         // Missing hash returns nothing.
         let miss = PersistentVectorCache::compute_doc_hash("nope");

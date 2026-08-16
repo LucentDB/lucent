@@ -247,7 +247,9 @@ fn describe_objects(
                         schema.to_string(),
                         reference.name.clone(),
                         name.clone(),
-                    )) || pk_columns.iter().any(|(_, t, c)| t == &reference.name && c == &name),
+                    )) || pk_columns
+                        .iter()
+                        .any(|(_, t, c)| t == &reference.name && c == &name),
                     foreign_key: fk_index
                         .get(&(reference.name.clone(), name.clone()))
                         .map(|f| ForeignKeyTarget {

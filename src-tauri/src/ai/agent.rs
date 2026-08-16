@@ -538,7 +538,6 @@ impl DatabaseAgent {
     /// Uses Rig's native tool framework. After tool execution, pushes a follow-up
     /// user message to prompt the model's response, so the API never receives
     /// tool results without a subsequent user turn.
-
     pub async fn chat(
         &self,
         message: String,

@@ -2,8 +2,6 @@
 
 mod common;
 
-
-
 #[tokio::test]
 async fn postgres_conforms() {
     let (container, connector, cid) = common::seeded().await;

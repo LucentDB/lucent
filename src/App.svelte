@@ -437,7 +437,8 @@
       // Key AI conversations by the profile id when there is one (a DuckDB
       // profile has no host:port/database to form the legacy key from).
       activeConnectionId =
-        connections.activeProfileId ?? `${cfg.host}:${cfg.port}/${cfg.database}`;
+        connections.activeProfileId ??
+        `${cfg.host}:${cfg.port}/${cfg.database}`;
       view = 'dashboard';
     } catch (e) {
       connectError = formatError(e);

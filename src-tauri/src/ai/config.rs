@@ -250,14 +250,16 @@ mod tests {
 
     #[test]
     fn acp_config_round_trips() {
-        let mut cfg = AiConfig::default();
-        cfg.provider = AiProvider::Acp;
-        cfg.acp = Some(AcpAgentConfig {
-            agent_id: "opencode".into(),
-            command: None,
-            env: Default::default(),
-            auto_deny_permissions: false,
-        });
+        let cfg = AiConfig {
+            provider: AiProvider::Acp,
+            acp: Some(AcpAgentConfig {
+                agent_id: "opencode".into(),
+                command: None,
+                env: Default::default(),
+                auto_deny_permissions: false,
+            }),
+            ..AiConfig::default()
+        };
         let json = serde_json::to_string(&cfg).unwrap();
         let parsed: AiConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.acp.unwrap().agent_id, "opencode");

@@ -298,7 +298,8 @@
     padding: 4px 10px 4px 8px;
     border-radius: 99px;
     line-height: 1.2;
-    border: 1px solid color-mix(in srgb, var(--success, #10b981) 30%, transparent);
+    border: 1px solid
+      color-mix(in srgb, var(--success, #10b981) 30%, transparent);
     z-index: 2;
   }
 
@@ -312,8 +313,17 @@
   }
 
   @keyframes pulse-connected {
-    0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 8px 1px var(--success, #10b981); }
-    50% { opacity: 0.5; transform: scale(0.85); box-shadow: 0 0 3px 0 var(--success, #10b981); }
+    0%,
+    100% {
+      opacity: 1;
+      transform: scale(1);
+      box-shadow: 0 0 8px 1px var(--success, #10b981);
+    }
+    50% {
+      opacity: 0.5;
+      transform: scale(0.85);
+      box-shadow: 0 0 3px 0 var(--success, #10b981);
+    }
   }
 
   .card-details {
@@ -362,7 +372,9 @@
   }
 
   @keyframes spin {
-    to { transform: rotate(360deg); }
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .card-actions {

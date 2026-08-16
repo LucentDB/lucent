@@ -8,7 +8,10 @@ async fn duckdb_conforms() {
     let connector = DuckDbConnector::default();
     let cid = ConnectionId(Uuid::new_v4());
     connector
-        .connect(cid, ConnectionConfig::new("duckdb").with("path", ":memory:"))
+        .connect(
+            cid,
+            ConnectionConfig::new("duckdb").with("path", ":memory:"),
+        )
         .await
         .expect("connect");
 
@@ -29,5 +32,8 @@ async fn duckdb_conforms() {
     tokio::join!(exec, drain);
 
     let failures = lucent_driver_conformance::run_all(&connector, cid).await;
-    assert!(failures.is_empty(), "DuckDB conformance failures: {failures:#?}");
+    assert!(
+        failures.is_empty(),
+        "DuckDB conformance failures: {failures:#?}"
+    );
 }

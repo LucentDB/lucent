@@ -417,8 +417,10 @@ mod tests {
         let slot: Arc<Mutex<Option<SchemaGraph>>> = Arc::new(Mutex::new(Some(graph.clone())));
         let current_connection_id: Arc<Mutex<Option<ConnectionId>>> = Arc::new(Mutex::new(None));
         let embedder_slot: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(None));
-        let mut config = AiConfig::default();
-        config.sample_column_values = false; // no DB work in this test
+        let config = AiConfig {
+            sample_column_values: false, // no DB work in this test
+            ..AiConfig::default()
+        };
 
         let started_id = ConnectionId(Uuid::new_v4());
         *current_connection_id.lock().await = Some(started_id);
@@ -447,16 +449,17 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let progress = sink.progress.lock().unwrap();
-        assert!(
-            progress.iter().any(|p| p.is_complete),
-            "terminal event emitted"
-        );
-        assert!(
-            calls.load(Ordering::SeqCst) >= 1,
-            "cold cache embedded the columns"
-        );
-        drop(progress);
+        {
+            let progress = sink.progress.lock().unwrap();
+            assert!(
+                progress.iter().any(|p| p.is_complete),
+                "terminal event emitted"
+            );
+            assert!(
+                calls.load(Ordering::SeqCst) >= 1,
+                "cold cache embedded the columns"
+            );
+        }
 
         // The completed task removes its own map entry; a finished run leaves
         // no stale AbortHandle behind.
@@ -491,8 +494,10 @@ mod tests {
         let slot: Arc<Mutex<Option<SchemaGraph>>> = Arc::new(Mutex::new(Some(graph.clone())));
         let current_connection_id: Arc<Mutex<Option<ConnectionId>>> = Arc::new(Mutex::new(None));
         let embedder_slot: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(None));
-        let mut config = AiConfig::default();
-        config.sample_column_values = false;
+        let config = AiConfig {
+            sample_column_values: false,
+            ..AiConfig::default()
+        };
 
         let stale_id = ConnectionId(Uuid::new_v4());
         *current_connection_id.lock().await = Some(stale_id);

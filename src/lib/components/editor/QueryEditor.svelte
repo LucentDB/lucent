@@ -40,11 +40,7 @@
       color: 'var(--syn-type)',
     },
     {
-      tag: [
-        tags.string,
-        tags.character,
-        tags.special(tags.string),
-      ],
+      tag: [tags.string, tags.character, tags.special(tags.string)],
       color: 'var(--syn-string)',
     },
     {

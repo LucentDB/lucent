@@ -122,10 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         wire::write_request(&mut sock_w, &fwd).await?;
         match wire::read_response(&mut sock_r).await? {
             Some(wire::BridgeResponse::Ok { output, .. }) => {
-                let text = output
-                    .get("text")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("");
+                let text = output.get("text").and_then(|t| t.as_str()).unwrap_or("");
                 println!("{text}");
                 return Ok(());
             }

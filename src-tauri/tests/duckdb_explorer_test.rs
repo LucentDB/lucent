@@ -48,7 +48,10 @@ async fn the_sidebar_flow_lists_tables_under_a_file_backed_duckdb_schema() {
     let (mut supervisor, client, cid, _dir) = connected_file().await;
 
     client
-        .execute(cid, "CREATE TABLE users (id BIGINT PRIMARY KEY, name VARCHAR)")
+        .execute(
+            cid,
+            "CREATE TABLE users (id BIGINT PRIMARY KEY, name VARCHAR)",
+        )
         .await
         .expect("create users");
     client
@@ -101,7 +104,10 @@ async fn the_sidebar_flow_lists_tables_under_a_file_backed_duckdb_schema() {
         .await
         .expect("describe users");
     assert_eq!(details[0].columns.len(), 2);
-    assert!(details[0].columns.iter().any(|c| c.name == "id" && c.is_primary_key));
+    assert!(details[0]
+        .columns
+        .iter()
+        .any(|c| c.name == "id" && c.is_primary_key));
 
     supervisor.shutdown().await.ok();
 }
@@ -111,7 +117,10 @@ async fn browse_sql_quotes_each_namespace_segment_the_engine_accepts_it() {
     let (mut supervisor, client, cid, _dir) = connected_file().await;
 
     client
-        .execute(cid, "CREATE TABLE users (id BIGINT PRIMARY KEY, name VARCHAR)")
+        .execute(
+            cid,
+            "CREATE TABLE users (id BIGINT PRIMARY KEY, name VARCHAR)",
+        )
         .await
         .expect("create users");
 

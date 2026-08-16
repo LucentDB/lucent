@@ -50,6 +50,13 @@ pub fn static_tool_schemas() -> Vec<ToolSchema> {
 /// after the bridge socket round-trip, so the response carries a `_pending`
 /// marker when the tool exists). Everything else is answered in full.
 pub fn handle_mcp_request(req: serde_json::Value, tools: &[ToolSchema]) -> serde_json::Value {
+    // Notifications (id-less requests) must not be answered (JSON-RPC §5.2):
+    // returning Null is the binary's "skip the envelope" signal. Non-object
+    // garbage is not a notification — it still gets an error envelope so the
+    // client sees the parse failure.
+    if req.get("id").is_none() && req.is_object() {
+        return serde_json::Value::Null;
+    }
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
     let params = req
@@ -71,8 +78,6 @@ pub fn handle_mcp_request(req: serde_json::Value, tools: &[ToolSchema]) -> serde
                 "serverInfo": { "name": "lucent-db-tools-mcp", "version": env!("CARGO_PKG_VERSION") },
             }))
         }
-        // Notifications have no id and must not be answered — the binary skips
-        // envelopes without an id, so this is the "no response" signal.
         "ping" => result(serde_json::json!({})),
         "logging/setLevel" => result(serde_json::json!({})),
         "resources/list" => result(serde_json::json!({ "resources": [] })),

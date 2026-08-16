@@ -21,7 +21,10 @@ async fn seeded() -> (DuckDbConnector, ConnectionId) {
     let connector = DuckDbConnector::default();
     let cid = ConnectionId(Uuid::new_v4());
     connector
-        .connect(cid, ConnectionConfig::new("duckdb").with("path", ":memory:"))
+        .connect(
+            cid,
+            ConnectionConfig::new("duckdb").with("path", ":memory:"),
+        )
         .await
         .expect("connect");
 
@@ -60,7 +63,9 @@ async fn lists_namespaces_as_catalog_and_schema_segments() {
         "expected the app schema: {displays:?}"
     );
     assert!(
-        !displays.iter().any(|d| d.contains("system") || d.contains("temp")),
+        !displays
+            .iter()
+            .any(|d| d.contains("system") || d.contains("temp")),
         "internal catalogs must not be surfaced: {displays:?}"
     );
 }
@@ -74,7 +79,10 @@ async fn lists_the_default_main_schema_when_only_it_holds_data() {
     let connector = DuckDbConnector::default();
     let cid = ConnectionId(Uuid::new_v4());
     connector
-        .connect(cid, ConnectionConfig::new("duckdb").with("path", ":memory:"))
+        .connect(
+            cid,
+            ConnectionConfig::new("duckdb").with("path", ":memory:"),
+        )
         .await
         .expect("connect");
 
@@ -107,7 +115,9 @@ async fn lists_the_default_main_schema_when_only_it_holds_data() {
         "the default main schema must be listed: {displays:?}"
     );
     assert!(
-        !displays.iter().any(|d| d.contains("system") || d.contains("temp")),
+        !displays
+            .iter()
+            .any(|d| d.contains("system") || d.contains("temp")),
         "internal catalogs must not be surfaced: {displays:?}"
     );
 }
@@ -151,7 +161,12 @@ async fn lists_objects_with_kinds_and_row_estimates() {
 async fn describes_columns_with_types_nullability_and_primary_keys() {
     let (connector, cid) = seeded().await;
     let CatalogResult::Objects(objects) = connector
-        .catalog(cid, CatalogRequest::ListAllObjects { kinds: vec![ObjectKind::Table] })
+        .catalog(
+            cid,
+            CatalogRequest::ListAllObjects {
+                kinds: vec![ObjectKind::Table],
+            },
+        )
         .await
         .unwrap()
     else {
@@ -165,7 +180,12 @@ async fn describes_columns_with_types_nullability_and_primary_keys() {
         .clone();
 
     let CatalogResult::ObjectDetails(details) = connector
-        .catalog(cid, CatalogRequest::DescribeObjects { refs: vec![users_ref] })
+        .catalog(
+            cid,
+            CatalogRequest::DescribeObjects {
+                refs: vec![users_ref],
+            },
+        )
         .await
         .expect("describe")
     else {
@@ -227,7 +247,9 @@ async fn searches_objects_and_columns_by_name() {
         panic!("expected SearchHits");
     };
 
-    assert!(hits.iter().any(|h| h.reference.name == "users" && h.column.is_none()));
+    assert!(hits
+        .iter()
+        .any(|h| h.reference.name == "users" && h.column.is_none()));
     assert!(hits
         .iter()
         .any(|h| h.reference.name == "orders" && h.column.as_deref() == Some("user_id")));
@@ -277,7 +299,12 @@ async fn a_hostile_search_term_returns_nothing_and_breaks_nothing() {
     assert!(hits.is_empty());
 
     let CatalogResult::Objects(objects) = connector
-        .catalog(cid, CatalogRequest::ListAllObjects { kinds: vec![ObjectKind::Table] })
+        .catalog(
+            cid,
+            CatalogRequest::ListAllObjects {
+                kinds: vec![ObjectKind::Table],
+            },
+        )
         .await
         .unwrap()
     else {

@@ -17,9 +17,7 @@
 {#if loading}
   <div class="acp-panel-state">Loading agents…</div>
 {:else if agents.length === 0}
-  <div class="acp-panel-state">
-    No agents available — check your connection
-  </div>
+  <div class="acp-panel-state">No agents available — check your connection</div>
 {:else}
   <ul class="acp-list">
     {#each agents as agent (agent.id)}

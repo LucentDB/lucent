@@ -440,14 +440,14 @@ mod tests {
     // ── serve-loop test infrastructure ────────────────────────────────────────
     // A scripted executor: each `call` pops the next (tool, args, result) entry
     // from the queue; exhausting the script is a test bug and panics loudly.
+    type ScriptEntry = (String, serde_json::Value, Result<ToolOutput, ToolError>);
+
     struct ScriptedExecutor {
-        script: std::sync::Mutex<
-            std::collections::VecDeque<(String, serde_json::Value, Result<ToolOutput, ToolError>)>,
-        >,
+        script: std::sync::Mutex<std::collections::VecDeque<ScriptEntry>>,
     }
 
     impl ScriptedExecutor {
-        fn new(script: Vec<(String, serde_json::Value, Result<ToolOutput, ToolError>)>) -> Self {
+        fn new(script: Vec<ScriptEntry>) -> Self {
             Self {
                 script: std::sync::Mutex::new(script.into()),
             }
@@ -548,7 +548,7 @@ mod tests {
         let mut sock = tokio::net::UnixStream::connect(&path).await.unwrap();
         wire::write_hello(&mut sock, "wrong").await.unwrap();
         drop(sock);
-        task.await.unwrap().unwrap();
+        task.abort(); // serve is a long-lived accept loop; it never returns on its own
         assert!(
             !handle.connection().is_connected(),
             "a wrong token must never mark the bridge connected"
@@ -607,7 +607,7 @@ mod tests {
             wire::BridgeResponse::Err { error, .. } => panic!("expected Ok, got Err: {error}"),
         }
         drop(reader);
-        task.await.unwrap().unwrap();
+        task.abort(); // serve is a long-lived accept loop; it never returns on its own
 
         // The sink saw the structured ToolResult (frontend grid shape: columns
         // carry `type`, not `data_type`) plus the full QueryResult.
@@ -691,12 +691,13 @@ mod tests {
             held.is_err(),
             "preview_dml must stay open until the approval resolves"
         );
-        let approvals = sink.approvals.lock().unwrap();
-        assert_eq!(approvals.len(), 1);
-        assert_eq!(approvals[0].conversation_id, "conv-1");
-        assert_eq!(approvals[0].sql, "insert into t values (1)");
-        assert_eq!(approvals[0].tables_affected, vec!["t"]);
-        drop(approvals);
+        {
+            let approvals = sink.approvals.lock().unwrap();
+            assert_eq!(approvals.len(), 1);
+            assert_eq!(approvals[0].conversation_id, "conv-1");
+            assert_eq!(approvals[0].sql, "insert into t values (1)");
+            assert_eq!(approvals[0].tables_affected, vec!["t"]);
+        }
 
         // User approves: take the slot and resolve the oneshot.
         let pending = handle
@@ -720,7 +721,7 @@ mod tests {
             wire::BridgeResponse::Err { error, .. } => panic!("expected Ok, got Err: {error}"),
         }
         drop(reader);
-        task.await.unwrap().unwrap();
+        task.abort(); // serve is a long-lived accept loop; it never returns on its own
     }
 
     #[tokio::test]
@@ -785,7 +786,7 @@ mod tests {
             wire::BridgeResponse::Ok { .. } => panic!("expected Err on rejection"),
         }
         drop(reader);
-        task.await.unwrap().unwrap();
+        task.abort(); // serve is a long-lived accept loop; it never returns on its own
     }
 
     #[tokio::test]
@@ -867,7 +868,7 @@ mod tests {
             wire::BridgeResponse::Err { error, .. } => panic!("expected Ok, got Err: {error}"),
         }
         drop(reader);
-        task.await.unwrap().unwrap();
+        task.abort(); // serve is a long-lived accept loop; it never returns on its own
     }
 
     #[tokio::test]
@@ -909,7 +910,7 @@ mod tests {
             wire::BridgeResponse::Ok { .. } => panic!("expected Err on tool failure"),
         }
         drop(reader);
-        task.await.unwrap().unwrap();
+        task.abort(); // serve is a long-lived accept loop; it never returns on its own
     }
 
     #[tokio::test]
@@ -942,7 +943,7 @@ mod tests {
         let out = client.call("echo", serde_json::json!({})).await.unwrap();
         assert_eq!(out["text"], "hello from bridge");
         drop(client);
-        serve_task.await.unwrap().unwrap();
+        serve_task.abort(); // serve is a long-lived accept loop; it never returns on its own
     }
 
     #[tokio::test]
@@ -1007,7 +1008,7 @@ mod tests {
             "wrong-token hello must not mark the bridge connected"
         );
         drop(client);
-        serve_task.await.unwrap().unwrap();
+        serve_task.abort(); // serve is a long-lived accept loop; it never returns on its own
     }
 
     #[tokio::test]
@@ -1036,6 +1037,6 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("read-only"), "err: {err}");
         drop(client);
-        serve_task.await.unwrap().unwrap();
+        serve_task.abort(); // serve is a long-lived accept loop; it never returns on its own
     }
 }

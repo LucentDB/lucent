@@ -59,16 +59,18 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
     )
     .unwrap();
 
-    let mut cfg = AiConfig::default();
-    cfg.acp = Some(AcpAgentConfig {
-        agent_id: "stub".into(),
-        command: Some(stub_binary()),
-        env: HashMap::from([(
-            "STUB_SCRIPT".into(),
-            script_path.to_string_lossy().into_owned(),
-        )]),
-        auto_deny_permissions: false,
-    });
+    let cfg = AiConfig {
+        acp: Some(AcpAgentConfig {
+            agent_id: "stub".into(),
+            command: Some(stub_binary()),
+            env: HashMap::from([(
+                "STUB_SCRIPT".into(),
+                script_path.to_string_lossy().into_owned(),
+            )]),
+            auto_deny_permissions: false,
+        }),
+        ..AiConfig::default()
+    };
 
     // Tauri mock runtime: real AppHandle + managed AppState, no windows.
     let app = tauri::test::mock_app();
@@ -94,7 +96,7 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
 
     crate::commands::run_agent_turn(
         &state,
-        &app.handle(),
+        app.handle(),
         channel,
         "conv-1".into(),
         "hi".into(),
@@ -106,11 +108,7 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
     // The exact event sequence the rig path would emit for this script
     // (Thinking + Text + Done).
     let events = received.lock().unwrap().clone();
-    assert_eq!(
-        events.len(),
-        3,
-        "Thinking + Text + Done: {events:?}"
-    );
+    assert_eq!(events.len(), 3, "Thinking + Text + Done: {events:?}");
     assert!(matches!(&events[0], AiEvent::Thinking { content } if content == "thinking…"));
     assert!(matches!(&events[1], AiEvent::Text { content } if content == "Hello"));
     match &events[2] {

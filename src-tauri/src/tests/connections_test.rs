@@ -660,7 +660,11 @@ fn the_duckdb_descriptor_asks_for_a_path_and_no_secret() {
         "a file-based driver has no password to store in the keychain"
     );
 
-    let path = d.fields.iter().find(|f| f.key == "path").expect("path field");
+    let path = d
+        .fields
+        .iter()
+        .find(|f| f.key == "path")
+        .expect("path field");
     assert!(path.required);
     assert!(
         matches!(path.kind, crate::drivers::FieldKind::Path),
@@ -762,7 +766,11 @@ fn table_base_sql_quotes_every_namespace_segment_separately() {
     // DuckDB: catalog.schema, each segment quoted SEPARATELY — quoting the
     // dotted display name as one identifier would match nothing.
     assert_eq!(
-        crate::commands::table_base_sql(duck.as_ref(), &["analytics".into(), "main".into()], "users"),
+        crate::commands::table_base_sql(
+            duck.as_ref(),
+            &["analytics".into(), "main".into()],
+            "users"
+        ),
         r#"SELECT * FROM "analytics"."main"."users""#
     );
 

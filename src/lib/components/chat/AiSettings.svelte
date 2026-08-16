@@ -89,7 +89,8 @@
       const list = await listRegistryAgents();
       agents = list ?? [];
     } catch (e) {
-      acpError = typeof e === 'string' ? e : ((e as Error)?.message ?? String(e));
+      acpError =
+        typeof e === 'string' ? e : ((e as Error)?.message ?? String(e));
     } finally {
       acpLoading = false;
     }
@@ -101,7 +102,8 @@
       await installAcpAgent(agentId);
       await refreshAgents();
     } catch (e) {
-      acpError = typeof e === 'string' ? e : ((e as Error)?.message ?? String(e));
+      acpError =
+        typeof e === 'string' ? e : ((e as Error)?.message ?? String(e));
     }
   }
 
@@ -111,7 +113,8 @@
       await uninstallAcpAgent(agentId);
       await refreshAgents();
     } catch (e) {
-      acpError = typeof e === 'string' ? e : ((e as Error)?.message ?? String(e));
+      acpError =
+        typeof e === 'string' ? e : ((e as Error)?.message ?? String(e));
     }
   }
 
@@ -296,8 +299,7 @@
                     type="button"
                     class="env-remove"
                     aria-label="Remove environment variable"
-                    onclick={() => removeEnvRow(i)}
-                    >×</button
+                    onclick={() => removeEnvRow(i)}>×</button
                   >
                 </div>
               {/each}

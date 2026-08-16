@@ -3,7 +3,9 @@ import { classifyClause } from './sql-clause.ts';
 import { buildSqlExtension } from './sql-schema-extension.ts';
 import { FIXTURE_TABLES, suggestionsAt } from './completion-probe.ts';
 
-const extension = () => [buildSqlExtension({ tables: FIXTURE_TABLES, sqlDialect: 'postgresql' })];
+const extension = () => [
+  buildSqlExtension({ tables: FIXTURE_TABLES, sqlDialect: 'postgresql' }),
+];
 
 describe('classifyClause', () => {
   it('classifies statement start and partial input', () => {
@@ -16,7 +18,9 @@ describe('classifyClause', () => {
     expect(classifyClause('select ')).toBe('select');
     expect(classifyClause('select * from ')).toBe('from');
     expect(classifyClause('select * from users where ')).toBe('where');
-    expect(classifyClause('select * from users where id = 1 and ')).toBe('where');
+    expect(classifyClause('select * from users where id = 1 and ')).toBe(
+      'where',
+    );
     expect(classifyClause('select * from users having ')).toBe('having');
     expect(classifyClause('select * from users group by ')).toBe('group-by');
     expect(classifyClause('select * from users order by ')).toBe('order-by');
@@ -28,7 +32,9 @@ describe('classifyClause', () => {
     expect(classifyClause('select case ')).toBe('case');
     expect(classifyClause('select case when x > 1 ')).toBe('case-when');
     expect(classifyClause('select case when x > 1 then ')).toBe('case-then');
-    expect(classifyClause('select case when x > 1 then 1 else ')).toBe('case-else');
+    expect(classifyClause('select case when x > 1 then 1 else ')).toBe(
+      'case-else',
+    );
     expect(classifyClause('select case when x > 1 then 1 end ')).toBe('select');
   });
 
@@ -71,7 +77,11 @@ describe('clauseKeywordSource (via buildSqlExtension)', () => {
   });
 
   it('suggests only expression keywords in WHERE', () => {
-    const got = suggestionsAt(extension(), 'select * from users where id is n', 33);
+    const got = suggestionsAt(
+      extension(),
+      'select * from users where id is n',
+      33,
+    );
     expect(got).toContain('null');
     expect(got).toContain('not');
     expect(got).not.toContain('where');
@@ -79,7 +89,11 @@ describe('clauseKeywordSource (via buildSqlExtension)', () => {
   });
 
   it('suggests when/then/else/end only inside CASE', () => {
-    const inCase = suggestionsAt(extension(), 'select case when x then 1 e', 27);
+    const inCase = suggestionsAt(
+      extension(),
+      'select case when x then 1 e',
+      27,
+    );
     expect(inCase).toContain('end');
     expect(inCase).not.toContain('where');
     const outside = suggestionsAt(extension(), 'select e', 7);

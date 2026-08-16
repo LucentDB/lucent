@@ -79,7 +79,8 @@
     const focusedIdx = keys.findIndex(
       (k) => cards[k] === document.activeElement,
     );
-    const current = focusedIdx >= 0 ? focusedIdx : Math.max(0, keys.indexOf(value));
+    const current =
+      focusedIdx >= 0 ? focusedIdx : Math.max(0, keys.indexOf(value));
 
     let next = -1;
     if (e.key === 'ArrowRight') {
@@ -216,7 +217,7 @@
   .provider-card.selected {
     border-color: var(--provider-tint);
     background: color-mix(in srgb, var(--provider-tint) 12%, var(--bg-surface));
-    box-shadow: 
+    box-shadow:
       0 4px 16px rgba(0, 0, 0, 0.08),
       inset 0 0 0 1px var(--provider-tint),
       inset 0 2px 12px color-mix(in srgb, var(--provider-tint) 20%, transparent);
@@ -267,7 +268,9 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 0 0 2px var(--bg-surface), 0 2px 6px rgba(0,0,0,0.15);
+    box-shadow:
+      0 0 0 2px var(--bg-surface),
+      0 2px 6px rgba(0, 0, 0, 0.15);
     animation: badge-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
   }
   @keyframes badge-pop {
