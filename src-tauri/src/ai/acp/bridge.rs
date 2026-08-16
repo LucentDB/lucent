@@ -496,6 +496,7 @@ mod tests {
             }
         }
 
+        #[allow(dead_code)]
         fn event_types(&self) -> Vec<&'static str> {
             use crate::ai::events::AiEvent::*;
             self.events

@@ -6,7 +6,6 @@
 
 use lucent_driver_postgres::PostgresConnector;
 use lucent_protocol::{ConnectionConfig, ConnectionId};
-use lucent_worker_host::Connector;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;

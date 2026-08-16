@@ -202,7 +202,7 @@ mod tests {
 
     #[tokio::test]
     async fn eof_yields_none() {
-        let (mut a, mut b) = duplex();
+        let (a, mut b) = duplex();
         drop(a);
         let mut reader = tokio::io::BufReader::new(&mut b);
         assert!(read_message(&mut reader).await.unwrap().is_none());
@@ -255,7 +255,7 @@ mod tests {
 
     #[tokio::test]
     async fn hello_eof_yields_none() {
-        let (mut a, mut b) = duplex();
+        let (a, mut b) = duplex();
         drop(a);
         let mut reader = tokio::io::BufReader::new(&mut b);
         assert!(read_hello(&mut reader).await.unwrap().is_none());

@@ -6,13 +6,13 @@ mod common;
 use common::seeded;
 
 use lucent_protocol::{QueryId, ReadOnlyMode, TimeoutSupport};
-use lucent_worker_host::{Connector, ExecutionEvent};
+use lucent_worker_host::ExecutionEvent;
 
 #[tokio::test]
 async fn postgres_really_supports_a_read_only_transaction() {
     let (_c, connector, cid) = seeded().await;
 
-    /// Run one statement; report whether it failed.
+    // Run one statement; report whether it failed.
     let run = |sql: &'static str| {
         let connector = &connector;
         async move {

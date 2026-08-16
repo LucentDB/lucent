@@ -122,8 +122,8 @@ mod tests {
     #[tokio::test]
     async fn respond_resolves_front_of_queue() {
         let reg = PermissionRegistry::new();
-        let (p1, mut rx1) = pending(Some("allow_once"));
-        let (p2, mut rx2) = pending(None);
+        let (p1, rx1) = pending(Some("allow_once"));
+        let (p2, rx2) = pending(None);
         reg.push("s1", p1).await;
         reg.push("s1", p2).await;
 
@@ -159,7 +159,7 @@ mod tests {
     #[tokio::test]
     async fn allow_without_allow_option_is_an_error_and_keeps_the_queue() {
         let reg = PermissionRegistry::new();
-        let (p, mut rx) = pending(None); // agent offered no allow-kind option
+        let (p, rx) = pending(None); // agent offered no allow-kind option
         reg.push("s1", p).await;
         let err = reg
             .respond("s1", true)

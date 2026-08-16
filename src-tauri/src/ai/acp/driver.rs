@@ -98,15 +98,13 @@ impl AcpChatDriver {
         // in the session sandbox workspace.
         let first_prompt = session.first_prompt.swap(false, Ordering::SeqCst);
         let prompt_text = if first_prompt {
-            let acp_tool_guidance = format!(
-                "\n\nDATABASE TOOLS IN ACP (via MCP):\n\
+            let acp_tool_guidance = "\n\nDATABASE TOOLS IN ACP (via MCP):\n\
                  You have access to Lucent's database MCP server (lucent-db-tools) providing: search_schema, get_objects_info, run_readonly_query, preview_dml.\n\
                  CRITICAL INSTRUCTIONS:\n\
                  - ALWAYS use `run_readonly_query` to query the connected database, and `search_schema` / `get_objects_info` to inspect schemas and tables.\n\
                  - NEVER attempt to inspect or open local database files (such as .duckdb, .sqlite, .db) from disk using bash or python — all database queries must go through the database tools to reach the user's active database connection.\n\
                  - If your runtime lists MCP tools, invoke `search_schema`, `get_objects_info`, `run_readonly_query`, `preview_dml` as native tool calls. If your runtime runs in a bash-only harness, invoke `./lucent-tool <tool_name> '<json_arguments>'` from your current directory.\n\
-                 Both methods execute directly against the live database through Lucent."
-            );
+                 Both methods execute directly against the live database through Lucent.".to_string();
             format!("{system_prompt}{acp_tool_guidance}\n\n{message}")
         } else {
             message
@@ -488,13 +486,11 @@ async fn wait_until(deadline: Option<tokio::time::Instant>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai::acp::install::LaunchSpec;
     use crate::ai::agent::CollectorSink;
     use agent_client_protocol::schema::v1::{
-        Content, ContentBlock, Plan, RequestPermissionOutcome, TextContent, ToolCall,
-        ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+        ContentBlock, ToolCall, ToolCallStatus, ToolCallUpdate,
     };
-    use serde_json::{json, Value};
+    use serde_json::json;
     use tempfile::tempdir;
     use tokio::sync::Mutex as AsyncMutex;
 

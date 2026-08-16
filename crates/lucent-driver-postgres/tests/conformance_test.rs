@@ -2,7 +2,7 @@
 
 mod common;
 
-use lucent_worker_host::{Connector, ExecutionEvent};
+
 
 #[tokio::test]
 async fn postgres_conforms() {

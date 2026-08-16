@@ -219,7 +219,7 @@ async fn cancel_resolves_pending_permission_then_cancels() {
     // resolution unblocks the stub, so the turn ends before the connection
     // task processes the queued Cancel command — poll briefly.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    let stderr = loop {
+    let _stderr = loop {
         let tail = acp_state
             .manager
             .processes
