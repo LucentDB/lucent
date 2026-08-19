@@ -269,9 +269,7 @@ impl AcpChatDriver {
                 session_id: sid,
                 update,
             } if sid == session_id => {
-                if let SessionUpdate::AgentMessageChunk(chunk)
-                | SessionUpdate::UserMessageChunk(chunk) = &update
-                {
+                if let SessionUpdate::AgentMessageChunk(chunk) = &update {
                     if let Some(t) = chunk_text(chunk) {
                         text_buf.push_str(&t);
                     }
@@ -369,9 +367,10 @@ pub fn map_update(update: &SessionUpdate) -> Option<AiEvent> {
     use SessionUpdate::*;
     match update {
         AgentThoughtChunk(chunk) => chunk_text(chunk).map(|t| AiEvent::Thinking { content: t }),
-        AgentMessageChunk(chunk) | UserMessageChunk(chunk) => {
-            chunk_text(chunk).map(|t| AiEvent::Text { content: t })
-        }
+        AgentMessageChunk(chunk) => chunk_text(chunk).map(|t| AiEvent::Text { content: t }),
+        // The agent's echo of the user's own message (v1) — the client already
+        // renders the user's text; it must not appear in the assistant stream.
+        UserMessageChunk(_) => None,
         ToolCall(tc) => Some(AiEvent::ToolCalls {
             tools: vec![ToolCallInfo {
                 id: tc.tool_call_id.to_string(),
@@ -1158,5 +1157,65 @@ mod tests {
             acp_state.sessions.lock().await.is_empty(),
             "the agent's sessions were evicted with the kill"
         );
+    }
+
+    #[test]
+    fn map_update_ignores_user_message_chunks() {
+        // v1: the agent echoes the user's message via `user_message_chunk` —
+        // the client already holds that text; merging it into the assistant
+        // stream would paste the user's own words into the reply (spec D9).
+        let chunk = SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
+            agent_client_protocol::schema::v1::TextContent::new("user echo"),
+        )));
+        assert_eq!(map_update(&chunk), None);
+    }
+
+    #[tokio::test]
+    async fn user_message_chunks_are_excluded_from_the_assistant_stream() {
+        let _ws = hermetic_workspace();
+        let script = script_file(json!({
+            "stopReason": "end_turn",
+            "steps": [
+                {"notify": {"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "echo of the user"}}},
+                {"notify": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "real answer"}}}
+            ]
+        }));
+        let acp_state = AcpState::new();
+        let driver = AcpChatDriver::new(
+            acp_state,
+            acp_cfg(Some(&script.path().join("script.json"))),
+            tool_ctx(),
+        );
+        let sink = Arc::new(CollectorSink(std::sync::Mutex::new(Vec::new())));
+        let conv = conversation("conv-chunk");
+
+        driver
+            .chat(
+                "hi".into(),
+                &AiConfig::default(),
+                "preamble".into(),
+                conv,
+                sink.clone(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("turn completes");
+
+        let events = sink.0.lock().unwrap().clone();
+        assert_eq!(events.len(), 2, "Text + Done only: {events:?}");
+        assert!(
+            matches!(&events[0], AiEvent::Text { content } if content == "real answer"),
+            "only the agent's own text streams: {events:?}"
+        );
+        let done = events
+            .iter()
+            .find(|e| matches!(e, AiEvent::Done { .. }))
+            .unwrap();
+        match done {
+            AiEvent::Done { final_message, .. } => {
+                assert_eq!(final_message, "real answer", "the echo never reaches text_buf");
+            }
+            _ => unreachable!(),
+        }
     }
 }
