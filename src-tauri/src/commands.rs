@@ -3499,6 +3499,7 @@ mod acp_dml_branch_tests {
             tools: Arc::new(crate::ai::acp::bridge::BridgeConnection::default()),
             first_prompt: std::sync::atomic::AtomicBool::new(false),
             tools_notice: std::sync::atomic::AtomicBool::new(false),
+            correlator: Arc::new(crate::ai::acp::correlator::CorrelatorState::default()),
             _endpoint_dir: None,
         });
         state

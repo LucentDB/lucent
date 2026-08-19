@@ -368,7 +368,10 @@ mod tests {
         let mut env = HashMap::new();
         env.insert(
             "STUB_SCRIPT".to_string(),
-            dir.path().join("script.json").to_string_lossy().into_owned(),
+            dir.path()
+                .join("script.json")
+                .to_string_lossy()
+                .into_owned(),
         );
         env
     }
@@ -615,7 +618,10 @@ mod tests {
             "the prompt is still pending when the loop serviced NewSession"
         );
 
-        let outcome = prompt_rx.await.expect("prompt eventually resolves").unwrap();
+        let outcome = prompt_rx
+            .await
+            .expect("prompt eventually resolves")
+            .unwrap();
         assert!(matches!(outcome.stop_reason, StopReason::EndTurn));
 
         shutdown(&cmds).await;

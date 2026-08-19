@@ -10,6 +10,7 @@
 //! session, subscribes to the event fan-out, and runs one prompt turn.
 
 use crate::ai::acp::connection::{AgentCommand, AgentEvent};
+use crate::ai::acp::correlator::CorrelatorState;
 use crate::ai::acp::AcpState;
 use crate::ai::agent::{AgentDriver, AgentSink, AgentState, ConversationState};
 use crate::ai::config::{AcpAgentConfig, AiConfig};
@@ -148,7 +149,7 @@ impl AcpChatDriver {
                     match ev {
                         Ok(ev) => self.dispatch_event(
                             ev, &session.session_id, &session_key,
-                            &mut text_buf, &mut usage, &mut tool_names, &sink,
+                            &mut text_buf, &mut usage, &mut tool_names, &session.correlator, &sink,
                         ).await,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             // Dropped events (slow consumer) — keep going;
@@ -204,6 +205,7 @@ impl AcpChatDriver {
                 &mut text_buf,
                 &mut usage,
                 &mut tool_names,
+                &session.correlator,
                 &sink,
             )
             .await;
@@ -249,6 +251,7 @@ impl AcpChatDriver {
         // tail). The DML-hold precondition holds while the bridge keeps
         // `preview_dml` open: the prompt does not resolve, so the claim is
         // not released until the user answers.
+        session.correlator.clear();
         conv_state.lock().await.state = AgentState::Idle;
         Ok(())
     }
@@ -262,6 +265,7 @@ impl AcpChatDriver {
         text_buf: &mut String,
         usage: &mut TokenUsage,
         tool_names: &mut HashMap<String, String>,
+        correlator: &Arc<CorrelatorState>,
         sink: &Arc<dyn AgentSink>,
     ) {
         match ev {
@@ -281,10 +285,28 @@ impl AcpChatDriver {
                     // Enrich ToolResult with the name tracked from the
                     // ToolCall (the rig path always fills it; the frontend
                     // keys cards by id, but the payload contract matches).
-                    if let AiEvent::ToolResult { id, tool, .. } = &mut event {
+                    if let AiEvent::ToolResult {
+                        id,
+                        tool,
+                        summary,
+                        output,
+                        ..
+                    } = &mut event
+                    {
                         if tool.is_empty() {
                             if let Some(name) = tool_names.get(id) {
                                 *tool = name.clone();
+                            }
+                        }
+                        // Bridge correlation (spec D3): the structured payload from the
+                        // bridge round-trip (buffered under the MCP call id) is attached to
+                        // the agent's own tool_call_id, so the UI card renders the grid.
+                        if output.is_none() {
+                            if let Some(buffered) = correlator.pop_for(tool) {
+                                if summary.is_empty() {
+                                    *summary = buffered.summary;
+                                }
+                                *output = Some(buffered.output);
                             }
                         }
                     }
@@ -504,6 +526,7 @@ async fn wait_until(deadline: Option<tokio::time::Instant>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::acp::correlator::BufferedToolResult;
     use crate::ai::agent::CollectorSink;
     use agent_client_protocol::schema::v1::{
         ContentBlock, ToolCall, ToolCallStatus, ToolCallUpdate,
@@ -1079,7 +1102,11 @@ mod tests {
         cfg.agent_id = "stub-2".into();
         cfg.env.insert(
             "STUB_SCRIPT".to_string(),
-            ok_script.path().join("script.json").to_string_lossy().into_owned(),
+            ok_script
+                .path()
+                .join("script.json")
+                .to_string_lossy()
+                .into_owned(),
         );
         let driver2 = AcpChatDriver::new(acp_state, cfg, tool_ctx());
         driver2
@@ -1213,9 +1240,101 @@ mod tests {
             .unwrap();
         match done {
             AiEvent::Done { final_message, .. } => {
-                assert_eq!(final_message, "real answer", "the echo never reaches text_buf");
+                assert_eq!(
+                    final_message, "real answer",
+                    "the echo never reaches text_buf"
+                );
             }
             _ => unreachable!(),
         }
+    }
+
+    #[tokio::test]
+    async fn bridge_tool_result_is_correlated_to_the_agent_tool_call_id() {
+        let _ws = hermetic_workspace();
+        let script = script_file(json!({
+            "stopReason": "end_turn",
+            "steps": [
+                {"notify": {"sessionUpdate": "tool_call", "toolCallId": "tc1", "title": "run_readonly_query", "rawInput": {"sql": "select 1"}}},
+                {"notify": {"sessionUpdate": "tool_call_update", "toolCallId": "tc1", "status": "completed", "content": [{"type": "content", "content": {"type": "text", "text": "1 row"}}]}}
+            ]
+        }));
+        let acp_state = AcpState::new();
+        let cfg = acp_cfg(Some(&script.path().join("script.json")));
+        let process = acp_state
+            .manager
+            .ensure_process(&cfg.agent_id, &cfg)
+            .await
+            .unwrap();
+        let sink = Arc::new(CollectorSink(std::sync::Mutex::new(Vec::new())));
+        let sink_dyn: Arc<dyn AgentSink> = sink.clone();
+        let session = acp_state
+            .session_for("conv-1", &process, &tool_ctx(), &sink_dyn)
+            .await
+            .expect("session");
+
+        // The bridge executed the call BEFORE the agent's completion update:
+        // push exactly what dispatch() would have buffered.
+        session.correlator.push(BufferedToolResult {
+            tool: "run_readonly_query".into(),
+            summary: "1 row".into(),
+            output: serde_json::json!({
+                "type": "query_result",
+                "columns": [{"name": "x", "type": "INTEGER"}],
+                "rows": [[1]],
+                "row_count": 1,
+                "sql": "select 1",
+                "execution_time_ms": 3,
+                "truncated": false
+            }),
+        });
+
+        let driver = AcpChatDriver::new(acp_state, cfg, tool_ctx());
+        let conv = conversation("conv-1");
+        driver
+            .chat(
+                "hi".into(),
+                &AiConfig::default(),
+                "preamble".into(),
+                conv,
+                sink.clone(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("turn completes");
+
+        let events = sink.0.lock().unwrap().clone();
+        let tr = events
+            .iter()
+            .find(|e| matches!(e, AiEvent::ToolResult { id, .. } if id == "tc1"))
+            .expect("correlated ToolResult under the AGENT's id");
+        match tr {
+            AiEvent::ToolResult {
+                id,
+                tool,
+                summary,
+                output,
+                ..
+            } => {
+                assert_eq!(id, "tc1");
+                assert_eq!(
+                    tool, "run_readonly_query",
+                    "name enriched from the ToolCall"
+                );
+                assert_eq!(summary, "1 row");
+                assert_eq!(
+                    output.as_ref().expect("structured output")["type"],
+                    "query_result"
+                );
+            }
+            _ => unreachable!(),
+        }
+        // The raw acp-N event never reaches the frontend sink.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AiEvent::ToolResult { id, .. } if id.starts_with("acp-"))),
+            "the bridge's raw id is buffered, never forwarded: {events:?}"
+        );
     }
 }

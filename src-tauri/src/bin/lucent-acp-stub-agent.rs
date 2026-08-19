@@ -66,6 +66,7 @@ enum Step {
     /// Terminates the process mid-turn (crash-recovery tests). The client
     /// sees stdout EOF and treats the connection as dead.
     Exit {
+        #[allow(dead_code)]
         exit: Value,
     },
     /// Answers the in-flight prompt with a JSON-RPC error (peer-level; the
@@ -290,8 +291,7 @@ fn handle_msg(
             let outcome = result.get("outcome");
             let cancelled = outcome
                 .map(|o| {
-                    o == "cancelled"
-                        || o.get("outcome").map(|i| i == "cancelled").unwrap_or(false)
+                    o == "cancelled" || o.get("outcome").map(|i| i == "cancelled").unwrap_or(false)
                 })
                 .unwrap_or(false);
             if cancelled {
@@ -343,16 +343,9 @@ fn handle_msg(
                         .unwrap_or(0);
                     eprintln!("STUB session/new mcpServers={mcp_count}");
                     if spawn_mcp && mcp_children.is_empty() {
-                        spawn_first_mcp_server(
-                            params.get("mcpServers"),
-                            mcp_children,
-                            mcp_stds,
-                        );
+                        spawn_first_mcp_server(params.get("mcpServers"), mcp_children, mcp_stds);
                     }
-                    respond(
-                        req_id,
-                        json!({ "sessionId": new_id }),
-                    );
+                    respond(req_id, json!({ "sessionId": new_id }));
                 }
                 "session/prompt" => {
                     let session_id = params

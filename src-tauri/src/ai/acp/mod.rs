@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod connection;
+pub mod correlator;
 pub mod driver;
 pub mod install;
 pub mod manager;
@@ -141,7 +142,13 @@ impl AcpState {
     /// blocked, and evict the agent's sessions. The next use restarts the
     /// process (budget permitting).
     pub async fn kill_agent(&self, agent_id: &str) {
-        let process = self.manager.processes.lock().unwrap().get(agent_id).cloned();
+        let process = self
+            .manager
+            .processes
+            .lock()
+            .unwrap()
+            .get(agent_id)
+            .cloned();
         let mut map = self.connections.lock().await;
         if let Some(entry) = map.remove(agent_id) {
             if let Some(process) = process {
@@ -193,7 +200,10 @@ impl AcpState {
         let handle = Arc::new(BridgeHandle::new(conversation_id));
         let tools = handle.connection();
         let executor: Arc<dyn ToolExecutor> = Arc::new(ContextToolExecutor::new(tool_ctx.clone()));
-        let serve_sink = sink.clone();
+        let correlator = Arc::new(crate::ai::acp::correlator::CorrelatorState::default());
+        let serve_sink: Arc<dyn AgentSink> = Arc::new(
+            crate::ai::acp::correlator::CorrelatingSink::new(sink.clone(), correlator.clone()),
+        );
         let serve_handle = handle.clone();
         let serve_token = token.clone();
         tokio::spawn(bridge::serve(
@@ -326,6 +336,7 @@ impl AcpState {
             tools,
             first_prompt: AtomicBool::new(true),
             tools_notice: AtomicBool::new(false),
+            correlator,
             _endpoint_dir: dir,
         });
         self.sessions
@@ -391,6 +402,9 @@ pub struct SessionEntry {
     /// Whether the "DB tools unavailable" notice was already emitted for
     /// this session (exactly-once per session).
     pub tools_notice: AtomicBool,
+    /// Bridge tool-result buffer (spec D3): the bridge's sink wrapper fills
+    /// it; the driver pops it when the agent's `ToolCallUpdate` arrives.
+    pub correlator: Arc<crate::ai::acp::correlator::CorrelatorState>,
     /// Keeps the bridge socket file alive for the connection's lifetime.
     pub(crate) _endpoint_dir: Option<tempfile::TempDir>,
 }
@@ -879,7 +893,10 @@ mod tests {
             .session_for("conv-1", &process, &tool_ctx(), &sink)
             .await
             .expect("recreated session");
-        assert_ne!(s1.session_id, s2.session_id, "a dead process's session id is never reused");
+        assert_ne!(
+            s1.session_id, s2.session_id,
+            "a dead process's session id is never reused"
+        );
         assert!(
             acp.sessions.lock().await.get("conv-1").unwrap().generation > s1.generation,
             "the new session belongs to a newer connection generation"
