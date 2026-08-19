@@ -179,13 +179,16 @@ impl AcpChatDriver {
                             session_id: session.session_id.clone(),
                         })
                         .await;
-                    cancel_deadline = Some(
-                        tokio::time::Instant::now() + std::time::Duration::from_secs(5),
-                    );
+                    cancel_deadline = Some(tokio::time::Instant::now() + cancel_kill_timeout());
                 }
                 _ = wait_until(cancel_deadline), if cancel_sent => {
+                    // The agent ignored session/cancel — kill it for real: abort the
+                    // connection task (Client drop closes stdio; the agent exits on EOF),
+                    // charge the restart budget, and evict its sessions.
+                    self.acp_state.kill_agent(&self.acp.agent_id).await;
                     return Err(
-                        "Agent didn't respond to cancellation within 5s — killed it. Start a new conversation.".into()
+                        "The agent didn't respond to cancellation — Lucent restarted it. Other conversations with this agent were interrupted; send your message again."
+                            .into(),
                     );
                 }
             }
@@ -480,6 +483,16 @@ pub fn accumulate_usage(usage: &mut TokenUsage, u: &UsageUpdate) {
     usage.cached_prompt_tokens = 0;
 }
 
+/// How long the driver waits after sending `session/cancel` before killing
+/// the agent (spec D1/E2). `LUCENT_ACP_CANCEL_KILL_MS` overrides for tests.
+fn cancel_kill_timeout() -> std::time::Duration {
+    std::env::var("LUCENT_ACP_CANCEL_KILL_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(std::time::Duration::from_secs(5))
+}
+
 /// Pending-forever future until `deadline` (used by the post-cancel kill
 /// deadline in `chat()`); immediately ready when there is no deadline.
 async fn wait_until(deadline: Option<tokio::time::Instant>) {
@@ -531,6 +544,20 @@ mod tests {
             env,
             auto_deny_permissions: false,
         }
+    }
+
+    struct EnvVarGuard<'a>(&'a str, Option<String>);
+    impl Drop for EnvVarGuard<'_> {
+        fn drop(&mut self) {
+            match &self.1 {
+                Some(v) => std::env::set_var(self.0, v),
+                None => std::env::remove_var(self.0),
+            }
+        }
+    }
+    fn env_var_guard(name: &'static str) -> EnvVarGuard<'static> {
+        let prior = std::env::var(name).ok();
+        EnvVarGuard(name, prior)
     }
 
     fn hermetic_workspace() -> tempfile::TempDir {
@@ -1074,6 +1101,62 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AiEvent::Text { content } if content == "recovered")),
             "the fresh session streamed the ok script: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_timeout_kills_the_agent() {
+        let _ws = hermetic_workspace();
+        let _guard = env_var_guard("LUCENT_ACP_CANCEL_KILL_MS");
+        std::env::set_var("LUCENT_ACP_CANCEL_KILL_MS", "300");
+
+        // The stub sleeps 60s in its first step and never reads the cancel
+        // notification (its stdin loop is blocked) — the turn cannot resolve.
+        let script = script_file(json!({
+            "stopReason": "end_turn",
+            "steps": [{"sleepMs": 60000}]
+        }));
+        let acp_state = AcpState::new();
+        let sink = Arc::new(CollectorSink(std::sync::Mutex::new(Vec::new())));
+        let conv = conversation("conv-kill");
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        let acp_task = acp_state.clone();
+        let sink_task = sink.clone();
+        let script_path = script.path().join("script.json");
+        let cancel_task = cancel.clone();
+        let handle = tokio::spawn(async move {
+            let driver = AcpChatDriver::new(acp_task, acp_cfg(Some(&script_path)), tool_ctx());
+            driver
+                .chat(
+                    "hi".into(),
+                    &AiConfig::default(),
+                    "preamble".into(),
+                    conv,
+                    sink_task,
+                    cancel_task,
+                )
+                .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        cancel.cancel();
+        let err = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect("turn ends at the kill deadline")
+            .expect("task did not panic")
+            .expect_err("the kill deadline errors the turn");
+        assert!(
+            err.contains("didn't respond to cancellation"),
+            "truthful kill message: {err}"
+        );
+        assert!(
+            acp_state.connections.lock().await.get("stub").is_none(),
+            "the connection entry is gone"
+        );
+        assert!(
+            acp_state.sessions.lock().await.is_empty(),
+            "the agent's sessions were evicted with the kill"
         );
     }
 }
