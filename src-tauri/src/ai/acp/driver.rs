@@ -131,17 +131,17 @@ impl AcpChatDriver {
         // cancel-then-kill fallback the rig path uses).
         let mut cancel_deadline: Option<tokio::time::Instant> = None;
 
-        let reply: Result<super::connection::PromptOutcome, String> = loop {
+        let reply: Result<super::connection::PromptOutcome, super::connection::PromptError> = loop {
             tokio::select! {
                 r = &mut reply_rx => {
                     break r.unwrap_or_else(|_| {
                         // Phase F: the agent process died mid-turn — carry
                         // its stderr tail in the error so the user sees the
                         // crash evidence (spec §4.3).
-                        Err(format!(
+                        Err(super::connection::PromptError::Transport(format!(
                             "agent connection closed before the prompt resolved — last lines of agent stderr: {}",
                             process.stderr_snippet()
-                        ))
+                        )))
                     });
                 }
                 ev = events_rx.recv() => {
@@ -206,15 +206,25 @@ impl AcpChatDriver {
             .await;
         }
 
-        let outcome = reply.map_err(|e| {
-            // Phase F: surface the agent's stderr tail with the prompt error
-            // (the connection task ends on a transport error, so this is the
-            // common crash path).
-            format!(
-                "session/prompt failed: {e} — last lines of agent stderr: {}",
-                process.stderr_snippet()
-            )
-        })?;
+        let outcome = match reply {
+            Ok(outcome) => outcome,
+            Err(super::connection::PromptError::Rpc(msg)) => {
+                // The agent rejected the turn (typically: it no longer knows this
+                // conversation's session). Evict the session so the next turn
+                // transparently recreates it, and tell the user the truth. The
+                // connection itself survives (a peer error is not a crash).
+                self.acp_state.drop_session(&session_key).await;
+                return Err(format!(
+                    "The agent lost this conversation's session ({msg}). Send your message again to start a fresh session."
+                ));
+            }
+            Err(super::connection::PromptError::Transport(e)) => {
+                return Err(format!(
+                    "session/prompt failed: {e} — last lines of agent stderr: {}",
+                    process.stderr_snippet()
+                ));
+            }
+        };
         let final_message = match outcome.stop_reason {
             StopReason::EndTurn => text_buf.clone(),
             StopReason::MaxTokens | StopReason::MaxTurnRequests => {
@@ -997,5 +1007,73 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[tokio::test]
+    async fn rpc_error_evicts_the_session_and_the_next_turn_recovers() {
+        let _ws = hermetic_workspace();
+        let err_script = script_file(json!({
+            "stopReason": "end_turn",
+            "steps": [{"rpcError": "session not found"}]
+        }));
+        let ok_script = script_file(json!({
+            "stopReason": "end_turn",
+            "steps": [{"notify": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "recovered"}}}]
+        }));
+
+        let acp_state = AcpState::new();
+        let mut cfg = acp_cfg(Some(&err_script.path().join("script.json")));
+        let driver = AcpChatDriver::new(acp_state.clone(), cfg.clone(), tool_ctx());
+        let sink = Arc::new(CollectorSink(std::sync::Mutex::new(Vec::new())));
+        let conv = conversation("conv-rpc");
+
+        let err = driver
+            .chat(
+                "hi".into(),
+                &AiConfig::default(),
+                "preamble".into(),
+                conv.clone(),
+                sink.clone(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect_err("the agent answers with an RPC error");
+        assert!(
+            err.contains("lost this conversation's session"),
+            "honest eviction message: {err}"
+        );
+        assert!(
+            acp_state.sessions.lock().await.get("conv-rpc").is_none(),
+            "the stale session entry is evicted"
+        );
+
+        // Second turn with a working script under a NEW agent id (the process
+        // cache pins the launch env): a fresh session is created and the turn
+        // succeeds end to end.
+        cfg.agent_id = "stub-2".into();
+        cfg.env.insert(
+            "STUB_SCRIPT".to_string(),
+            ok_script.path().join("script.json").to_string_lossy().into_owned(),
+        );
+        let driver2 = AcpChatDriver::new(acp_state, cfg, tool_ctx());
+        driver2
+            .chat(
+                "again".into(),
+                &AiConfig::default(),
+                "preamble".into(),
+                conv,
+                sink.clone(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("recovered turn succeeds");
+
+        let events = sink.0.lock().unwrap().clone();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AiEvent::Text { content } if content == "recovered")),
+            "the fresh session streamed the ok script: {events:?}"
+        );
     }
 }
