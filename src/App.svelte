@@ -310,26 +310,25 @@
     session = aiSession;
     await aiSession.setupListeners({
       onDmlApproval: (p) => {
-        const conv = getActive();
-        if (conv) {
-          conv.isPaused = true;
-          conv.dmlResult = null;
-          conv.dmlError = null;
-          conv.pausedDml = {
+        const conv = chat.conversations.find((c) => c.id === p.conversation_id);
+        if (!conv) return;
+        conv.isPaused = true;
+        conv.dmlResult = null;
+        conv.dmlError = null;
+        conv.pausedDml = {
+          sql: p.sql,
+          description: p.description,
+          estimatedRowsAffected: p.estimated_rows_affected,
+        };
+        // Stamp the card onto the last (assistant) message so it renders
+        // in the thread with Execute/Cancel (C1).
+        updateLast(conv.id, {
+          dmlApproval: {
             sql: p.sql,
             description: p.description,
             estimatedRowsAffected: p.estimated_rows_affected,
-          };
-          // Stamp the card onto the last (assistant) message so it renders
-          // in the thread with Execute/Cancel (C1).
-          updateLast(conv.id, {
-            dmlApproval: {
-              sql: p.sql,
-              description: p.description,
-              estimatedRowsAffected: p.estimated_rows_affected,
-            },
-          });
-        }
+          },
+        });
       },
       onAgentPermission: (p) => {
         // The agent asks permission to run one of ITS tools — distinct from
@@ -338,7 +337,9 @@
         pauseForPermission(p.conversationId, p);
       },
       onError: (p) => {
-        chat.error = p.message;
+        const target = chat.conversations.find((c) => c.id === p.conversation_id);
+        if (target) target.error = p.message;
+        else chat.error = p.message;
       },
     });
 

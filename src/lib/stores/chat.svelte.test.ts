@@ -270,3 +270,13 @@ describe('setSessionExpanded', () => {
     expect(() => setSessionExpanded(conv.id, 'm1', true)).not.toThrow();
   });
 });
+
+describe('createConversation', () => {
+  it('conversations carry a per-conversation error field', () => {
+    const conv = createConversation('conn-1');
+    expect(conv.error).toBeNull();
+    conv.error = 'boom';
+    expect(conv.error).toBe('boom');
+  });
+});
+

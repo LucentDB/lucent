@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   chat,
   createConversation,
+  createNewTab,
   addMessage,
   formatUsageLine,
   pauseForPermission,
@@ -32,8 +33,13 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 const listenMock = vi.fn();
+const listenerCbs: Record<string, (e: { payload: unknown }) => void> = {};
 vi.mock('@tauri-apps/api/event', () => ({
-  listen: (...args: unknown[]) => listenMock(...args),
+  listen: vi.fn(async (event: string, cb: (e: { payload: unknown }) => void) => {
+    listenerCbs[event] = cb;
+    listenMock(event, cb);
+    return () => {};
+  }),
 }));
 
 function seedActiveConversationWithMessage(messageId: string) {
@@ -46,6 +52,13 @@ function seedActiveConversationWithMessage(messageId: string) {
     content: '',
     createdAt: Date.now(),
   });
+  return conv;
+}
+
+function seedConversation(convId: string) {
+  chat.conversations = [];
+  const conv = createNewTab('conn-1');
+  conv.id = convId;
   return conv;
 }
 
@@ -249,6 +262,109 @@ describe('formatUsageLine', () => {
         cachedPromptTokens: 0,
       }),
     ).toBe('120 in / 45 out tokens');
+  });
+});
+
+describe('createAiSession listeners', () => {
+  beforeEach(() => {
+    chat.conversations = [];
+    chat.isStreaming = false;
+    for (const k of Object.keys(listenerCbs)) delete listenerCbs[k];
+  });
+
+  it('ignores dml_approval events for other conversations', async () => {
+    const conv = seedConversation('conv-a');
+    const session = createAiSession('conv-a');
+    const onDmlApproval = vi.fn();
+    await session.setupListeners({
+      onDmlApproval,
+      onAgentPermission: vi.fn(),
+      onError: vi.fn(),
+    });
+    listenerCbs['ai:dml_approval']?.({
+      payload: {
+        conversation_id: 'conv-b',
+        sql: 'delete from t',
+        description: 'x',
+        estimated_rows_affected: null,
+      },
+    });
+    expect(onDmlApproval).not.toHaveBeenCalled();
+    expect(conv.isPaused).toBe(false);
+  });
+
+  it('routes dml_approval for its own conversation', async () => {
+    seedConversation('conv-a');
+    const session = createAiSession('conv-a');
+    const onDmlApproval = vi.fn();
+    await session.setupListeners({
+      onDmlApproval,
+      onAgentPermission: vi.fn(),
+      onError: vi.fn(),
+    });
+    listenerCbs['ai:dml_approval']?.({
+      payload: {
+        conversation_id: 'conv-a',
+        sql: 'delete from t',
+        description: 'x',
+        estimated_rows_affected: null,
+      },
+    });
+    expect(onDmlApproval).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores agent_permission events for other conversations', async () => {
+    seedConversation('conv-a');
+    const session = createAiSession('conv-a');
+    const onAgentPermission = vi.fn();
+    await session.setupListeners({
+      onDmlApproval: vi.fn(),
+      onAgentPermission,
+      onError: vi.fn(),
+    });
+    listenerCbs['ai:agent_permission']?.({
+      payload: {
+        conversationId: 'conv-b',
+        title: 't',
+        description: 'd',
+        options: [],
+      },
+    });
+    expect(onAgentPermission).not.toHaveBeenCalled();
+  });
+
+  it('ignores error events for other conversations', async () => {
+    const conv = seedConversation('conv-a');
+    const session = createAiSession('conv-a');
+    const onError = vi.fn();
+    await session.setupListeners({
+      onDmlApproval: vi.fn(),
+      onAgentPermission: vi.fn(),
+      onError,
+    });
+    listenerCbs['ai:error']?.({
+      payload: { conversation_id: 'conv-b', message: 'boom' },
+    });
+    expect(onError).not.toHaveBeenCalled();
+    expect(conv.error).toBeNull();
+  });
+
+  it('passes matching error events to the handler', async () => {
+    seedConversation('conv-a');
+    const session = createAiSession('conv-a');
+    const onError = vi.fn();
+    await session.setupListeners({
+      onDmlApproval: vi.fn(),
+      onAgentPermission: vi.fn(),
+      onError,
+    });
+    listenerCbs['ai:error']?.({
+      payload: { conversation_id: 'conv-a', message: 'boom' },
+    });
+    expect(onError).toHaveBeenCalledWith({
+      conversation_id: 'conv-a',
+      message: 'boom',
+    });
   });
 });
 

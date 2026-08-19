@@ -156,6 +156,18 @@
   </div>
   <div class="body">
     {#if hasMessages}
+      {#if conv?.error}
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <div
+          class="conv-error"
+          role="button"
+          tabindex="0"
+          onclick={() => (conv.error = null)}
+        >
+          <span class="conv-error-text">{conv.error}</span>
+          <span class="conv-error-dismiss">×</span>
+        </div>
+      {/if}
       <div class="messages" bind:this={msgsEl}>
         {#each conv!.messages as m, i (m.id)}
           <ChatMessage
@@ -375,6 +387,28 @@
   }
 
   .input-area {
+    flex-shrink: 0;
+  }
+
+  .conv-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 8px 16px 0;
+    padding: 8px 12px;
+    font-size: var(--text-sm);
+    color: var(--danger);
+    background: var(--danger-bg);
+    border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+  }
+  .conv-error-text {
+    line-height: 1.35;
+  }
+  .conv-error-dismiss {
+    font-size: 14px;
     flex-shrink: 0;
   }
 </style>

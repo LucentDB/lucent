@@ -68,6 +68,8 @@ export interface Conversation {
   /** Error from the DML execution attempt (C1), shown on the card. */
   dmlError: string | null;
   usage: TokenUsage | null;
+  /** Turn-level error for THIS conversation (ai:error), rendered in ChatPanel. */
+  error: string | null;
   createdAt: number;
 }
 
@@ -118,6 +120,7 @@ export function createConversation(connectionId: string): Conversation {
     dmlResult: null,
     dmlError: null,
     usage: null,
+    error: null,
     createdAt: Date.now(),
   };
 }

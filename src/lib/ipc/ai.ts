@@ -212,6 +212,8 @@ export function createAiSession(conversationId: string) {
     }) => {
       unlisteners.push(
         await listen<DmlApprovalPayload>('ai:dml_approval', (e) => {
+          // Events are global; only this conversation's payloads may pause it.
+          if (e.payload.conversation_id !== conversationId) return;
           handlers.onDmlApproval(e.payload);
           chat.isStreaming = false;
           finalizeLastMessageSession(conversationId);
@@ -219,6 +221,7 @@ export function createAiSession(conversationId: string) {
       );
       unlisteners.push(
         await listen<AgentPermissionPayload>('ai:agent_permission', (e) => {
+          if (e.payload.conversationId !== conversationId) return;
           handlers.onAgentPermission(e.payload);
           chat.isStreaming = false;
           finalizeLastMessageSession(conversationId);
@@ -238,9 +241,9 @@ export function createAiSession(conversationId: string) {
         await listen<{ conversation_id: string; message: string }>(
           'ai:error',
           (e) => {
+            if (e.payload.conversation_id !== conversationId) return;
             handlers.onError(e.payload);
             chat.isStreaming = false;
-            chat.error = e.payload.message;
             finalizeLastMessageSession(conversationId);
           },
         ),
