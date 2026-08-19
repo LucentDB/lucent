@@ -123,6 +123,9 @@ impl BridgeHandle {
 pub struct PendingDml {
     pub sql: String,
     pub tx: tokio::sync::oneshot::Sender<Result<DmlOutcome, String>>,
+    /// When the preview was staged — `execute_dml` refuses approvals older
+    /// than `DML_STALE_AFTER` (spec D6), mirroring the rig path's E6 guard.
+    pub staged_at: std::time::Instant,
 }
 
 /// What a user-approved DML execution produced.
@@ -256,6 +259,7 @@ pub(crate) async fn dispatch(
             *slot = Some(PendingDml {
                 sql: sql.clone(),
                 tx,
+                staged_at: std::time::Instant::now(),
             });
             drop(slot);
             sink.dml_approval(DmlApprovalPayload {
@@ -814,6 +818,7 @@ mod tests {
         *handle.pending_dml.lock().await = Some(PendingDml {
             sql: "first".into(),
             tx,
+            staged_at: std::time::Instant::now(),
         });
         let resp = dispatch(
             &executor,

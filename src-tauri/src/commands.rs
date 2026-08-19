@@ -2524,6 +2524,18 @@ pub async fn close_conversation(
     Ok(())
 }
 
+const DML_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The DML preview staleness window. `LUCENT_DML_STALE_AFTER_SECS` overrides
+/// for tests (a 300s sleep is not a test).
+fn dml_stale_after() -> std::time::Duration {
+    std::env::var("LUCENT_DML_STALE_AFTER_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(DML_STALE_AFTER)
+}
+
 /// Executes the staged DML on the worker (session B), returns the REAL row
 /// count, and resumes the agent on the conversation's channel so it can
 /// confirm the outcome (C1). The frontend signature stays
@@ -2555,6 +2567,15 @@ pub async fn execute_dml(
             .get(&conversation_id)
             .cloned()
             .ok_or("No pending DML for this conversation (bridge not active)")?;
+        // E6 parity (spec D6): an approval minutes after the preview may no
+        // longer match the data — refuse and clear the hold.
+        if reject_stale_acp_dml(&handle, dml_stale_after()).await {
+            return Err(
+                "The pending DML was staged more than 5 minutes ago. Ask the assistant \
+                 to re-run the preview and approve again."
+                    .into(),
+            );
+        }
         let conn_id = *state.ai_connection_id.lock().await;
         let conn_id = conn_id
             .or(*state.current_connection_id.lock().await)
@@ -2576,8 +2597,6 @@ pub async fn execute_dml(
         return Ok(serde_json::json!({ "rows_affected": rows_affected, "sql": sql }));
     }
 
-    const DML_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
-
     let (staged_sql, staged_at) = conv
         .lock()
         .await
@@ -2587,7 +2606,7 @@ pub async fn execute_dml(
     // E6: a statement staged minutes ago and approved now may no longer
     // match the data it was previewed against. Refuse (after clearing the
     // state, so the conversation is not stuck) and ask for a re-run.
-    if staged_at.elapsed() > DML_STALE_AFTER {
+    if staged_at.elapsed() > dml_stale_after() {
         return Err(
             "The pending DML was staged more than 5 minutes ago. Ask the assistant \
              to re-run the preview and approve again."
@@ -2699,9 +2718,39 @@ where
 pub(crate) async fn reject_acp_dml(
     handle: &Arc<crate::ai::acp::bridge::BridgeHandle>,
 ) -> Result<(), String> {
+    reject_acp_dml_with(handle, "DML rejected by user").await
+}
+
+pub(crate) async fn reject_acp_dml_with(
+    handle: &Arc<crate::ai::acp::bridge::BridgeHandle>,
+    reason: &str,
+) -> Result<(), String> {
     let pending = take_pending_dml(handle).await?;
-    let _ = pending.tx.send(Err("DML rejected by user".into()));
+    let _ = pending.tx.send(Err(reason.into()));
     Ok(())
+}
+
+/// Rejects the held ACP DML when its preview is older than `stale_after`
+/// (spec D6 — parity with the rig path's E6 guard). Returns true when the
+/// hold was rejected; the caller surfaces the staleness error.
+pub(crate) async fn reject_stale_acp_dml(
+    handle: &Arc<crate::ai::acp::bridge::BridgeHandle>,
+    stale_after: std::time::Duration,
+) -> bool {
+    let stale = {
+        let slot = handle.pending_dml.lock().await;
+        slot.as_ref()
+            .map(|p| p.staged_at.elapsed() > stale_after)
+            .unwrap_or(false)
+    };
+    if stale {
+        let _ = reject_acp_dml_with(
+            handle,
+            "DML rejected: the preview is stale (over 5 minutes old) — ask the assistant to re-run the preview and approve again.",
+        )
+        .await;
+    }
+    stale
 }
 
 /// The conversation's ACP session id (the permission FIFO is keyed by
@@ -3349,6 +3398,7 @@ mod acp_dml_branch_tests {
         handle.pending_dml.lock().await.replace(PendingDml {
             sql: "UPDATE t SET a = 1".into(),
             tx,
+            staged_at: std::time::Instant::now(),
         });
         let conv = Arc::new(Mutex::new(ConversationState::new("conn-1".into())));
 
@@ -3387,6 +3437,7 @@ mod acp_dml_branch_tests {
         handle.pending_dml.lock().await.replace(PendingDml {
             sql: "UPDATE t SET a = 1".into(),
             tx,
+            staged_at: std::time::Instant::now(),
         });
 
         reject_acp_dml(&handle).await.expect("reject succeeds");
@@ -3399,6 +3450,41 @@ mod acp_dml_branch_tests {
         assert!(
             reject_acp_dml(&handle).await.is_err(),
             "nothing left to reject after take()"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_acp_dml_is_rejected_before_execution() {
+        let handle = Arc::new(crate::ai::acp::bridge::BridgeHandle::new("conv-1"));
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        // Staged ten minutes ago.
+        *handle.pending_dml.lock().await = Some(crate::ai::acp::bridge::PendingDml {
+            sql: "insert into t values (1)".into(),
+            tx,
+            staged_at: std::time::Instant::now() - std::time::Duration::from_secs(600),
+        });
+        let rejected = reject_stale_acp_dml(&handle, std::time::Duration::from_secs(300)).await;
+        assert!(rejected, "a stale hold is rejected");
+        assert!(
+            handle.pending_dml.lock().await.is_none(),
+            "the slot clears after the stale rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_acp_dml_is_not_rejected() {
+        let handle = Arc::new(crate::ai::acp::bridge::BridgeHandle::new("conv-1"));
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        *handle.pending_dml.lock().await = Some(crate::ai::acp::bridge::PendingDml {
+            sql: "insert into t values (1)".into(),
+            tx,
+            staged_at: std::time::Instant::now(),
+        });
+        let rejected = reject_stale_acp_dml(&handle, std::time::Duration::from_secs(300)).await;
+        assert!(!rejected, "a fresh hold executes");
+        assert!(
+            handle.pending_dml.lock().await.is_some(),
+            "the hold stays for the user's decision"
         );
     }
 
