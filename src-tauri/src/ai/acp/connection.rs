@@ -20,6 +20,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
+/// Why a prompt failed. `Rpc` means the agent answered with a JSON-RPC error
+/// (the connection stays alive — a stale session id, a refused turn, …);
+/// `Transport` means the request could not be dispatched or the connection
+/// died (terminal for the task; the reap path handles budget + restart).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PromptError {
+    Rpc(String),
+    Transport(String),
+}
+
 /// Commands the driver / AcpState send to the connection task.
 pub enum AgentCommand {
     /// Create a session. Replies with the new `session_id`.
@@ -35,7 +45,7 @@ pub enum AgentCommand {
     Prompt {
         session_id: String,
         text: String,
-        reply: oneshot::Sender<Result<PromptOutcome, String>>,
+        reply: oneshot::Sender<Result<PromptOutcome, PromptError>>,
     },
     /// Cancel the in-flight turn of a session (session/cancel notification).
     Cancel { session_id: String },
@@ -45,6 +55,7 @@ pub enum AgentCommand {
 
 /// What a prompt turn produced. `text` is filled by the driver from the
 /// event stream; the connection task only carries the stop reason.
+#[derive(Debug)]
 pub struct PromptOutcome {
     pub stop_reason: StopReason,
     pub text: String,
@@ -199,26 +210,26 @@ pub async fn run_connection(
                         if !mcp_servers.is_empty() {
                             req = req.mcp_servers(mcp_servers);
                         }
-                        match connection.send_request(req).block_task().await {
-                            Ok(resp) => {
-                                let _ = reply.send(Ok(resp.session_id.to_string()));
+                        let sent = connection.send_request(req);
+                        // Non-blocking: the crate resolves this callback on a background
+                        // task; the command loop stays live (the block_task anti-footgun
+                        // is what starved Cancel). A transport death never invokes the
+                        // callback — the reply oneshot drops, which the caller maps to
+                        // its "connection closed" error, and the task ends via
+                        // `client.await` below.
+                        let _ = sent.on_receiving_result(move |result| async move {
+                            match result {
+                                Ok(resp) => {
+                                    let _ = reply.send(Ok(resp.session_id.to_string()));
+                                }
+                                Err(e) => {
+                                    // Peer RPC error (agent refused the session): the
+                                    // connection is fine — surface the message.
+                                    let _ = reply.send(Err(e.to_string()));
+                                }
                             }
-                            Err(e) => {
-                                // Terminal: the agent process died (EOF on
-                                // its stdout). No further command can
-                                // succeed — end the task so the crash-
-                                // recovery path (phase F) reaps it and
-                                // charges the restart budget. The reply
-                                // carries the raw error — the caller
-                                // re-prefixes it with the operation name
-                                // (session_for), so the user never sees a
-                                // doubled "session/new failed:".
-                                let _ = reply.send(Err(format!("{e}")));
-                                return Err(agent_client_protocol::util::internal_error(format!(
-                                    "session/new failed: {e}"
-                                )));
-                            }
-                        }
+                            Ok(())
+                        });
                     }
                     AgentCommand::Prompt {
                         session_id,
@@ -229,26 +240,24 @@ pub async fn run_connection(
                             session_id.clone(),
                             vec![ContentBlock::Text(TextContent::new(text))],
                         );
-                        match connection.send_request(req).block_task().await {
-                            Ok(resp) => {
-                                let _ = reply.send(Ok(PromptOutcome {
-                                    stop_reason: resp.stop_reason,
-                                    text: String::new(),
-                                }));
+                        let sent = connection.send_request(req);
+                        let _ = sent.on_receiving_result(move |result| async move {
+                            match result {
+                                Ok(resp) => {
+                                    let _ = reply.send(Ok(PromptOutcome {
+                                        stop_reason: resp.stop_reason,
+                                        text: String::new(),
+                                    }));
+                                }
+                                Err(e) => {
+                                    // The agent answered with a JSON-RPC error (e.g.
+                                    // "session not found"). Non-terminal: the connection
+                                    // survives; the driver evicts the stale session.
+                                    let _ = reply.send(Err(PromptError::Rpc(e.to_string())));
+                                }
                             }
-                            Err(e) => {
-                                // Terminal: same as session/new — the agent
-                                // died mid-turn. End the connection task so
-                                // the crash is charged against the restart
-                                // budget on the next use. The reply carries
-                                // the raw error — the driver re-prefixes it
-                                // with the operation name.
-                                let _ = reply.send(Err(format!("{e}")));
-                                return Err(agent_client_protocol::util::internal_error(format!(
-                                    "session/prompt failed: {e}"
-                                )));
-                            }
-                        }
+                            Ok(())
+                        });
                     }
                     AgentCommand::Cancel { session_id } => {
                         let _ = connection.send_notification(CancelNotification::new(session_id));
@@ -338,17 +347,30 @@ mod tests {
         );
     }
 
-    fn stub_process() -> Arc<AgentProcess> {
+    fn stub_process_with(env: HashMap<String, String>) -> Arc<AgentProcess> {
         Arc::new(AgentProcess {
             agent_id: "stub".into(),
             launch: LaunchSpec {
                 cmd: stub_binary(),
                 args: vec![],
-                env: HashMap::new(),
+                env,
             },
             stderr_tail: Arc::new(std::sync::Mutex::new(String::new())),
             spawns: Arc::new(std::sync::Mutex::new(Vec::new())),
         })
+    }
+
+    fn stub_process() -> Arc<AgentProcess> {
+        stub_process_with(HashMap::new())
+    }
+
+    fn script_env(dir: &tempfile::TempDir) -> HashMap<String, String> {
+        let mut env = HashMap::new();
+        env.insert(
+            "STUB_SCRIPT".to_string(),
+            dir.path().join("script.json").to_string_lossy().into_owned(),
+        );
+        env
     }
 
     fn wire(
@@ -440,6 +462,166 @@ mod tests {
             .expect("connection task finishes")
             .expect("task did not panic");
         assert!(result.is_ok(), "clean shutdown: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn prompt_rpc_error_resolves_as_rpc_and_keeps_the_connection_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("script.json"),
+            r#"{"stopReason":"end_turn","steps":[{"rpcError":"session not found"}]}"#,
+        )
+        .unwrap();
+        let proc = stub_process_with(script_env(&dir));
+        let (cmds, _ev, handle) = wire(proc.clone());
+
+        let tmp = tempdir().unwrap();
+        let session_id = new_session(&cmds, tmp.path().to_path_buf())
+            .await
+            .expect("session/new ok");
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        cmds.send(AgentCommand::Prompt {
+            session_id,
+            text: "hi".into(),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let err = reply_rx
+            .await
+            .expect("prompt reply arrives")
+            .expect_err("the agent answered with an RPC error");
+        assert!(
+            matches!(&err, PromptError::Rpc(msg) if msg.contains("session not found")),
+            "classified as a peer RPC error: {err:?}"
+        );
+
+        // The connection survived the error — a second session/new round-trips.
+        let again = new_session(&cmds, tmp.path().to_path_buf())
+            .await
+            .expect("connection still alive after an RPC error");
+        assert!(again.starts_with("stub-sess-"));
+
+        shutdown(&cmds).await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect("task finishes")
+            .expect("no panic");
+        assert!(result.is_ok(), "clean shutdown: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn cancel_notification_is_delivered_while_the_prompt_is_in_flight() {
+        // The stub streams two chunks 400ms apart; the cancel is sent at ~50ms
+        // and the stub must SEE it mid-turn (it flags the turn cancelled). With
+        // the old block_task loop the Cancel command would sit queued until the
+        // prompt resolved and the stub would never see it before answering.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("script.json"),
+            r#"{"stopReason":"end_turn","steps":[{"sleepMs":400},{"notify":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"mid"}}},{"sleepMs":400}]}"#,
+        )
+        .unwrap();
+        let proc = stub_process_with(script_env(&dir));
+        let (cmds, _ev, handle) = wire(proc.clone());
+
+        let tmp = tempdir().unwrap();
+        let session_id = new_session(&cmds, tmp.path().to_path_buf())
+            .await
+            .expect("session/new ok");
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        cmds.send(AgentCommand::Prompt {
+            session_id: session_id.clone(),
+            text: "hi".into(),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cmds.send(AgentCommand::Cancel {
+            session_id: session_id.clone(),
+        })
+        .await
+        .unwrap();
+
+        let outcome = reply_rx
+            .await
+            .expect("prompt reply arrives")
+            .expect("prompt succeeds");
+        assert!(
+            matches!(outcome.stop_reason, StopReason::Cancelled),
+            "the stub saw the cancel mid-turn: {:?}",
+            outcome.stop_reason
+        );
+        assert!(
+            proc.stderr_snippet().contains("cancelling current prompt"),
+            "the stub logged the mid-turn cancel: {}",
+            proc.stderr_snippet()
+        );
+
+        shutdown(&cmds).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect("task finishes");
+    }
+
+    #[tokio::test]
+    async fn command_loop_stays_responsive_while_a_prompt_streams() {
+        // A NewSession issued while a prompt is in flight must be serviced
+        // before the prompt resolves. With block_task the command would sit in
+        // the queue until the turn ended.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("script.json"),
+            r#"{"stopReason":"end_turn","steps":[{"notify":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"a"}}},{"sleepMs":400},{"notify":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"b"}}},{"sleepMs":400}]}"#,
+        )
+        .unwrap();
+        let proc = stub_process_with(script_env(&dir));
+        let (cmds, _ev, handle) = wire(proc.clone());
+
+        let tmp = tempdir().unwrap();
+        let session_id = new_session(&cmds, tmp.path().to_path_buf())
+            .await
+            .expect("session/new ok");
+
+        let (prompt_tx, mut prompt_rx) = oneshot::channel();
+        cmds.send(AgentCommand::Prompt {
+            session_id: session_id.clone(),
+            text: "hi".into(),
+            reply: prompt_tx,
+        })
+        .await
+        .unwrap();
+
+        let (ns_tx, ns_rx) = oneshot::channel();
+        cmds.send(AgentCommand::NewSession {
+            cwd: tmp.path().to_path_buf(),
+            mcp_servers: vec![],
+            reply: ns_tx,
+        })
+        .await
+        .unwrap();
+
+        let ns = tokio::time::timeout(std::time::Duration::from_secs(2), ns_rx)
+            .await
+            .expect("NewSession is serviced while the prompt is in flight")
+            .expect("reply arrives")
+            .expect("session/new ok");
+        assert!(ns.starts_with("stub-sess-"));
+        assert!(
+            prompt_rx.try_recv().is_err(),
+            "the prompt is still pending when the loop serviced NewSession"
+        );
+
+        let outcome = prompt_rx.await.expect("prompt eventually resolves").unwrap();
+        assert!(matches!(outcome.stop_reason, StopReason::EndTurn));
+
+        shutdown(&cmds).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect("task finishes");
     }
 
     #[tokio::test]

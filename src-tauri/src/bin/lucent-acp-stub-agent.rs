@@ -39,6 +39,8 @@
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::rc::Rc;
+use std::sync::mpsc;
+use std::time::Duration;
 
 #[derive(Debug, serde::Deserialize)]
 struct Script {
@@ -65,6 +67,18 @@ enum Step {
     /// sees stdout EOF and treats the connection as dead.
     Exit {
         exit: Value,
+    },
+    /// Answers the in-flight prompt with a JSON-RPC error (peer-level; the
+    /// connection must survive). Exercises RPC/transport classification.
+    RpcError {
+        #[serde(rename = "rpcError")]
+        rpc_error: String,
+    },
+    /// Blocks the stub's stdin loop for `sleep_ms` milliseconds — used to
+    /// hold a turn open long enough for cancellation/concurrency tests.
+    SleepMs {
+        #[serde(rename = "sleepMs")]
+        sleep_ms: u64,
     },
 }
 
@@ -100,233 +114,282 @@ fn main() {
 
     eprintln!("STUB ready: script={}", script.is_some());
 
-    let stdin = std::io::stdin();
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            match line {
+                Ok(l) => {
+                    if tx.send(l).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut sessions: Vec<String> = Vec::new();
     let mut session_counter = 0usize;
     let mut request_counter = 9000usize;
-    // The in-flight prompt turn, if any. `None` = no prompt in flight.
     let mut prompt: Option<PromptState> = None;
-    // Outstanding session/request_permission request id (at most one in
-    // flight — the step machine pauses until the client answers). Ids are
-    // echoed as opaque JSON values: the client sends UUID-string ids.
     let mut pending_permission_id: Option<Value> = None;
 
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let msg: Value = match serde_json::from_str(&line) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("STUB bad line: {e}");
-                continue;
-            }
-        };
-        let id = msg.get("id").cloned();
-        let method = msg.get("method").and_then(|v| v.as_str());
-
-        match (&id, method, msg.get("result"), msg.get("error")) {
-            // ── A response to one of OUR requests (request_permission) ──
-            (Some(resp_id), None, Some(result), None)
-                if pending_permission_id.as_ref() == Some(resp_id) =>
-            {
-                pending_permission_id = None;
-                eprintln!("STUB permission outcome: {result}");
-                // A Cancelled outcome means the client is cancelling the
-                // turn (normative: the client MUST resolve pending
-                // permissions with Cancelled before sending session/cancel)
-                // — treat it as the cancel signal so the prompt response
-                // reports "cancelled" deterministically. The crate encodes
-                // the unit variant as {"outcome":{"outcome":"cancelled"}}.
-                let outcome = result.get("outcome");
-                let cancelled = outcome
-                    .map(|o| {
-                        o == "cancelled"
-                            || o.get("outcome").map(|i| i == "cancelled").unwrap_or(false)
-                    })
-                    .unwrap_or(false);
-                if cancelled {
-                    if let Some(state) = &mut prompt {
-                        state.cancelled = true;
-                        eprintln!("STUB permission resolved cancelled (turn being cancelled)");
-                    }
+    loop {
+        if let Some(state) = prompt.as_mut() {
+            if pending_permission_id.is_some() {
+                match rx.recv() {
+                    Ok(line) => handle_msg(
+                        &line,
+                        &script,
+                        spawn_mcp,
+                        &mut mcp_children,
+                        &mut mcp_stds,
+                        &mut sessions,
+                        &mut session_counter,
+                        &mut prompt,
+                        &mut pending_permission_id,
+                    ),
+                    Err(_) => break,
                 }
-                // Resume the step machine.
-                run_next_step(
-                    &mut prompt,
-                    &mut request_counter,
-                    &mut pending_permission_id,
-                );
-            }
-            // ── Notifications (no id) ──
-            (None, Some("session/cancel"), _, _) => {
-                if let Some(state) = &mut prompt {
-                    state.cancelled = true;
-                    eprintln!("STUB session/cancel (cancelling current prompt)");
-                } else {
-                    eprintln!("STUB session/cancel (no prompt in flight)");
-                }
-            }
-            (None, Some(_), _, _) => {
-                eprintln!("STUB notification ignored: {method:?}");
-            }
-            // ── Requests (id + method) ──
-            (Some(req_id), Some(method), _, _) => {
-                let params = msg.get("params").cloned().unwrap_or(Value::Null);
-                let req_id = req_id.clone();
-                match method {
-                    "initialize" => {
-                        eprintln!("STUB initialize");
-                        respond(
-                            req_id,
-                            json!({
-                                "protocolVersion": 1,
-                                "capabilities": { "session": { "mcp": { "stdio": {} } } },
-                                "agentInfo": {
-                                    "name": "lucent-acp-stub-agent",
-                                    "version": "0.1.0"
-                                }
-                            }),
-                        );
+            } else {
+                let next = state
+                    .script
+                    .as_ref()
+                    .and_then(|s| s.steps.get(state.step_index));
+                match next {
+                    Some(Step::Notify { notify }) => {
+                        eprintln!("STUB notify: {notify}");
+                        notify_line(&state.session_id, notify.clone());
+                        state.step_index += 1;
                     }
-                    "session/new" => {
-                        session_counter += 1;
-                        let mcp_count = params
-                            .get("mcpServers")
-                            .and_then(|v| v.as_array())
-                            .map(|a| a.len())
-                            .unwrap_or(0);
-                        eprintln!("STUB session/new mcpServers={mcp_count}");
-                        if spawn_mcp && mcp_children.is_empty() {
-                            spawn_first_mcp_server(
-                                params.get("mcpServers"),
-                                &mut mcp_children,
-                                &mut mcp_stds,
-                            );
-                        }
-                        respond(
-                            req_id,
-                            json!({ "sessionId": format!("stub-sess-{session_counter}") }),
-                        );
-                    }
-                    "session/prompt" => {
-                        let session_id = params
-                            .get("sessionId")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("stub-sess-?")
-                            .to_string();
-                        let text = params
-                            .get("prompt")
-                            .and_then(|v| v.as_array())
-                            .and_then(|a| a.first())
-                            .and_then(|b| b.get("text"))
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("");
-                        // Truncate: the first prompt carries the whole system
-                        // preamble + schema, which would flood the stderr
-                        // tail. 2 KB is plenty for the assertions (tool
-                        // claims vs honest preamble markers).
-                        let shown: String = text.chars().take(2000).collect();
-                        eprintln!("STUB prompt text: {shown}");
-                        eprintln!("STUB session/prompt session={session_id}");
-                        prompt = Some(PromptState {
-                            session_id,
-                            prompt_id: req_id,
-                            cancelled: false,
-                            step_index: 0,
-                            script: script.clone(),
+                    Some(Step::Permission { permission }) => {
+                        request_counter += 1;
+                        let req = json!({
+                            "jsonrpc": "2.0",
+                            "id": request_counter,
+                            "method": "session/request_permission",
+                            "params": {
+                                "sessionId": state.session_id,
+                                "toolCall": {
+                                    "toolCallId": format!("perm-{request_counter}"),
+                                    "title": permission.get("title").cloned().unwrap_or(json!("permission")),
+                                    "status": "pending"
+                                },
+                                "options": permission.get("options").cloned().unwrap_or(json!([]))
+                            }
                         });
-                        run_next_step(
-                            &mut prompt,
-                            &mut request_counter,
-                            &mut pending_permission_id,
-                        );
+                        pending_permission_id = Some(json!(request_counter));
+                        eprintln!("STUB request_permission: {req}");
+                        writeln!(std::io::stdout(), "{req}").expect("write line");
+                        std::io::stdout().flush().expect("flush");
+                        state.step_index += 1;
                     }
-                    _ => {
-                        eprintln!("STUB unknown method: {method}");
-                        respond_error(req_id, -32601, "method not found");
+                    Some(Step::Exit { exit: _ }) => {
+                        eprintln!("STUB exit step — terminating");
+                        std::process::exit(1);
+                    }
+                    Some(Step::RpcError { rpc_error }) => {
+                        let rpc_err = rpc_error.clone();
+                        let st = prompt.take().expect("prompt in flight");
+                        eprintln!("STUB rpc_error step: {rpc_err}");
+                        respond_error(st.prompt_id, -32602, &rpc_err);
+                    }
+                    Some(Step::SleepMs { sleep_ms }) => {
+                        let ms = *sleep_ms;
+                        eprintln!("STUB sleep_ms step: {ms}");
+                        let start = std::time::Instant::now();
+                        let target = Duration::from_millis(ms);
+                        while start.elapsed() < target {
+                            let remaining = target - start.elapsed();
+                            let chunk = remaining.min(Duration::from_millis(10));
+                            if let Ok(line) = rx.recv_timeout(chunk) {
+                                handle_msg(
+                                    &line,
+                                    &script,
+                                    spawn_mcp,
+                                    &mut mcp_children,
+                                    &mut mcp_stds,
+                                    &mut sessions,
+                                    &mut session_counter,
+                                    &mut prompt,
+                                    &mut pending_permission_id,
+                                );
+                            }
+                        }
+                        if let Some(st) = prompt.as_mut() {
+                            st.step_index += 1;
+                        }
+                    }
+                    None => {
+                        let st = prompt.take().expect("prompt in flight");
+                        let stop_reason = if st.cancelled {
+                            "cancelled".to_string()
+                        } else {
+                            st.script
+                                .as_ref()
+                                .map(|s| s.stop_reason.clone())
+                                .unwrap_or_else(default_stop_reason)
+                        };
+                        eprintln!("STUB prompt done stopReason={stop_reason}");
+                        respond(st.prompt_id, json!({ "stopReason": stop_reason }));
                     }
                 }
             }
-            _ => {
-                eprintln!("STUB unparseable message: {line}");
+        } else {
+            match rx.recv() {
+                Ok(line) => handle_msg(
+                    &line,
+                    &script,
+                    spawn_mcp,
+                    &mut mcp_children,
+                    &mut mcp_stds,
+                    &mut sessions,
+                    &mut session_counter,
+                    &mut prompt,
+                    &mut pending_permission_id,
+                ),
+                Err(_) => break,
             }
         }
     }
-    eprintln!("STUB stdin EOF, exiting");
 }
 
-/// Executes script steps until the next permission step (which sends the
-/// request and pauses — the prompt response is deferred until the client
-/// answers) or the steps run out (then the prompt is answered).
-fn run_next_step(
+#[allow(clippy::too_many_arguments)]
+fn handle_msg(
+    line: &str,
+    script: &Option<Rc<Script>>,
+    spawn_mcp: bool,
+    mcp_children: &mut Vec<std::process::Child>,
+    mcp_stds: &mut Vec<std::process::ChildStdin>,
+    sessions: &mut Vec<String>,
+    session_counter: &mut usize,
     prompt: &mut Option<PromptState>,
-    request_counter: &mut usize,
     pending_permission_id: &mut Option<Value>,
 ) {
-    let Some(state) = prompt else { return };
-    loop {
-        let step = state
-            .script
-            .as_ref()
-            .and_then(|s| s.steps.get(state.step_index));
-        match step {
-            Some(Step::Notify { notify }) => {
-                eprintln!("STUB notify: {notify}");
-                notify_line(&state.session_id, notify.clone());
-                state.step_index += 1;
-            }
-            Some(Step::Permission { permission }) => {
-                *request_counter += 1;
-                let req = json!({
-                    "jsonrpc": "2.0",
-                    "id": *request_counter,
-                    "method": "session/request_permission",
-                    "params": {
-                        "sessionId": state.session_id,
-                        "toolCall": {
-                            "toolCallId": format!("perm-{request_counter}"),
-                            "title": permission.get("title").cloned().unwrap_or(json!("permission")),
-                            "status": "pending"
-                        },
-                        "options": permission.get("options").cloned().unwrap_or(json!([]))
-                    }
-                });
-                *pending_permission_id = Some(json!(*request_counter));
-                eprintln!("STUB request_permission: {req}");
-                writeln!(std::io::stdout(), "{req}").expect("write line");
-                std::io::stdout().flush().expect("flush");
-                state.step_index += 1;
-                // Pause here: the prompt response waits for the client's
-                // decision (this is what makes a pending permission
-                // genuinely block the turn).
-                return;
-            }
-            Some(Step::Exit { exit }) => {
-                let _ = exit;
-                eprintln!("STUB exit step — terminating");
-                std::process::exit(1);
-            }
-            None => {
-                // Steps exhausted — answer the prompt.
-                let state = prompt.take().expect("prompt in flight");
-                let stop_reason = if state.cancelled {
-                    "cancelled".to_string()
-                } else {
-                    state
-                        .script
-                        .as_ref()
-                        .map(|s| s.stop_reason.clone())
-                        .unwrap_or_else(default_stop_reason)
-                };
-                eprintln!("STUB prompt done stopReason={stop_reason}");
-                respond(state.prompt_id, json!({ "stopReason": stop_reason }));
-                return;
+    if line.trim().is_empty() {
+        return;
+    }
+    let msg: Value = match serde_json::from_str(line) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("STUB bad line: {e}");
+            return;
+        }
+    };
+    let id = msg.get("id").cloned();
+    let method = msg.get("method").and_then(|v| v.as_str());
+
+    match (&id, method, msg.get("result"), msg.get("error")) {
+        // ── A response to one of OUR requests (request_permission) ──
+        (Some(resp_id), None, Some(result), None)
+            if pending_permission_id.as_ref() == Some(resp_id) =>
+        {
+            *pending_permission_id = None;
+            eprintln!("STUB permission outcome: {result}");
+            let outcome = result.get("outcome");
+            let cancelled = outcome
+                .map(|o| {
+                    o == "cancelled"
+                        || o.get("outcome").map(|i| i == "cancelled").unwrap_or(false)
+                })
+                .unwrap_or(false);
+            if cancelled {
+                if let Some(state) = prompt {
+                    state.cancelled = true;
+                    eprintln!("STUB permission resolved cancelled (turn being cancelled)");
+                }
             }
         }
+        // ── Notifications (no id) ──
+        (None, Some("session/cancel"), _, _) => {
+            if let Some(state) = prompt {
+                state.cancelled = true;
+                eprintln!("STUB session/cancel (cancelling current prompt)");
+            } else {
+                eprintln!("STUB session/cancel (no prompt in flight)");
+            }
+        }
+        (None, Some(_), _, _) => {
+            eprintln!("STUB notification ignored: {method:?}");
+        }
+        // ── Requests (id + method) ──
+        (Some(req_id), Some(method), _, _) => {
+            let params = msg.get("params").cloned().unwrap_or(Value::Null);
+            let req_id = req_id.clone();
+            match method {
+                "initialize" => {
+                    eprintln!("STUB initialize");
+                    respond(
+                        req_id,
+                        json!({
+                            "protocolVersion": 1,
+                            "capabilities": { "session": { "mcp": { "stdio": {} } } },
+                            "agentInfo": {
+                                "name": "lucent-acp-stub-agent",
+                                "version": "0.1.0"
+                            }
+                        }),
+                    );
+                }
+                "session/new" => {
+                    *session_counter += 1;
+                    let new_id = format!("stub-sess-{session_counter}");
+                    sessions.push(new_id.clone());
+                    let mcp_count = params
+                        .get("mcpServers")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0);
+                    eprintln!("STUB session/new mcpServers={mcp_count}");
+                    if spawn_mcp && mcp_children.is_empty() {
+                        spawn_first_mcp_server(
+                            params.get("mcpServers"),
+                            mcp_children,
+                            mcp_stds,
+                        );
+                    }
+                    respond(
+                        req_id,
+                        json!({ "sessionId": new_id }),
+                    );
+                }
+                "session/prompt" => {
+                    let session_id = params
+                        .get("sessionId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("stub-sess-?")
+                        .to_string();
+                    if !sessions.contains(&session_id) {
+                        eprintln!("STUB session/prompt unknown session={session_id}");
+                        respond_error(req_id, -32602, "session not found");
+                        return;
+                    }
+                    let text = params
+                        .get("prompt")
+                        .and_then(|v| v.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|b| b.get("text"))
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("");
+                    let shown: String = text.chars().take(2000).collect();
+                    eprintln!("STUB prompt text: {shown}");
+                    eprintln!("STUB session/prompt session={session_id}");
+                    *prompt = Some(PromptState {
+                        session_id,
+                        prompt_id: req_id,
+                        cancelled: false,
+                        step_index: 0,
+                        script: script.clone(),
+                    });
+                }
+                _ => {
+                    eprintln!("STUB unknown method: {method}");
+                    respond_error(req_id, -32601, "method not found");
+                }
+            }
+        }
+        _ => {}
     }
 }
 
