@@ -167,22 +167,55 @@ pub async fn serve(
     Ok(())
 }
 
-/// Windows variant: the pipe server is created pre-bound; `connect` waits for
-/// the client.
+/// Windows variant: the pipe server is created pre-bound (first instance);
+/// every subsequent client gets a fresh instance via `ServerOptions::create`
+/// (tokio's `NamedPipeServer` is single-connection), mirroring the Unix
+/// accept loop so persistent MCP stdio processes AND sequential/parallel
+/// `lucent-tool.cmd` CLI calls all work during a session (spec D5).
 #[cfg(windows)]
 pub async fn serve(
-    listener: tokio::net::windows::named_pipe::NamedPipeServer,
+    name: String,
+    first: tokio::net::windows::named_pipe::NamedPipeServer,
     token: String,
     executor: Arc<dyn ToolExecutor>,
     sink: Arc<dyn crate::ai::agent::AgentSink>,
     handle: Arc<BridgeHandle>,
 ) -> Result<(), String> {
-    let mut server = listener;
-    if server.connect().await.is_ok() {
-        let (reader, writer) = tokio::io::split(server);
-        let _ = serve_io(reader, writer, token, executor, sink, handle).await;
+    use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+    use tokio::time::{sleep, Duration};
+
+    // ERROR_PIPE_BUSY: every instance is connected; back off and retry.
+    const ERROR_PIPE_BUSY: i32 = 231;
+
+    let mut pending: Option<NamedPipeServer> = Some(first);
+    loop {
+        let mut instance = match pending.take() {
+            Some(instance) => instance,
+            None => match ServerOptions::new().create(&name) {
+                Ok(instance) => instance,
+                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                    sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+                Err(e) => return Err(format!("create pipe instance: {e}")),
+            },
+        };
+        match instance.connect().await {
+            Ok(()) => {
+                let (reader, writer) = tokio::io::split(instance);
+                let token = token.clone();
+                let executor = executor.clone();
+                let sink = sink.clone();
+                let handle = handle.clone();
+                tokio::spawn(async move {
+                    let _ = serve_io(reader, writer, token, executor, sink, handle).await;
+                });
+            }
+            Err(e) => {
+                log::debug!("bridge pipe connect failed: {e}");
+            }
+        }
     }
-    Ok(())
 }
 
 async fn serve_io<R, W>(
@@ -1044,4 +1077,82 @@ mod tests {
         drop(client);
         serve_task.abort(); // serve is a long-lived accept loop; it never returns on its own
     }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_serve_accepts_multiple_sequential_clients() {
+        use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+        use std::time::Duration;
+
+        let name = format!(r"\\.\pipe\lucent-bridge-test-{}", std::process::id());
+        let first = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .expect("first pipe instance");
+        let token = "tok-win".to_string();
+        let executor: Arc<dyn ToolExecutor> = Arc::new(ScriptedExecutor::new(vec![
+            (
+                "echo".into(),
+                serde_json::json!({}),
+                Ok(ToolOutput::Text { content: "one".into() }),
+            ),
+            (
+                "echo".into(),
+                serde_json::json!({}),
+                Ok(ToolOutput::Text { content: "two".into() }),
+            ),
+        ]));
+        let sink = Arc::new(RecordingSink::new());
+        let handle = Arc::new(BridgeHandle::new("conv-1"));
+        let serve_task = tokio::spawn(serve(
+            name.clone(),
+            first,
+            token.clone(),
+            executor,
+            sink.clone(),
+            handle.clone(),
+        ));
+
+        // Client 1: hello + one call, then close.
+        {
+            let mut client = ClientOptions::new().open(&name).expect("client 1 connects");
+            wire::write_hello(&mut client, &token).await.unwrap();
+            wire::write_request(
+                &mut client,
+                &wire::BridgeRequest::Call { id: 1, tool: "echo".into(), args: serde_json::json!({}) },
+            )
+            .await
+            .unwrap();
+            let mut reader = tokio::io::BufReader::new(client);
+            let resp = wire::read_response(&mut reader).await.unwrap().unwrap();
+            match resp {
+                wire::BridgeResponse::Ok { output, .. } => {
+                    assert_eq!(output["text"], "one");
+                }
+                other => panic!("expected Ok, got {other:?}"),
+            }
+            drop(reader); // close client 1
+        }
+
+        // Client 2: the serve loop must have created a second instance.
+        let mut client = ClientOptions::new().open(&name).expect("client 2 connects");
+        wire::write_hello(&mut client, &token).await.unwrap();
+        wire::write_request(
+            &mut client,
+            &wire::BridgeRequest::Call { id: 2, tool: "echo".into(), args: serde_json::json!({}) },
+        )
+        .await
+        .unwrap();
+        let mut reader = tokio::io::BufReader::new(client);
+        let resp = wire::read_response(&mut reader).await.unwrap().unwrap();
+        match resp {
+            wire::BridgeResponse::Ok { output, .. } => {
+                assert_eq!(output["text"], "two");
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+        drop(reader);
+        serve_task.abort(); // long-lived accept loop
+    }
 }
+

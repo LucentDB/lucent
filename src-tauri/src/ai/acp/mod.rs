@@ -206,7 +206,17 @@ impl AcpState {
         );
         let serve_handle = handle.clone();
         let serve_token = token.clone();
+        #[cfg(unix)]
         tokio::spawn(bridge::serve(
+            listener,
+            serve_token,
+            executor,
+            serve_sink,
+            serve_handle,
+        ));
+        #[cfg(windows)]
+        tokio::spawn(bridge::serve(
+            endpoint.clone(),
             listener,
             serve_token,
             executor,
