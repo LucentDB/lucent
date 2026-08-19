@@ -451,6 +451,27 @@ fn create_bridge_endpoint(token: &str) -> (BridgeListener, String, Option<tempfi
     }
 }
 
+/// Probes the bridge-binary candidate names next to `parent`, probing the
+/// `.exe` suffix on Windows (the packaged sidecar is
+/// `lucent-db-tools-mcp.exe` there; `Path::exists` does NOT auto-append
+/// extensions). Returns the first existing path (spec D5).
+fn probe_bridge_candidates(parent: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    let triple = env!("TAURI_ENV_TARGET_TRIPLE");
+    #[cfg(windows)]
+    let candidates = [
+        parent.join(name),
+        parent.join(format!("{name}.exe")),
+        parent.join(format!("{name}-{triple}")),
+        parent.join(format!("{name}-{triple}.exe")),
+    ];
+    #[cfg(not(windows))]
+    let candidates = [
+        parent.join(name),
+        parent.join(format!("{name}-{triple}")),
+    ];
+    candidates.into_iter().find(|c| c.exists())
+}
+
 /// Absolute path to the `lucent-db-tools-mcp` binary, which the AGENT spawns
 /// itself (spec §3 D2 / §4.6). Resolution order:
 /// 1. `LUCENT_BRIDGE_BIN` env override — wins verbatim (power-user / test
@@ -468,27 +489,12 @@ pub fn bridge_binary_path() -> Result<String, String> {
     }
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let parent = exe.parent().ok_or("current executable has no parent dir")?;
-    // "" = packaged (the sidecar sits next to the app executable); "../" =
-    // dev/test (unit tests run from target/<profile>/deps/, the bin lives in
-    // target/<profile>/).
-    //
-    // Packaged name: tauri-build copies the sidecar into the target dir with
-    // the target triple stripped, but the bundler's name inside the .app is
-    // version-dependent — probe the plain name AND the triple-suffixed
-    // sidecar name (the triple is baked in by tauri-build via
-    // TAURI_ENV_TARGET_TRIPLE), so packaged resolution works under either
-    // bundler behavior.
-    for candidate in [
-        parent.join(name),
-        parent.join(format!("{name}-{}", env!("TAURI_ENV_TARGET_TRIPLE"))),
-    ] {
-        if candidate.exists() {
-            return Ok(candidate.to_string_lossy().into_owned());
-        }
+    if let Some(candidate) = probe_bridge_candidates(parent, name) {
+        return Ok(candidate.to_string_lossy().into_owned());
     }
-    let dev = parent.join("../").join(name);
-    if dev.exists() {
-        return Ok(dev.to_string_lossy().into_owned());
+    let dev = parent.join("../");
+    if let Some(candidate) = probe_bridge_candidates(&dev, name) {
+        return Ok(candidate.to_string_lossy().into_owned());
     }
     Err(format!(
         "{name} binary not found next to the app — run `cargo build --bin {name}` (dev) or rebuild the bundle (release)"
@@ -827,6 +833,56 @@ mod tests {
             // integration-tier capstone pins the walk.
             Ok(_) | Err(_) => {}
         }
+    }
+
+    #[test]
+    fn probe_bridge_candidates_finds_plain_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lucent-db-tools-mcp"), b"x").unwrap();
+        let found = probe_bridge_candidates(dir.path(), "lucent-db-tools-mcp")
+            .expect("plain candidate is probed");
+        assert_eq!(
+            found.file_name().unwrap().to_string_lossy(),
+            "lucent-db-tools-mcp"
+        );
+    }
+
+    #[test]
+    fn probe_bridge_candidates_finds_triple_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let triple_name = format!("lucent-db-tools-mcp-{}", env!("TAURI_ENV_TARGET_TRIPLE"));
+        std::fs::write(dir.path().join(&triple_name), b"x").unwrap();
+        let found = probe_bridge_candidates(dir.path(), "lucent-db-tools-mcp")
+            .expect("triple candidate is probed");
+        assert_eq!(
+            found.file_name().unwrap().to_string_lossy(),
+            triple_name
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn probe_bridge_candidates_finds_the_exe_suffix() {
+        use std::os::windows::fs::FileTimesExt; // no-op import guard; keep minimal
+        let dir = tempfile::tempdir().unwrap();
+        // Only the .exe variant exists (the real Windows sidecar name).
+        std::fs::write(dir.path().join("lucent-db-tools-mcp.exe"), b"x").unwrap();
+        let found = probe_bridge_candidates(dir.path(), "lucent-db-tools-mcp")
+            .expect("the .exe candidate is probed");
+        assert_eq!(
+            found.file_name().unwrap().to_string_lossy(),
+            "lucent-db-tools-mcp.exe"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn probe_bridge_candidates_prefers_plain_name_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lucent-db-tools-mcp"), b"x").unwrap();
+        std::fs::write(dir.path().join("lucent-db-tools-mcp.exe"), b"x").unwrap();
+        let found = probe_bridge_candidates(dir.path(), "lucent-db-tools-mcp").unwrap();
+        assert_eq!(found.file_name().unwrap().to_string_lossy(), "lucent-db-tools-mcp");
     }
 
     #[tokio::test]
