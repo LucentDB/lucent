@@ -3406,6 +3406,8 @@ mod acp_dml_branch_tests {
     async fn respond_agent_permission_resolves_via_conversation_session() {
         let state = AppState::new();
         let entry = Arc::new(SessionEntry {
+            agent_id: "stub".into(),
+            generation: 0,
             session_id: "s1".into(),
             bridge: Arc::new(BridgeHandle::new("conv-1")),
             tools: Arc::new(crate::ai::acp::bridge::BridgeConnection::default()),

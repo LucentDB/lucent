@@ -18,7 +18,7 @@ use install::InstalledAgent;
 use registry::Registry;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use uuid::Uuid;
@@ -38,6 +38,9 @@ pub struct AcpState {
     /// FIFO queues of pending `session/request_permission` decisions, keyed
     /// by session id (spec §4.5).
     pub permissions: Arc<PermissionRegistry>,
+    /// Monotonic connection generation counter — sessions record which
+    /// connection created them so a crash can evict exactly its own.
+    pub next_generation: Arc<AtomicU64>,
     /// agent_id -> running connection task state (one per agent process).
     pub connections: Arc<Mutex<HashMap<String, Arc<ConnectionEntry>>>>,
     /// conversation_id -> the conversation's ACP session (multi-turn reuse).
@@ -50,6 +53,7 @@ impl AcpState {
             manager: Arc::new(crate::ai::acp::manager::AcpManager::new()),
             bridges: Arc::new(Mutex::new(HashMap::new())),
             permissions: Arc::new(PermissionRegistry::new()),
+            next_generation: Arc::new(AtomicU64::new(0)),
             connections: Arc::new(Mutex::new(HashMap::new())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -81,6 +85,7 @@ impl AcpState {
                 // budget-allowed crash is reaped and restarted.
                 self.manager.record_crash(process)?;
                 map.remove(&process.agent_id);
+                self.evict_sessions_for(&process.agent_id).await;
                 log::warn!(
                     "agent '{}' connection task ended — restarting (budget permitting)",
                     process.agent_id
@@ -89,6 +94,11 @@ impl AcpState {
                 return Ok(entry.clone());
             }
         }
+        self.manager
+            .processes
+            .lock()
+            .unwrap()
+            .insert(process.agent_id.clone(), process.clone());
         let (cmds_tx, cmds_rx) = mpsc::channel(16);
         let (ev_tx, ev_rx) = mpsc::channel(256);
         let (bcast_tx, _) = broadcast::channel(256);
@@ -104,14 +114,43 @@ impl AcpState {
                 let _ = fwd_tx.send(ev);
             }
         });
+        let generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
         let task = tokio::spawn(run_connection(process.clone(), cmds_rx, ev_tx, perms));
         let entry = Arc::new(ConnectionEntry {
             cmds: cmds_tx,
             events: bcast_tx,
             task,
+            generation,
         });
         map.insert(process.agent_id.clone(), entry.clone());
         Ok(entry)
+    }
+
+    /// Removes every session entry belonging to `agent_id` — a crashed or
+    /// killed connection's session ids are meaningless to the restarted
+    /// process. Called from the reap path and `kill_agent`; the next
+    /// `session_for` on those conversations transparently recreates them.
+    async fn evict_sessions_for(&self, agent_id: &str) {
+        let mut map = self.sessions.lock().await;
+        map.retain(|_, s| s.agent_id != agent_id);
+    }
+
+    /// Real kill for the cancel-timeout fallback (spec D1/E2): abort the
+    /// connection task (the crate's `Client` drops → stdio closes → the agent
+    /// exits on EOF), charge the crash budget so repeated no-cancel agents get
+    /// blocked, and evict the agent's sessions. The next use restarts the
+    /// process (budget permitting).
+    pub async fn kill_agent(&self, agent_id: &str) {
+        let process = self.manager.processes.lock().unwrap().get(agent_id).cloned();
+        let mut map = self.connections.lock().await;
+        if let Some(entry) = map.remove(agent_id) {
+            if let Some(process) = process {
+                let _ = self.manager.record_crash(&process);
+            }
+            self.evict_sessions_for(agent_id).await;
+            entry.task.abort();
+            log::warn!("agent '{agent_id}' killed (cancel timeout)");
+        }
     }
 
     /// Get-or-create the ACP session for a conversation. On first use it
@@ -127,8 +166,21 @@ impl AcpState {
         tool_ctx: &AiToolContext,
         sink: &Arc<dyn AgentSink>,
     ) -> Result<Arc<SessionEntry>, String> {
-        if let Some(session) = self.sessions.lock().await.get(conversation_id).cloned() {
-            return Ok(session);
+        // The session's connection may have died since creation — a stale session
+        // id is worthless to the restarted process. Evict and recreate.
+        let cached = self.sessions.lock().await.get(conversation_id).cloned();
+        if let Some(session) = cached {
+            let alive = self
+                .connections
+                .lock()
+                .await
+                .get(&session.agent_id)
+                .map(|e| !e.task.is_finished())
+                .unwrap_or(false);
+            if alive {
+                return Ok(session);
+            }
+            self.sessions.lock().await.remove(conversation_id);
         }
         let conn = self.ensure_connection(process).await?;
 
@@ -267,6 +319,8 @@ impl AcpState {
             })?;
 
         let entry = Arc::new(SessionEntry {
+            agent_id: process.agent_id.clone(),
+            generation: conn.generation,
             session_id,
             bridge: handle.clone(),
             tools,
@@ -313,6 +367,7 @@ pub struct ConnectionEntry {
     pub cmds: mpsc::Sender<AgentCommand>,
     pub events: broadcast::Sender<AgentEvent>,
     pub task: tokio::task::JoinHandle<Result<(), String>>,
+    pub generation: u64,
 }
 
 /// A conversation's ACP session. `first_prompt` gates the system preamble:
@@ -322,6 +377,11 @@ pub struct ConnectionEntry {
 /// `mcpServers`); `tools_notice` makes sure the UI hears about a missing
 /// tool connection exactly once per session.
 pub struct SessionEntry {
+    /// The agent process that owns this session (eviction key on crash).
+    pub agent_id: String,
+    /// The connection generation that created this session. A crashed
+    /// connection's sessions are stale for the restarted process.
+    pub generation: u64,
     pub session_id: String,
     pub bridge: Arc<BridgeHandle>,
     /// Live connectivity of the DB-tools bridge: set the moment the agent's
@@ -787,5 +847,77 @@ mod tests {
             ),
             "teardown auto-rejects with Cancelled: {outcome:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn crash_reaps_and_evicts_sessions_for_the_agent() {
+        let _ws = hermetic_workspace();
+        let acp = AcpState::new();
+        let process = stub_process();
+        let sink = sink();
+
+        let s1 = acp
+            .session_for("conv-1", &process, &tool_ctx(), &sink)
+            .await
+            .expect("first session");
+        // A crash: the connection task dies (abort simulates the transport EOF).
+        let entry = acp
+            .connections
+            .lock()
+            .await
+            .get("stub")
+            .expect("connection entry")
+            .clone();
+        entry.task.abort();
+        while !entry.task.is_finished() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // The stale session must not survive: session_for evicts it and creates
+        // a fresh one on the restarted connection.
+        let s2 = acp
+            .session_for("conv-1", &process, &tool_ctx(), &sink)
+            .await
+            .expect("recreated session");
+        assert_ne!(s1.session_id, s2.session_id, "a dead process's session id is never reused");
+        assert!(
+            acp.sessions.lock().await.get("conv-1").unwrap().generation > s1.generation,
+            "the new session belongs to a newer connection generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn kill_agent_aborts_evicts_and_charges_the_budget() {
+        let _ws = hermetic_workspace();
+        let acp = AcpState::new();
+        let process = stub_process();
+        let sink = sink();
+
+        acp.session_for("conv-1", &process, &tool_ctx(), &sink)
+            .await
+            .expect("session");
+
+        acp.kill_agent("stub").await;
+
+        assert!(
+            acp.connections.lock().await.get("stub").is_none(),
+            "the connection entry is removed"
+        );
+        assert!(
+            acp.sessions.lock().await.is_empty(),
+            "the agent's sessions are evicted"
+        );
+        assert_eq!(
+            process.spawns.lock().unwrap().len(),
+            1,
+            "the kill is charged against the restart budget"
+        );
+
+        // Budget permits one more restart: the next use comes back up.
+        let s = acp
+            .session_for("conv-1", &process, &tool_ctx(), &sink)
+            .await
+            .expect("restart after kill");
+        assert!(s.session_id.starts_with("stub-sess-"));
     }
 }

@@ -334,7 +334,7 @@ fn handle_msg(
                 }
                 "session/new" => {
                     *session_counter += 1;
-                    let new_id = format!("stub-sess-{session_counter}");
+                    let new_id = format!("stub-sess-{}-{}", std::process::id(), session_counter);
                     sessions.push(new_id.clone());
                     let mcp_count = params
                         .get("mcpServers")
