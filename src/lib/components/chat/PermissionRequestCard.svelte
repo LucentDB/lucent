@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { AgentPermissionPayload } from '../../ipc/ai.ts';
+  import { aiConfig } from '../../stores/ai-config.svelte.ts';
 
   let {
     permission,
@@ -10,6 +11,8 @@
     onAllow?: () => void;
     onReject?: () => void;
   } = $props();
+
+  const autoDenied = $derived(aiConfig.acp?.autoDenyPermissions === true);
 </script>
 
 <div class="perm-card">
@@ -31,10 +34,17 @@
       {/each}
     </div>
   {/if}
-  <div class="perm-actions">
-    <button class="btn-reject" onclick={onReject}>Reject</button>
-    <button class="btn-allow" onclick={onAllow}>Allow once</button>
-  </div>
+  {#if autoDenied}
+    <div class="perm-note">
+      Auto-denied by settings — the agent's request was refused.
+    </div>
+  {:else}
+    <div class="perm-note">Awaiting your decision</div>
+    <div class="perm-actions">
+      <button class="btn-reject" onclick={onReject}>Reject</button>
+      <button class="btn-allow" onclick={onAllow}>Allow once</button>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -96,6 +106,14 @@
     background: color-mix(in srgb, var(--accent) 10%, transparent);
     padding: 3px 8px;
     border-radius: var(--radius-full);
+  }
+  .perm-note {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 8px;
   }
   .perm-actions {
     display: flex;
