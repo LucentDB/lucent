@@ -15,6 +15,7 @@ import {
   demoteContentToNote,
   addToolCallSegments,
   updateToolResult,
+  markStoppedToolCalls,
   finalizeSession,
   setSessionExpanded,
 } from './chat.svelte.ts';
@@ -191,6 +192,48 @@ describe('addToolCallSegments and updateToolResult', () => {
     };
     expect(seg1.call.summary).toBeNull();
     expect(seg2.call.summary).toBe('4 rows');
+  });
+
+  it('updateToolResult applies the explicit status', () => {
+    const conv = seedMessage('m1');
+    addToolCallSegments(conv.id, 'm1', [{ id: 'tc1', name: 'run_readonly_query', args: {} }]);
+    updateToolResult(conv.id, 'm1', 'tc1', {
+      summary: 'read-only guard refused',
+      status: 'failed',
+    });
+    const seg = getConv(conv.id).messages[0].session!.segments[0];
+    expect(seg.type).toBe('tool_call');
+    if (seg.type === 'tool_call') {
+      expect(seg.call.status).toBe('failed');
+      expect(seg.call.summary).toBe('read-only guard refused');
+    }
+  });
+
+  it('updateToolResult falls back to the error-prefix convention', () => {
+    const conv = seedMessage('m1');
+    addToolCallSegments(conv.id, 'm1', [{ id: 'tc1', name: 'x', args: {} }]);
+    updateToolResult(conv.id, 'm1', 'tc1', { summary: 'error: boom' });
+    const seg = getConv(conv.id).messages[0].session!.segments[0];
+    if (seg.type === 'tool_call') expect(seg.call.status).toBe('failed');
+  });
+
+  it('markStoppedToolCalls only touches unresolved calls', () => {
+    const conv = seedMessage('m1');
+    addToolCallSegments(conv.id, 'm1', [
+      { id: 'tc1', name: 'a', args: {} },
+      { id: 'tc2', name: 'b', args: {} },
+      { id: 'tc3', name: 'c', args: {} },
+    ]);
+    updateToolResult(conv.id, 'm1', 'tc1', { summary: 'ok', status: 'completed' });
+    updateToolResult(conv.id, 'm1', 'tc2', { summary: 'bad', status: 'failed' });
+    markStoppedToolCalls(conv.id, 'm1');
+    const segs = getConv(conv.id).messages[0].session!.segments;
+    const byId = Object.fromEntries(
+      segs.map((s) => (s.type === 'tool_call' ? [s.call.id, s.call.status] : [])),
+    );
+    expect(byId['tc1']).toBe('completed');
+    expect(byId['tc2']).toBe('failed');
+    expect(byId['tc3']).toBe('stopped');
   });
 });
 

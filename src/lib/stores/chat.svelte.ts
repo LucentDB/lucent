@@ -8,12 +8,17 @@ export interface TokenUsage {
   cachedPromptTokens: number;
 }
 
+/** Explicit lifecycle status of a tool call (spec D7). `stopped` is set
+ *  when the turn ends cancelled before the call resolved. */
+export type ToolCallStatus = 'running' | 'completed' | 'failed' | 'stopped';
+
 export interface ToolCallCard {
   id: string;
   name: string;
   args: unknown;
   summary: string | null;
   output?: ToolOutputPayload;
+  status?: ToolCallStatus;
 }
 
 export type WorkSegment =
@@ -257,7 +262,11 @@ export function updateToolResult(
   convId: string,
   messageId: string,
   toolId: string,
-  update: { summary: string; output?: ToolCallCard['output'] },
+  update: {
+    summary: string;
+    status?: ToolCallStatus;
+    output?: ToolCallCard['output'];
+  },
 ) {
   const session = findMessage(convId, messageId)?.session;
   if (!session) return;
@@ -267,7 +276,29 @@ export function updateToolResult(
         ...seg.call,
         summary: update.summary,
         output: update.output,
+        // Explicit status wins; legacy events (the rig path pre-status)
+        // fall back to the error-prefix convention.
+        status:
+          update.status ??
+          (update.summary === 'error' || update.summary.startsWith('error')
+            ? 'failed'
+            : 'completed'),
       };
+    }
+  }
+}
+
+/** Marks every unresolved tool call as `stopped` — called when a turn ends
+ *  with `stopReason: cancelled` so cards never lie about their state (D7). */
+export function markStoppedToolCalls(convId: string, messageId: string) {
+  const session = findMessage(convId, messageId)?.session;
+  if (!session) return;
+  for (const seg of session.segments) {
+    if (
+      seg.type === 'tool_call' &&
+      (seg.call.status === undefined || seg.call.status === 'running')
+    ) {
+      seg.call = { ...seg.call, status: 'stopped' };
     }
   }
 }

@@ -145,6 +145,7 @@ describe('handleAiEvent', () => {
       type: 'done',
       conversation_id: conv.id,
       final_message: 'Here is the answer',
+      cancelled: false,
       usage: {
         prompt_tokens: 10,
         completion_tokens: 5,
@@ -174,6 +175,7 @@ describe('handleAiEvent', () => {
       type: 'done',
       conversation_id: conv.id,
       final_message: 'ok',
+      cancelled: false,
       usage: {
         prompt_tokens: 120,
         completion_tokens: 45,
@@ -200,6 +202,7 @@ describe('handleAiEvent', () => {
       type: 'done',
       conversation_id: conv.id,
       final_message: 'ok',
+      cancelled: false,
       usage: {
         prompt_tokens: 10,
         completion_tokens: 5,
@@ -232,14 +235,74 @@ describe('handleAiEvent', () => {
     const session = c.messages[0].session!;
     const seg1 = session.segments[0] as {
       type: 'tool_call';
-      call: { summary: string | null };
+      call: { summary: string | null; status?: string };
     };
     const seg2 = session.segments[1] as {
       type: 'tool_call';
-      call: { summary: string | null };
+      call: { summary: string | null; status?: string };
     };
     expect(seg1.call.summary).toBeNull();
     expect(seg2.call.summary).toBe('4 rows');
+    expect(seg2.call.status).toBe('completed');
+  });
+
+  it('forwards explicit tool_result status (completed/failed)', () => {
+    const conv = seedActiveConversationWithMessage('m1');
+    handleAiEvent(conv.id, {
+      type: 'tool_calls',
+      tools: [{ id: 'call_1', name: 'run_readonly_query', args: {} }],
+    });
+    handleAiEvent(conv.id, {
+      type: 'tool_result',
+      id: 'call_1',
+      tool: 'run_readonly_query',
+      summary: 'read-only guard refused',
+      status: 'failed',
+      output: null,
+    });
+    const c = getConv(conv.id);
+    const seg = c.messages[0].session!.segments[0];
+    if (seg.type === 'tool_call') {
+      expect(seg.call.status).toBe('failed');
+      expect(seg.call.summary).toBe('read-only guard refused');
+    }
+  });
+
+  it('marks unresolved tool calls stopped when done arrives with cancelled: true', () => {
+    const conv = seedActiveConversationWithMessage('m1');
+    handleAiEvent(conv.id, {
+      type: 'tool_calls',
+      tools: [
+        { id: 'call_1', name: 'a', args: {} },
+        { id: 'call_2', name: 'b', args: {} },
+      ],
+    });
+    handleAiEvent(conv.id, {
+      type: 'tool_result',
+      id: 'call_1',
+      tool: 'a',
+      summary: 'ok',
+      status: 'completed',
+      output: null,
+    });
+    handleAiEvent(conv.id, {
+      type: 'done',
+      conversation_id: conv.id,
+      final_message: '',
+      cancelled: true,
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        cached_prompt_tokens: 0,
+      },
+    });
+    const c = getConv(conv.id);
+    const segs = c.messages[0].session!.segments;
+    const byId = Object.fromEntries(
+      segs.map((s) => (s.type === 'tool_call' ? [s.call.id, s.call.status] : [])),
+    );
+    expect(byId['call_1']).toBe('completed');
+    expect(byId['call_2']).toBe('stopped');
   });
 
   it('does nothing and does not throw when no message exists yet for the conversation', () => {

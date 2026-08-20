@@ -9,6 +9,7 @@ import {
   addNote,
   addToolCallSegments,
   updateToolResult,
+  markStoppedToolCalls,
   finalizeSession,
   updateLast,
   clearRejectedDml,
@@ -46,12 +47,14 @@ export type AiChannelEvent =
       id: string;
       tool: string;
       summary: string;
+      status?: 'completed' | 'failed';
       output: ToolOutputPayload | null;
     }
   | {
       type: 'done';
       conversation_id: string;
       final_message: string;
+      cancelled: boolean;
       usage: {
         prompt_tokens: number;
         completion_tokens: number;
@@ -142,12 +145,14 @@ export function handleAiEvent(conversationId: string, e: AiChannelEvent) {
     case 'tool_result':
       updateToolResult(conversationId, messageId, e.id, {
         summary: e.summary,
+        status: e.status,
         output: e.output ?? undefined,
       });
       break;
     case 'done':
       chat.isStreaming = false;
       finalizeSession(conversationId, messageId);
+      if (e.cancelled) markStoppedToolCalls(conversationId, messageId);
       updateLast(conversationId, {
         usage: {
           promptTokens: e.usage.prompt_tokens,
