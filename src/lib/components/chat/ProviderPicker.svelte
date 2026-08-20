@@ -1,12 +1,17 @@
-<script>
-  import { onMount } from 'svelte';
+<script lang="ts">
   import ProviderLogo, { PROVIDER_BRANDS } from './ProviderLogo.svelte';
-  import { listInstalledAcpAgents } from '../../ipc/ai.ts';
+  import type { InstalledAcpAgent } from '../../ipc/ai.ts';
 
   let {
     value = 'openai',
     acpAgentId = undefined,
+    installedAgents = [],
     onChange = () => {},
+  }: {
+    value?: string;
+    acpAgentId?: string;
+    installedAgents?: InstalledAcpAgent[];
+    onChange?: (id: string, agentId?: string) => void;
   } = $props();
 
   const PROVIDERS = [
@@ -31,15 +36,11 @@
   // cards fall back to this tint instead of crashing on an undefined lookup.
   const ACP_BRAND = { color: '#8b5cf6', tint: 'rgba(139,92,246,0.12)' };
 
-  // Installed ACP agents, loaded on mount (one card per agent, all with the
-  // `acp` provider id — the agent id travels in `sub`).
-  let acpAgents = $state([]);
-
   let allOptions = $derived([
     ...PROVIDERS,
-    ...acpAgents.map((a) => ({
+    ...installedAgents.map((a) => ({
       id: 'acp',
-      label: 'ACP Agent',
+      label: a.name ?? 'ACP Agent',
       sub: a.id,
       group: 'Agents (ACP)',
     })),
@@ -52,29 +53,20 @@
     })),
   );
 
-  let cards = $state({});
+  let cards = $state<Record<string, HTMLButtonElement>>({});
 
   // Cards are keyed by agent id when present, because several ACP cards
   // share the provider id `acp`.
-  function cardKey(p) {
+  function cardKey(p: { id: string; sub?: string }) {
     return p.sub ?? p.id;
   }
 
-  onMount(async () => {
-    try {
-      const installed = await listInstalledAcpAgents();
-      acpAgents = installed ?? [];
-    } catch {
-      acpAgents = [];
-    }
-  });
-
-  function pick(p) {
+  function pick(p: { id: string; sub?: string }) {
     if (p.sub !== undefined) onChange(p.id, p.sub);
     else onChange(p.id);
   }
 
-  function handleGridKeydown(options, e) {
+  function handleGridKeydown(options: { id: string; sub?: string }[], e: KeyboardEvent) {
     const keys = options.map(cardKey);
     const focusedIdx = keys.findIndex(
       (k) => cards[k] === document.activeElement,

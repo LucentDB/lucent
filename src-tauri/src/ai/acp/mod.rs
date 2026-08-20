@@ -584,6 +584,7 @@ mod tests {
                 args: Vec::new(),
                 env: HashMap::new(),
             },
+            name: None,
         }
     }
 

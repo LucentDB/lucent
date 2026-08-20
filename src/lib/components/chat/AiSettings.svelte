@@ -9,10 +9,12 @@
     getAiSettings,
     listAiModels,
     listRegistryAgents,
+    listInstalledAcpAgents,
     installAcpAgent,
     uninstallAcpAgent,
     type AiModelSummary,
     type RegistryAgentSummary,
+    type InstalledAcpAgent,
   } from '../../ipc/ai.ts';
   import ProviderPicker from './ProviderPicker.svelte';
   import ModelPicker from './ModelPicker.svelte';
@@ -42,6 +44,7 @@
   // Agents (ACP) registry section — browsable regardless of the selected
   // provider, so the user can install an agent before picking it.
   let agents: RegistryAgentSummary[] = $state([]);
+  let installedAgents = $state<InstalledAcpAgent[]>([]);
   let acpLoading = $state(false);
   let acpError = $state('');
   let statusLabel = $derived(
@@ -80,7 +83,16 @@
       err = `Could not load saved settings: ${e}`;
     }
     await refreshAgents();
+    await refreshInstalledAgents();
   });
+
+  async function refreshInstalledAgents() {
+    try {
+      installedAgents = (await listInstalledAcpAgents()) ?? [];
+    } catch {
+      installedAgents = [];
+    }
+  }
 
   async function refreshAgents() {
     acpLoading = true;
@@ -101,6 +113,7 @@
     try {
       await installAcpAgent(agentId);
       await refreshAgents();
+      await refreshInstalledAgents();
     } catch (e) {
       acpError =
         typeof e === 'string' ? e : ((e as Error)?.message ?? String(e));
@@ -112,6 +125,7 @@
     try {
       await uninstallAcpAgent(agentId);
       await refreshAgents();
+      await refreshInstalledAgents();
     } catch (e) {
       acpError =
         typeof e === 'string' ? e : ((e as Error)?.message ?? String(e));
@@ -249,6 +263,7 @@
       <ProviderPicker
         value={aiConfig.provider}
         acpAgentId={aiConfig.acp?.agentId}
+        {installedAgents}
         onChange={handleProviderChange}
       />
       {#if aiConfig.provider === 'acp' && aiConfig.acp}

@@ -88,6 +88,8 @@ export interface InstalledAcpAgent {
   id: string;
   version: string;
   launch: { cmd: string; args: string[]; env: Record<string, string> };
+  /** Display name from the registry manifest (older installs lack it). */
+  name?: string | null;
 }
 
 /** ACP provider selection block — `AiConfig.acp` on the backend (camelCase). */

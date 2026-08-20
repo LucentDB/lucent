@@ -296,4 +296,46 @@ describe('AiSettings', () => {
       }),
     );
   });
+
+  it('refreshes the provider picker after installing an agent', async () => {
+    const agent = {
+      id: 'opencode',
+      name: 'OpenCode',
+      version: '1.2.3',
+      description: 'Terminal agent',
+      license: 'MIT',
+      icon: null,
+      installedVersion: null,
+      updateAvailable: false,
+    };
+    let installed: unknown[] = [];
+    invokeMock.mockImplementation(async (cmd) => {
+      if (cmd === 'get_ai_settings') return { ...aiConfig };
+      if (cmd === 'list_registry_agents') return [agent];
+      if (cmd === 'list_installed_acp_agents') return installed;
+      if (cmd === 'install_acp_agent') {
+        installed = [
+          {
+            id: 'opencode',
+            version: '1.2.3',
+            launch: { cmd: 'npx', args: [], env: {} },
+            name: 'OpenCode',
+          },
+        ];
+        return null;
+      }
+      return undefined;
+    });
+    render(AiSettings, { onClose: vi.fn() });
+
+    await screen.findByText('Terminal agent');
+    await fireEvent.click(
+      await screen.findByRole('button', { name: 'Install' }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole('radio', { name: 'OpenCode — opencode' }),
+      ).toBeTruthy(),
+    );
+  });
 });
