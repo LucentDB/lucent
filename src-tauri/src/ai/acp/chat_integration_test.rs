@@ -44,6 +44,7 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
         "LUCENT_ACP_WORKSPACE",
         _ws.path().to_string_lossy().into_owned(),
     );
+    std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "50");
     let script_dir = tempfile::tempdir().unwrap();
     let script_path = script_dir.path().join("script.json");
     std::fs::write(
@@ -106,8 +107,12 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
     .expect("the full ACP turn completes");
 
     // The exact event sequence the rig path would emit for this script
-    // (Thinking + Text + Done).
+    // (Thinking + Text + Done), excluding the honest Notice when no bridge connects.
     let events = received.lock().unwrap().clone();
+    let events: Vec<_> = events
+        .into_iter()
+        .filter(|e| !matches!(e, AiEvent::Notice { .. }))
+        .collect();
     assert_eq!(events.len(), 3, "Thinking + Text + Done: {events:?}");
     assert!(matches!(&events[0], AiEvent::Thinking { content } if content == "thinking…"));
     assert!(matches!(&events[1], AiEvent::Text { content } if content == "Hello"));

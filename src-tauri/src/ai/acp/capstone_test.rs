@@ -534,3 +534,87 @@ async fn agent_spawning_mcp_binary_marks_bridge_connected() {
 
     acp.drop_session("conv-connect").await;
 }
+
+#[tokio::test]
+async fn tools_gate_claims_tools_when_the_bridge_connects() {
+    // Spec D4, connected side, end to end: the stub plays a real agent's
+    // MCP-client role (STUB_SPAWN_MCP spawns the REAL lucent-db-tools-mcp
+    // binary), so the first prompt must claim the tools and emit no
+    // no-tools notice. The unconnected side is covered by the driver tests.
+    let _ws = tempfile::tempdir().unwrap();
+    std::env::set_var(
+        "LUCENT_ACP_WORKSPACE",
+        _ws.path().to_string_lossy().into_owned(),
+    );
+    let script_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        script_dir.path().join("script.json"),
+        r#"{"stopReason":"end_turn","steps":[{"notify":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ok"}}}]}"#,
+    )
+    .unwrap();
+
+    let mut env = std::collections::HashMap::new();
+    env.insert("STUB_SPAWN_MCP".to_string(), "1".to_string());
+    env.insert(
+        "STUB_SCRIPT".to_string(),
+        script_dir.path().join("script.json").to_string_lossy().into_owned(),
+    );
+
+    let acp = crate::ai::acp::AcpState::new();
+    let driver = crate::ai::acp::driver::AcpChatDriver::new(
+        acp.clone(),
+        crate::ai::config::AcpAgentConfig {
+            agent_id: "stub-mcp-gate".into(),
+            command: Some(stub_binary()),
+            env,
+            auto_deny_permissions: false,
+        },
+        crate::ai::tools::AiToolContext {
+            db: Arc::new(Mutex::new(None)),
+            connection_id: None,
+            capabilities: None,
+            config: AiConfig::default(),
+            schema_graph: Arc::new(Mutex::new(None)),
+            embedder: Arc::new(Mutex::new(None)),
+            reranker: Arc::new(Mutex::new(None)),
+        },
+    );
+    let sink = Arc::new(crate::ai::agent::CollectorSink(std::sync::Mutex::new(Vec::new())));
+    let conv = Arc::new(Mutex::new(crate::ai::agent::ConversationState::new(
+        "conv-gate".into(),
+    )));
+    driver
+        .chat(
+            "hi".into(),
+            &AiConfig::default(),
+            "sys preamble".into(),
+            conv,
+            sink.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("turn completes with the bridge connected");
+
+    // The gate decided CONNECTED: the tools guidance reached the agent and
+    // no no-tools notice was emitted.
+    let process = acp
+        .manager
+        .processes
+        .lock()
+        .unwrap()
+        .get("stub-mcp-gate")
+        .expect("process record")
+        .clone();
+    let stderr = process.stderr_snippet();
+    assert!(
+        stderr.contains("DATABASE TOOLS IN ACP"),
+        "connected agent gets the tools preamble: {stderr:?}"
+    );
+    let events = sink.0.lock().unwrap().clone();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, crate::ai::events::AiEvent::Notice { .. })),
+        "no no-tools notice when the bridge connected: {events:?}"
+    );
+}

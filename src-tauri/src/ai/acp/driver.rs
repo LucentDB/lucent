@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::oneshot;
 
 pub struct AcpChatDriver {
@@ -92,24 +93,26 @@ impl AcpChatDriver {
         let conn = self.acp_state.ensure_connection(&process).await?;
         let mut events_rx = conn.events.subscribe();
 
-        // v1 has no system-prompt param — the preamble is prepended to the
-        // first user message of a session only (spec §4.4).
-        // Lucent's 4 database tools (search_schema, get_objects_info, run_readonly_query, preview_dml)
-        // are available via native MCP or through `./lucent-tool <tool> '<args>'`
-        // in the session sandbox workspace.
         let first_prompt = session.first_prompt.swap(false, Ordering::SeqCst);
+        let mut notice: Option<String> = None;
         let prompt_text = if first_prompt {
-            let acp_tool_guidance = "\n\nDATABASE TOOLS IN ACP (via MCP):\n\
-                 You have access to Lucent's database MCP server (lucent-db-tools) providing: search_schema, get_objects_info, run_readonly_query, preview_dml.\n\
-                 CRITICAL INSTRUCTIONS:\n\
-                 - ALWAYS use `run_readonly_query` to query the connected database, and `search_schema` / `get_objects_info` to inspect schemas and tables.\n\
-                 - NEVER attempt to inspect or open local database files (such as .duckdb, .sqlite, .db) from disk using bash or python — all database queries must go through the database tools to reach the user's active database connection.\n\
-                 - If your runtime lists MCP tools, invoke `search_schema`, `get_objects_info`, `run_readonly_query`, `preview_dml` as native tool calls. If your runtime runs in a bash-only harness, invoke `./lucent-tool <tool_name> '<json_arguments>'` from your current directory.\n\
-                 Both methods execute directly against the live database through Lucent.".to_string();
-            format!("{system_prompt}{acp_tool_guidance}\n\n{message}")
+            // Spec D4: the preamble only claims DB tools the agent actually
+            // connected (ground truth = the bridge hello). Wait once, decide once —
+            // v1 prepends the preamble to the first user message only.
+            let tools_ok = session.tools.wait_connected(tools_gate_timeout()).await;
+            if !tools_ok && !session.tools_notice.swap(true, Ordering::SeqCst) {
+                notice = Some(
+                    "Database tools didn't reach this agent — it didn't connect Lucent's MCP server, so it can't query your database in this conversation."
+                        .into(),
+                );
+            }
+            first_prompt_text(&system_prompt, &message, &self.acp.agent_id, tools_ok)
         } else {
             message
         };
+        if let Some(content) = notice {
+            sink.event(AiEvent::Notice { content });
+        }
         let (reply_tx, mut reply_rx) = oneshot::channel();
         conn.cmds
             .send(AgentCommand::Prompt {
@@ -447,6 +450,47 @@ pub fn tool_result_text(tu: &ToolCallUpdate) -> String {
     parts.join("\n")
 }
 
+/// The first-prompt tools guidance, prepended when the agent connected
+/// Lucent's DB-tool bridge (spec D4).
+fn acp_tool_guidance() -> String {
+    "\n\nDATABASE TOOLS IN ACP (via MCP):\n\
+     You have access to Lucent's database MCP server (lucent-db-tools) providing: search_schema, get_objects_info, run_readonly_query, preview_dml.\n\
+     CRITICAL INSTRUCTIONS:\n\
+     - ALWAYS use `run_readonly_query` to query the connected database, and `search_schema` / `get_objects_info` to inspect schemas and tables.\n\
+     - NEVER attempt to inspect or open local database files (such as .duckdb, .sqlite, .db) from disk using bash or python — all database queries must go through the database tools to reach the user's active database connection.\n\
+     - If your runtime lists MCP tools, invoke `search_schema`, `get_objects_info`, `run_readonly_query`, `preview_dml` as native tool calls. If your runtime runs in a bash-only harness, invoke `./lucent-tool <tool_name> '<json_arguments>'` from your current directory.\n\
+     Both methods execute directly against the live database through Lucent."
+        .to_string()
+}
+
+/// How long the driver waits on the first prompt for the agent's MCP client
+/// to connect the DB-tools bridge (spec D4). `LUCENT_ACP_TOOLS_GATE_MS`
+/// overrides for tests.
+fn tools_gate_timeout() -> Duration {
+    std::env::var("LUCENT_ACP_TOOLS_GATE_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(5))
+}
+
+/// Composes the first prompt: the tools-available preamble when the bridge
+/// connected, else the honest no-tools preamble with the system prompt
+/// omitted (its tool instructions would tempt a tool-less agent to
+/// fabricate results — spec D4).
+pub fn first_prompt_text(
+    system_prompt: &str,
+    message: &str,
+    agent_id: &str,
+    tools_ok: bool,
+) -> String {
+    if tools_ok {
+        format!("{system_prompt}{}\n\n{message}", acp_tool_guidance())
+    } else {
+        format!("{}\n\n{message}", no_tools_preamble(agent_id))
+    }
+}
+
 /// The honest first-prompt preamble when the agent never connected Lucent's
 /// DB-tool bridge: no tool claims (the model must not promise tools it
 /// doesn't have) and a graceful fallback — SQL the user can run in Lucent's
@@ -712,6 +756,8 @@ mod tests {
     #[tokio::test]
     async fn maps_scripted_updates_to_events() {
         let _ws = hermetic_workspace();
+        let _guard = env_var_guard("LUCENT_ACP_TOOLS_GATE_MS");
+        std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "50");
         let script = script_file(json!({
             "stopReason": "end_turn",
             "steps": [
@@ -749,6 +795,9 @@ mod tests {
         assert_sequence(
             &events,
             vec![
+                AiEvent::Notice {
+                    content: "Database tools didn't reach this agent — it didn't connect Lucent's MCP server, so it can't query your database in this conversation.".into(),
+                },
                 AiEvent::Thinking {
                     content: "thinking…".into(),
                 },
@@ -787,6 +836,8 @@ mod tests {
     #[tokio::test]
     async fn unknown_session_update_variants_are_ignored() {
         let _ws = hermetic_workspace();
+        let _guard = env_var_guard("LUCENT_ACP_TOOLS_GATE_MS");
+        std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "50");
         let script = script_file(json!({
             "stopReason": "end_turn",
             "steps": [
@@ -818,59 +869,107 @@ mod tests {
             .expect("turn completes despite unknown variants");
 
         let events = sink.0.lock().unwrap().clone();
-        assert_eq!(events.len(), 2, "Text + Done: {events:?}");
-        assert!(matches!(&events[0], AiEvent::Text { content } if content == "still here"));
-        assert!(matches!(&events[1], AiEvent::Done { .. }));
+        assert_eq!(events.len(), 3, "Notice + Text + Done: {events:?}");
+        assert!(matches!(&events[0], AiEvent::Notice { .. }));
+        assert!(matches!(&events[1], AiEvent::Text { content } if content == "still here"));
+        assert!(matches!(&events[2], AiEvent::Done { .. }));
+    }
+
+    #[test]
+    fn first_prompt_text_claims_tools_only_when_connected() {
+        let with = first_prompt_text("sys preamble", "hello", "stub", true);
+        assert!(with.contains("DATABASE TOOLS IN ACP"), "tools guidance present: {with}");
+        assert!(with.contains("sys preamble"), "system prompt kept when tools connected");
+        assert!(with.contains("hello"));
+
+        let without = first_prompt_text("sys preamble", "hello", "stub", false);
+        assert!(
+            without.contains("THOSE TOOLS ARE NOT AVAILABLE"),
+            "honest no-tools preamble: {without}"
+        );
+        assert!(
+            !without.contains("sys preamble"),
+            "the tool-laden system prompt is omitted when tools never connected"
+        );
+        assert!(without.contains("hello"));
+    }
+
+    #[test]
+    fn tools_gate_timeout_defaults_to_five_seconds() {
+        let _guard = env_var_guard("LUCENT_ACP_TOOLS_GATE_MS");
+        std::env::remove_var("LUCENT_ACP_TOOLS_GATE_MS");
+        assert_eq!(tools_gate_timeout(), Duration::from_secs(5));
+        std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "250");
+        assert_eq!(tools_gate_timeout(), Duration::from_millis(250));
     }
 
     #[tokio::test]
-    async fn first_turn_prompt_carries_acp_tool_guidance() {
+    async fn no_tools_preamble_when_the_bridge_never_connects() {
         let _ws = hermetic_workspace();
+        let _guard = env_var_guard("LUCENT_ACP_TOOLS_GATE_MS");
+        std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "200");
+
         let script = script_file(json!({
             "stopReason": "end_turn",
-            "steps": [
-                {"notify": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ok"}}}
-            ]
+            "steps": [{"notify": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ok"}}}]
         }));
-
         let acp_state = AcpState::new();
-        let mut cfg = acp_cfg(Some(&script.path().join("script.json")));
-        cfg.agent_id = "pi-acp".into();
+        let cfg = acp_cfg(Some(&script.path().join("script.json"))); // no STUB_SPAWN_MCP → nothing connects
         let driver = AcpChatDriver::new(acp_state.clone(), cfg.clone(), tool_ctx());
         let sink = Arc::new(CollectorSink(std::sync::Mutex::new(Vec::new())));
-        let conv = conversation("conv-4");
+        let conv = conversation("conv-gate");
 
         driver
             .chat(
                 "hi".into(),
                 &AiConfig::default(),
-                "system preamble with schema context".into(),
-                conv,
+                "sys preamble".into(),
+                conv.clone(),
                 sink.clone(),
                 tokio_util::sync::CancellationToken::new(),
             )
             .await
             .expect("turn completes");
 
-        let process = acp_state
-            .manager
-            .ensure_process(&cfg.agent_id, &cfg)
-            .await
-            .expect("cached process");
+        let process = acp_state.manager.ensure_process(&cfg.agent_id, &cfg).await.unwrap();
         let stderr = process.stderr_snippet();
         assert!(
-            stderr.contains("DATABASE TOOLS IN ACP"),
-            "ACP tool guidance reached the agent: {stderr:?}"
+            stderr.contains("THOSE TOOLS ARE NOT AVAILABLE"),
+            "the honest preamble reached the agent: {stderr:?}"
         );
         assert!(
-            stderr.contains("system preamble with schema context"),
-            "the system prompt reached the agent: {stderr:?}"
+            !stderr.contains("sys preamble"),
+            "the tool-laden system prompt was dropped: {stderr:?}"
         );
 
         let events = sink.0.lock().unwrap().clone();
-        assert_eq!(events.len(), 2, "Text + Done: {events:?}");
-        assert!(matches!(&events[0], AiEvent::Text { content } if content == "ok"));
-        assert!(matches!(&events[1], AiEvent::Done { .. }));
+        let notices = events
+            .iter()
+            .filter(|e| matches!(e, AiEvent::Notice { .. }))
+            .count();
+        assert_eq!(notices, 1, "the notice fires exactly once: {events:?}");
+
+        // Second turn: no re-wait, no second notice.
+        driver
+            .chat(
+                "again".into(),
+                &AiConfig::default(),
+                "sys preamble".into(),
+                conv,
+                sink.clone(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("follow-up turn completes");
+        let events = sink.0.lock().unwrap().clone();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, AiEvent::Notice { .. }))
+                .count(),
+            1,
+            "the notice is exactly-once per session: {events:?}"
+        );
     }
 
     #[tokio::test]
@@ -972,6 +1071,8 @@ mod tests {
     #[tokio::test]
     async fn cancellation_resolves_pending_permissions_before_cancel_notification() {
         let _ws = hermetic_workspace();
+        let _gate_guard = env_var_guard("LUCENT_ACP_TOOLS_GATE_MS");
+        std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "50");
         // The stub emits a permission request mid-turn and then waits for
         // the client's response before finishing. The client (driver) must
         // answer with Cancelled (normative order) when the token cancels.
@@ -1200,6 +1301,8 @@ mod tests {
     #[tokio::test]
     async fn user_message_chunks_are_excluded_from_the_assistant_stream() {
         let _ws = hermetic_workspace();
+        let _guard = env_var_guard("LUCENT_ACP_TOOLS_GATE_MS");
+        std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "50");
         let script = script_file(json!({
             "stopReason": "end_turn",
             "steps": [
@@ -1229,12 +1332,16 @@ mod tests {
             .expect("turn completes");
 
         let events = sink.0.lock().unwrap().clone();
-        assert_eq!(events.len(), 2, "Text + Done only: {events:?}");
+        let non_notice_events: Vec<_> = events
+            .into_iter()
+            .filter(|e| !matches!(e, AiEvent::Notice { .. }))
+            .collect();
+        assert_eq!(non_notice_events.len(), 2, "Text + Done only: {non_notice_events:?}");
         assert!(
-            matches!(&events[0], AiEvent::Text { content } if content == "real answer"),
-            "only the agent's own text streams: {events:?}"
+            matches!(&non_notice_events[0], AiEvent::Text { content } if content == "real answer"),
+            "only the agent's own text streams: {non_notice_events:?}"
         );
-        let done = events
+        let done = non_notice_events
             .iter()
             .find(|e| matches!(e, AiEvent::Done { .. }))
             .unwrap();

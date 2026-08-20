@@ -67,6 +67,7 @@ fn hermetic_workspace() -> tempfile::TempDir {
         "LUCENT_ACP_WORKSPACE",
         dir.path().to_string_lossy().into_owned(),
     );
+    std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "50");
     dir
 }
 
