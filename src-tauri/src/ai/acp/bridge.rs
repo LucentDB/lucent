@@ -6,7 +6,7 @@
 //! DML approval hold), and the `BridgeClient` used by the MCP binary's tests.
 
 use crate::ai::acp::wire;
-use crate::ai::events::{AiEvent, DmlApprovalPayload};
+use crate::ai::events::{AiEvent, DmlApprovalPayload, ToolResultStatus};
 use crate::ai::tools::{AiToolContext, LucentToolEnum, ToolError, ToolOutput};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -347,6 +347,7 @@ pub(crate) async fn dispatch(
                     "execution_time_ms": execution_time_ms,
                     "truncated": truncated,
                 })),
+                status: ToolResultStatus::Completed,
             });
             sink.event(AiEvent::QueryResult {
                 columns,
@@ -1081,8 +1082,8 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn windows_serve_accepts_multiple_sequential_clients() {
-        use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
         use std::time::Duration;
+        use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
 
         let name = format!(r"\\.\pipe\lucent-bridge-test-{}", std::process::id());
         let first = ServerOptions::new()
@@ -1094,12 +1095,16 @@ mod tests {
             (
                 "echo".into(),
                 serde_json::json!({}),
-                Ok(ToolOutput::Text { content: "one".into() }),
+                Ok(ToolOutput::Text {
+                    content: "one".into(),
+                }),
             ),
             (
                 "echo".into(),
                 serde_json::json!({}),
-                Ok(ToolOutput::Text { content: "two".into() }),
+                Ok(ToolOutput::Text {
+                    content: "two".into(),
+                }),
             ),
         ]));
         let sink = Arc::new(RecordingSink::new());
@@ -1119,7 +1124,11 @@ mod tests {
             wire::write_hello(&mut client, &token).await.unwrap();
             wire::write_request(
                 &mut client,
-                &wire::BridgeRequest::Call { id: 1, tool: "echo".into(), args: serde_json::json!({}) },
+                &wire::BridgeRequest::Call {
+                    id: 1,
+                    tool: "echo".into(),
+                    args: serde_json::json!({}),
+                },
             )
             .await
             .unwrap();
@@ -1139,7 +1148,11 @@ mod tests {
         wire::write_hello(&mut client, &token).await.unwrap();
         wire::write_request(
             &mut client,
-            &wire::BridgeRequest::Call { id: 2, tool: "echo".into(), args: serde_json::json!({}) },
+            &wire::BridgeRequest::Call {
+                id: 2,
+                tool: "echo".into(),
+                args: serde_json::json!({}),
+            },
         )
         .await
         .unwrap();
@@ -1155,4 +1168,3 @@ mod tests {
         serve_task.abort(); // long-lived accept loop
     }
 }
-

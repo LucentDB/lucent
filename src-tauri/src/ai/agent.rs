@@ -580,6 +580,7 @@ impl DatabaseAgent {
                     conversation_id: conversation_id.clone(),
                     final_message: "Reached maximum turns.".into(),
                     usage: TokenUsage::default(),
+                    cancelled: false,
                 });
                 return Ok(());
             }
@@ -648,6 +649,7 @@ impl DatabaseAgent {
                     conversation_id: conversation_id.clone(),
                     final_message: final_msg,
                     usage: response.usage,
+                    cancelled: false,
                 });
                 conv_state.lock().await.state = AgentState::Idle;
                 return Ok(());
@@ -830,6 +832,7 @@ impl DatabaseAgent {
                     tool: tc.name.clone(),
                     summary,
                     output: output_json,
+                    status: crate::ai::events::ToolResultStatus::Completed,
                 });
 
                 if let crate::ai::tools::ToolOutput::QueryResult {

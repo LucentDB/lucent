@@ -16,6 +16,7 @@ use crate::ai::agent::{AgentDriver, AgentSink, AgentState, ConversationState};
 use crate::ai::config::{AcpAgentConfig, AiConfig};
 use crate::ai::events::{
     AgentPermissionOption, AgentPermissionPayload, AiEvent, TokenUsage, ToolCallInfo,
+    ToolResultStatus,
 };
 use crate::ai::tools::AiToolContext;
 use agent_client_protocol::schema::v1::{
@@ -248,6 +249,7 @@ impl AcpChatDriver {
             conversation_id: conversation_id.clone(),
             final_message,
             usage,
+            cancelled: matches!(outcome.stop_reason, StopReason::Cancelled),
         });
 
         // Release the conversation claim (mirrors `DatabaseAgent::chat`'s
@@ -411,9 +413,25 @@ pub fn map_update(update: &SessionUpdate) -> Option<AiEvent> {
                 tool: String::new(), // filled by chat()'s name tracking
                 summary: tool_result_text(tu),
                 output: None,
+                status: ToolResultStatus::Completed,
             }),
-            // pending/in_progress re-renders: the frontend updates the card
-            // in place; a failed call has no result payload in v1.
+            // A failed call has no result payload in v1, but it MUST surface as a
+            // failure — the card renders the error state (spec D7).
+            Some(ToolCallStatus::Failed) => {
+                let text = tool_result_text(tu);
+                Some(AiEvent::ToolResult {
+                    id: tu.tool_call_id.to_string(),
+                    tool: String::new(),
+                    summary: if text.is_empty() {
+                        "Tool call failed".to_string()
+                    } else {
+                        text
+                    },
+                    output: None,
+                    status: ToolResultStatus::Failed,
+                })
+            }
+            // pending/in_progress re-renders: the frontend updates the card in place.
             _ => None,
         },
         _ => {
@@ -733,6 +751,7 @@ mod tests {
                 tool: String::new(),
                 summary: "found 2 tables".into(),
                 output: None,
+                status: ToolResultStatus::Completed,
             })
         );
 
@@ -741,6 +760,51 @@ mod tests {
             ToolCallUpdateFields::new().status(ToolCallStatus::InProgress),
         );
         assert_eq!(map_update(&SessionUpdate::ToolCallUpdate(pending)), None);
+    }
+
+    #[test]
+    fn map_update_maps_failed_tool_call_updates_to_failed_results() {
+        use agent_client_protocol::schema::v1::{Content, ToolCallContent, ToolCallUpdateFields};
+        let failed = ToolCallUpdate::new(
+            "tc1",
+            ToolCallUpdateFields::new()
+                .status(ToolCallStatus::Failed)
+                .content(vec![ToolCallContent::Content(Content::new(
+                    ContentBlock::Text(agent_client_protocol::schema::v1::TextContent::new(
+                        "read-only guard refused",
+                    )),
+                ))]),
+        );
+        match map_update(&SessionUpdate::ToolCallUpdate(failed)) {
+            Some(AiEvent::ToolResult {
+                id,
+                status,
+                summary,
+                output,
+                ..
+            }) => {
+                assert_eq!(id, "tc1");
+                assert_eq!(status, ToolResultStatus::Failed);
+                assert_eq!(summary, "read-only guard refused");
+                assert!(output.is_none());
+            }
+            other => panic!("expected failed ToolResult, got {other:?}"),
+        }
+
+        // A failed update with no content still produces a failed result.
+        let bare = ToolCallUpdate::new(
+            "tc2",
+            ToolCallUpdateFields::new().status(ToolCallStatus::Failed),
+        );
+        match map_update(&SessionUpdate::ToolCallUpdate(bare)) {
+            Some(AiEvent::ToolResult {
+                status, summary, ..
+            }) => {
+                assert_eq!(status, ToolResultStatus::Failed);
+                assert_eq!(summary, "Tool call failed");
+            }
+            other => panic!("expected failed ToolResult, got {other:?}"),
+        }
     }
 
     #[test]
@@ -819,6 +883,7 @@ mod tests {
                     tool: "search_schema".into(), // enriched from the ToolCall
                     summary: "found 2 tables".into(),
                     output: None,
+                    status: ToolResultStatus::Completed,
                 },
                 AiEvent::Done {
                     conversation_id: "conv-1".into(),
@@ -828,6 +893,7 @@ mod tests {
                         completion_tokens: 0,
                         cached_prompt_tokens: 0,
                     },
+                    cancelled: false,
                 },
             ],
         );
@@ -878,8 +944,14 @@ mod tests {
     #[test]
     fn first_prompt_text_claims_tools_only_when_connected() {
         let with = first_prompt_text("sys preamble", "hello", "stub", true);
-        assert!(with.contains("DATABASE TOOLS IN ACP"), "tools guidance present: {with}");
-        assert!(with.contains("sys preamble"), "system prompt kept when tools connected");
+        assert!(
+            with.contains("DATABASE TOOLS IN ACP"),
+            "tools guidance present: {with}"
+        );
+        assert!(
+            with.contains("sys preamble"),
+            "system prompt kept when tools connected"
+        );
         assert!(with.contains("hello"));
 
         let without = first_prompt_text("sys preamble", "hello", "stub", false);
@@ -931,7 +1003,11 @@ mod tests {
             .await
             .expect("turn completes");
 
-        let process = acp_state.manager.ensure_process(&cfg.agent_id, &cfg).await.unwrap();
+        let process = acp_state
+            .manager
+            .ensure_process(&cfg.agent_id, &cfg)
+            .await
+            .unwrap();
         let stderr = process.stderr_snippet();
         assert!(
             stderr.contains("THOSE TOOLS ARE NOT AVAILABLE"),
@@ -1148,11 +1224,16 @@ mod tests {
             .find(|e| matches!(e, AiEvent::Done { .. }))
             .expect("Done present after cancel");
         match done {
-            AiEvent::Done { final_message, .. } => {
+            AiEvent::Done {
+                final_message,
+                cancelled,
+                ..
+            } => {
                 // The turn resolves with stopReason "cancelled" — the
                 // accumulated streamed text is kept (plan: Cancelled →
                 // text_buf), so the final message is whatever the agent
                 // emitted after the permission resolved.
+                assert!(cancelled, "a cancelled turn reports cancelled: {done:?}");
                 assert_eq!(final_message, "after permission");
             }
             _ => unreachable!(),
@@ -1336,7 +1417,11 @@ mod tests {
             .into_iter()
             .filter(|e| !matches!(e, AiEvent::Notice { .. }))
             .collect();
-        assert_eq!(non_notice_events.len(), 2, "Text + Done only: {non_notice_events:?}");
+        assert_eq!(
+            non_notice_events.len(),
+            2,
+            "Text + Done only: {non_notice_events:?}"
+        );
         assert!(
             matches!(&non_notice_events[0], AiEvent::Text { content } if content == "real answer"),
             "only the agent's own text streams: {non_notice_events:?}"

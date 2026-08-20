@@ -79,6 +79,7 @@ impl AgentSink for CorrelatingSink {
                 tool,
                 summary,
                 output: Some(output),
+                ..
             } if id.starts_with("acp-") => {
                 self.state.push(BufferedToolResult {
                     tool,
@@ -131,6 +132,7 @@ mod tests {
             tool: tool.into(),
             summary: "1 row".into(),
             output: Some(query_result_payload()),
+            status: crate::ai::events::ToolResultStatus::Completed,
         }
     }
 
@@ -206,6 +208,7 @@ mod tests {
             tool: "t".into(),
             summary: "s".into(),
             output: None,
+            status: crate::ai::events::ToolResultStatus::Completed,
         });
         assert_eq!(
             sink.events.lock().unwrap().len(),

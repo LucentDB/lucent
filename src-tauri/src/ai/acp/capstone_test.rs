@@ -557,7 +557,11 @@ async fn tools_gate_claims_tools_when_the_bridge_connects() {
     env.insert("STUB_SPAWN_MCP".to_string(), "1".to_string());
     env.insert(
         "STUB_SCRIPT".to_string(),
-        script_dir.path().join("script.json").to_string_lossy().into_owned(),
+        script_dir
+            .path()
+            .join("script.json")
+            .to_string_lossy()
+            .into_owned(),
     );
 
     let acp = crate::ai::acp::AcpState::new();
@@ -579,7 +583,9 @@ async fn tools_gate_claims_tools_when_the_bridge_connects() {
             reranker: Arc::new(Mutex::new(None)),
         },
     );
-    let sink = Arc::new(crate::ai::agent::CollectorSink(std::sync::Mutex::new(Vec::new())));
+    let sink = Arc::new(crate::ai::agent::CollectorSink(std::sync::Mutex::new(
+        Vec::new(),
+    )));
     let conv = Arc::new(Mutex::new(crate::ai::agent::ConversationState::new(
         "conv-gate".into(),
     )));

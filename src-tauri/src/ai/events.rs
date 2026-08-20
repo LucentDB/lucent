@@ -3,6 +3,17 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+/// The terminal state of a tool call as reported by the agent (v1
+/// `ToolCallStatus`). `Failed` renders as an error card (spec D7); the rig
+/// path always emits `Completed`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultStatus {
+    #[default]
+    Completed,
+    Failed,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AiEvent {
@@ -20,6 +31,9 @@ pub enum AiEvent {
         tool: String,
         summary: String,
         output: Option<serde_json::Value>,
+        /// `Failed` renders the card in its error state (spec D7).
+        #[serde(default)]
+        status: ToolResultStatus,
     },
     /// A system notice from Lucent itself (not the agent): rendered as a
     /// note segment in the work session. Used e.g. when the ACP agent never
@@ -39,6 +53,10 @@ pub enum AiEvent {
         conversation_id: String,
         final_message: String,
         usage: TokenUsage,
+        /// True when the turn ended with `stopReason: cancelled` — the
+        /// frontend marks unresolved tool calls as `stopped` (spec D7).
+        #[serde(default)]
+        cancelled: bool,
     },
 }
 
@@ -228,15 +246,40 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_event_serializes_with_id() {
+    fn tool_result_status_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_value(ToolResultStatus::Completed).unwrap(),
+            "completed"
+        );
+        assert_eq!(
+            serde_json::to_value(ToolResultStatus::Failed).unwrap(),
+            "failed"
+        );
+    }
+
+    #[test]
+    fn tool_result_event_serializes_with_status() {
         let event = AiEvent::ToolResult {
             id: "call_1".into(),
-            tool: "search_schema".into(),
-            summary: "ok".into(),
+            tool: "run_readonly_query".into(),
+            summary: "1 row".into(),
             output: None,
+            status: ToolResultStatus::Failed,
         };
         let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["id"], "call_1");
+        assert_eq!(json["status"], "failed");
+    }
+
+    #[test]
+    fn done_event_serializes_cancelled_flag() {
+        let event = AiEvent::Done {
+            conversation_id: "c1".into(),
+            final_message: "done".into(),
+            usage: TokenUsage::default(),
+            cancelled: true,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["cancelled"], true);
     }
 
     #[test]

@@ -120,6 +120,7 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
         AiEvent::Done {
             conversation_id,
             final_message,
+            cancelled,
             ..
         } => {
             // Mirrors the rig path: `DatabaseAgent::chat` keys the Done
@@ -127,6 +128,7 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
             // keeps the same contract.
             assert_eq!(conversation_id, "conn-1");
             assert_eq!(final_message, "Hello");
+            assert!(!cancelled, "successful turn is not cancelled");
         }
         other => panic!("expected Done, got {other:?}"),
     }
