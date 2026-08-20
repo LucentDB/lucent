@@ -35,6 +35,20 @@ fn stub_binary() -> String {
     );
 }
 
+struct EnvVarGuard<'a>(&'a str, Option<String>);
+impl Drop for EnvVarGuard<'_> {
+    fn drop(&mut self) {
+        match &self.1 {
+            Some(v) => std::env::set_var(self.0, v),
+            None => std::env::remove_var(self.0),
+        }
+    }
+}
+fn env_var_guard(name: &'static str) -> EnvVarGuard<'static> {
+    let prior = std::env::var(name).ok();
+    EnvVarGuard(name, prior)
+}
+
 #[tokio::test]
 async fn full_turn_through_run_agent_turn_with_stub_agent() {
     // Hermetic sandbox + scripted stub behavior (thought chunk → message
@@ -44,6 +58,7 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
         "LUCENT_ACP_WORKSPACE",
         _ws.path().to_string_lossy().into_owned(),
     );
+    let _gate_guard = env_var_guard("LUCENT_ACP_TOOLS_GATE_MS");
     std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "50");
     let script_dir = tempfile::tempdir().unwrap();
     let script_path = script_dir.path().join("script.json");

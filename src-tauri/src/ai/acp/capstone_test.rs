@@ -535,6 +535,20 @@ async fn agent_spawning_mcp_binary_marks_bridge_connected() {
     acp.drop_session("conv-connect").await;
 }
 
+struct EnvVarGuard<'a>(&'a str, Option<String>);
+impl Drop for EnvVarGuard<'_> {
+    fn drop(&mut self) {
+        match &self.1 {
+            Some(v) => std::env::set_var(self.0, v),
+            None => std::env::remove_var(self.0),
+        }
+    }
+}
+fn env_var_guard(name: &'static str) -> EnvVarGuard<'static> {
+    let prior = std::env::var(name).ok();
+    EnvVarGuard(name, prior)
+}
+
 #[tokio::test]
 async fn tools_gate_claims_tools_when_the_bridge_connects() {
     // Spec D4, connected side, end to end: the stub plays a real agent's
@@ -546,6 +560,8 @@ async fn tools_gate_claims_tools_when_the_bridge_connects() {
         "LUCENT_ACP_WORKSPACE",
         _ws.path().to_string_lossy().into_owned(),
     );
+    let _gate_guard = env_var_guard("LUCENT_ACP_TOOLS_GATE_MS");
+    std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "5000");
     let script_dir = tempfile::tempdir().unwrap();
     std::fs::write(
         script_dir.path().join("script.json"),
