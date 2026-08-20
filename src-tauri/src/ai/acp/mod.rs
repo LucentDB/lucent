@@ -277,15 +277,7 @@ impl AcpState {
             let _ = std::fs::write(vscode_dir.join("mcp.json"), &mcp_json);
         }
 
-        // 5. Update global ~/.pi/agent/mcp.json if ~/.pi exists
-        if let Ok(home) = std::env::var("HOME") {
-            let global_pi = std::path::PathBuf::from(home).join(".pi").join("agent");
-            if global_pi.exists() {
-                let _ = std::fs::write(global_pi.join("mcp.json"), &mcp_json);
-            }
-        }
-
-        // 3. Write executable lucent-tool helper script for terminal/bash-based agents (e.g. pi-acp)
+        // 5. Write executable lucent-tool helper script for terminal/bash-based agents (e.g. pi-acp)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -465,10 +457,7 @@ fn probe_bridge_candidates(parent: &std::path::Path, name: &str) -> Option<std::
         parent.join(format!("{name}-{triple}.exe")),
     ];
     #[cfg(not(windows))]
-    let candidates = [
-        parent.join(name),
-        parent.join(format!("{name}-{triple}")),
-    ];
+    let candidates = [parent.join(name), parent.join(format!("{name}-{triple}"))];
     candidates.into_iter().find(|c| c.exists())
 }
 
@@ -779,6 +768,45 @@ mod tests {
         assert!(!Arc::ptr_eq(&s1, &s2), "distinct entries");
     }
 
+    #[tokio::test]
+    async fn session_for_never_touches_a_global_pi_mcp_config() {
+        let _ws = hermetic_workspace();
+        // Plant a fake user ~/.pi/agent/mcp.json with a sentinel, then point
+        // HOME at it — session_for must leave it byte-identical (spec D13).
+        let home = tempfile::tempdir().unwrap();
+        let global_pi = home.path().join(".pi").join("agent");
+        std::fs::create_dir_all(&global_pi).unwrap();
+        let sentinel = r#"{"mcpServers":{"user-server":{"command":"keep"}}}"#;
+        std::fs::write(global_pi.join("mcp.json"), sentinel).unwrap();
+
+        let prior = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home.path());
+        let _guard = EnvVarGuard("HOME", prior);
+
+        let acp = AcpState::new();
+        let process = stub_process();
+        let sink = sink();
+        acp.session_for("conv-1", &process, &tool_ctx(), &sink)
+            .await
+            .expect("session/new round-trips");
+
+        let after = std::fs::read_to_string(global_pi.join("mcp.json")).unwrap();
+        assert_eq!(
+            after, sentinel,
+            "the user's global pi config is never overwritten"
+        );
+    }
+
+    struct EnvVarGuard<'a>(&'a str, Option<String>);
+    impl Drop for EnvVarGuard<'_> {
+        fn drop(&mut self) {
+            match &self.1 {
+                Some(v) => std::env::set_var(self.0, v),
+                None => std::env::remove_var(self.0),
+            }
+        }
+    }
+
     // ── Bridge binary resolution (F3) ────────────────────────────────────
 
     #[test]
@@ -786,15 +814,6 @@ mod tests {
         // Restores `var` to its prior state on drop — a panic between the
         // set and the assertions must not leak the override to parallel
         // tests (the capstone would spawn the test exe as the MCP binary).
-        struct EnvVarGuard<'a>(&'a str, Option<String>);
-        impl Drop for EnvVarGuard<'_> {
-            fn drop(&mut self) {
-                match &self.1 {
-                    Some(v) => std::env::set_var(self.0, v),
-                    None => std::env::remove_var(self.0),
-                }
-            }
-        }
 
         // Env override wins verbatim (packaged installs / power users point
         // at a custom sidecar location). Use the test binary as the override
@@ -854,10 +873,7 @@ mod tests {
         std::fs::write(dir.path().join(&triple_name), b"x").unwrap();
         let found = probe_bridge_candidates(dir.path(), "lucent-db-tools-mcp")
             .expect("triple candidate is probed");
-        assert_eq!(
-            found.file_name().unwrap().to_string_lossy(),
-            triple_name
-        );
+        assert_eq!(found.file_name().unwrap().to_string_lossy(), triple_name);
     }
 
     #[cfg(windows)]
@@ -882,7 +898,10 @@ mod tests {
         std::fs::write(dir.path().join("lucent-db-tools-mcp"), b"x").unwrap();
         std::fs::write(dir.path().join("lucent-db-tools-mcp.exe"), b"x").unwrap();
         let found = probe_bridge_candidates(dir.path(), "lucent-db-tools-mcp").unwrap();
-        assert_eq!(found.file_name().unwrap().to_string_lossy(), "lucent-db-tools-mcp");
+        assert_eq!(
+            found.file_name().unwrap().to_string_lossy(),
+            "lucent-db-tools-mcp"
+        );
     }
 
     #[tokio::test]
