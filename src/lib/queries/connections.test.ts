@@ -7,7 +7,11 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { QueryClient } from '@tanstack/svelte-query';
-import { connectionsOptions, saveConnection, deleteConnection } from './connections.ts';
+import {
+  connectionsOptions,
+  saveConnection,
+  deleteConnection,
+} from './connections.ts';
 import { qk } from './keys.ts';
 
 const PROFILE = {
