@@ -16,6 +16,8 @@
   import Notebook from './lib/components/notebook/Notebook.svelte';
   import LogsDrawer from './lib/components/LogsDrawer.svelte';
   import { notebooks } from './lib/stores/notebooks.svelte.ts';
+  import { QueryClientProvider } from '@tanstack/svelte-query';
+  import { queryClient } from './lib/queries/client.ts';
   import { resultSummary } from './lib/utils/resultSummary.js';
   import {
     saveNotebook,
@@ -958,208 +960,126 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="app">
-  <AppHeader
-    {config}
-    {connected}
-    {showAiSettings}
-    {showChatPanel}
-    {showLogs}
-    {hasTabs}
-    connectionId={activeConnectionId}
-    leftWidth={sidebarCollapsed ? SIDEBAR_RAIL_WIDTH : sidebarWidth}
-    {sidebarCollapsed}
-    onToggleSidebar={() => (sidebarCollapsed = !sidebarCollapsed)}
-    onToggleTheme={() => theme.toggle()}
-    onToggleAi={() => (showAiSettings = !showAiSettings)}
-    onToggleLogs={() => (showLogs = !showLogs)}
-    onToggleChat={() => {
-      if (hasTabs) showChatPanel = !showChatPanel;
-    }}
-    onTogglePalette={() => (showPalette = true)}
-    onOpenChat={() => (showChatPanel = true)}
-    {tabs}
-    {activeTabId}
-    {view}
-    onSwitchTab={switchTab}
-    onCloseTab={closeTab}
-    onCloseTabs={closeMultipleTabs}
-    onNewQuery={goToQuery}
-    onNotebookSave={async (id) => {
-      const tab = tabs.find((t) => t.id === id);
-      if (tab?.kind === 'notebook') {
-        await saveNotebook(id);
-        updateNotebookTabName(id);
-      } else if (tab?.kind === 'query') {
-        const saved = await saveQueryTab(tab);
-        if (saved) updateQueryTabPath(id, saved);
-      }
-    }}
-    onNotebookSaveAs={async (id) => {
-      const tab = tabs.find((t) => t.id === id);
-      if (tab?.kind === 'notebook') {
-        await saveNotebookAs(id);
-        updateNotebookTabName(id);
-      } else if (tab?.kind === 'query') {
-        const saved = await saveQueryTabAs(tab);
-        if (saved) updateQueryTabPath(id, saved);
-      }
-    }}
-    onNotebookOpen={async () => {
-      const path = await pickNotebookToOpen();
-      if (path) await openNotebookFile(path);
-    }}
-    isTabDirty={(id) => notebooks.get(id)?.isDirty ?? false}
-  />
+<QueryClientProvider client={queryClient}>
+  <div class="app">
+    <AppHeader
+      {config}
+      {connected}
+      {showAiSettings}
+      {showChatPanel}
+      {showLogs}
+      {hasTabs}
+      connectionId={activeConnectionId}
+      leftWidth={sidebarCollapsed ? SIDEBAR_RAIL_WIDTH : sidebarWidth}
+      {sidebarCollapsed}
+      onToggleSidebar={() => (sidebarCollapsed = !sidebarCollapsed)}
+      onToggleTheme={() => theme.toggle()}
+      onToggleAi={() => (showAiSettings = !showAiSettings)}
+      onToggleLogs={() => (showLogs = !showLogs)}
+      onToggleChat={() => {
+        if (hasTabs) showChatPanel = !showChatPanel;
+      }}
+      onTogglePalette={() => (showPalette = true)}
+      onOpenChat={() => (showChatPanel = true)}
+      {tabs}
+      {activeTabId}
+      {view}
+      onSwitchTab={switchTab}
+      onCloseTab={closeTab}
+      onCloseTabs={closeMultipleTabs}
+      onNewQuery={goToQuery}
+      onNotebookSave={async (id) => {
+        const tab = tabs.find((t) => t.id === id);
+        if (tab?.kind === 'notebook') {
+          await saveNotebook(id);
+          updateNotebookTabName(id);
+        } else if (tab?.kind === 'query') {
+          const saved = await saveQueryTab(tab);
+          if (saved) updateQueryTabPath(id, saved);
+        }
+      }}
+      onNotebookSaveAs={async (id) => {
+        const tab = tabs.find((t) => t.id === id);
+        if (tab?.kind === 'notebook') {
+          await saveNotebookAs(id);
+          updateNotebookTabName(id);
+        } else if (tab?.kind === 'query') {
+          const saved = await saveQueryTabAs(tab);
+          if (saved) updateQueryTabPath(id, saved);
+        }
+      }}
+      onNotebookOpen={async () => {
+        const path = await pickNotebookToOpen();
+        if (path) await openNotebookFile(path);
+      }}
+      isTabDirty={(id) => notebooks.get(id)?.isDirty ?? false}
+    />
 
-  {#if connected}
-    <div
-      class="main-layout"
-      class:resizing-sidebar={resizeTarget === 'sidebar'}
-      class:resizing-chat={resizeTarget === 'chat'}
-      class:has-tabs={hasTabs}
-    >
-      {#if !sidebarCollapsed}
-        <div class="sidebar-wrap" style="width:{sidebarWidth}px">
-          <Sidebar
-            onObjectClick={handleObjectClick}
-            onDisconnect={handleDisconnect}
-            onOpenLogs={() => (showLogs = true)}
-          />
-          <div
-            class="resize-handle sidebar-handle"
-            onmousedown={(e) => startResize('sidebar', e)}
-          />
-        </div>
-      {/if}
-
-      {#if hasTabs}
-        <!-- Content area -->
-        <div class="content-area">
-          {#if view === 'query' && activeTab}
-            <div class="vsplit" class:resizing={resizeTarget === 'vsplit'}>
-              <div class="vsplit-top" style="height:{editorHeight}px">
-                <QueryEditor
-                  onExecute={handleExecute}
-                  tabId={activeTab.id}
-                  content={activeTab.baseSql || ''}
-                  onContentChange={(val) => {
-                    if (activeTab) activeTab.baseSql = val;
-                  }}
-                  isRunning={queryRunning}
-                  onCancel={() => cancelQuery().catch(() => {})}
-                />
-              </div>
-              <div class="vsplit-handle" onmousedown={startVResize}></div>
-              <div class="vsplit-bottom">
-                <ResultsGrid
-                  columns={activeTab.columns}
-                  rows={activeTab.rows}
-                  fetchedCount={activeTab.fetchedCount}
-                  totalCount={activeTab.totalCount}
-                  isEnd={activeTab.isEnd}
-                  truncated={activeTab.truncated}
-                  duration={activeTab.duration}
-                  error={activeTab.error}
-                  tabId={activeTab.id}
-                  initFilters={activeTab.filters}
-                  initSortCol={activeTab.sortCol}
-                  initSortDir={activeTab.sortDir}
-                  compact={showChatPanel}
-                  loading={activeTab.refetching || false}
-                  summary={activeTab.summary}
-                  onDescribeFilters={describeFilters}
-                  onStateChange={(updates) =>
-                    handleGridStateChange(activeTab.id, updates)}
-                  onNeedMore={() => handleNeedMore(activeTab.id)}
-                  onCountAll={() => handleCountAll(activeTab.id)}
-                />
-              </div>
-            </div>
-          {:else if view === 'table' && activeTab}
-            <ResultsGrid
-              columns={activeTab.columns}
-              rows={activeTab.rows}
-              fetchedCount={activeTab.fetchedCount}
-              totalCount={activeTab.totalCount}
-              isEnd={activeTab.isEnd}
-              truncated={activeTab.truncated}
-              duration={activeTab.duration}
-              error={activeTab.error}
-              tabId={activeTab.id}
-              initFilters={activeTab.filters}
-              initSortCol={activeTab.sortCol}
-              initSortDir={activeTab.sortDir}
-              compact={showChatPanel}
-              loading={activeTab.refetching || false}
-              onDescribeFilters={describeFilters}
-              onStateChange={(updates) =>
-                handleGridStateChange(activeTab.id, updates)}
-              onNeedMore={() => handleNeedMore(activeTab.id)}
-              onCountAll={() => handleCountAll(activeTab.id)}
+    {#if connected}
+      <div
+        class="main-layout"
+        class:resizing-sidebar={resizeTarget === 'sidebar'}
+        class:resizing-chat={resizeTarget === 'chat'}
+        class:has-tabs={hasTabs}
+      >
+        {#if !sidebarCollapsed}
+          <div class="sidebar-wrap" style="width:{sidebarWidth}px">
+            <Sidebar
+              onObjectClick={handleObjectClick}
+              onDisconnect={handleDisconnect}
+              onOpenLogs={() => (showLogs = true)}
             />
-          {:else if view === 'view' && activeTab}
-            <div class="view-sub-bar">
-              <button
-                class="sub-tab"
-                class:active={viewSubView === 'data'}
-                onclick={() => switchViewSubView(activeTab.id, 'data')}
-              >
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                >
-                  <rect x="3" y="3" width="18" height="18" rx="2" /><path
-                    d="M3 9h18"
-                  /><path d="M3 15h18" /><path d="M9 3v18" />
-                </svg>
-                <span>Data</span>
-              </button>
-              <button
-                class="sub-tab"
-                class:active={viewSubView === 'source'}
-                onclick={() => switchViewSubView(activeTab.id, 'source')}
-              >
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                >
-                  <path
-                    d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
-                  /><polyline points="14 2 14 8 20 8" /><line
-                    x1="16"
-                    y1="13"
-                    x2="8"
-                    y2="13"
-                  /><line x1="16" y1="17" x2="8" y2="17" /><polyline
-                    points="10 9 9 9 8 9"
-                  />
-                </svg>
-                <span>Source</span>
-              </button>
-            </div>
+            <div
+              class="resize-handle sidebar-handle"
+              onmousedown={(e) => startResize('sidebar', e)}
+            />
+          </div>
+        {/if}
 
-            {#if viewSubView === 'data'}
-              <div class="table-header">
-                <span class="table-title"
-                  >{activeTab.schema}.{activeTab.name}</span
-                >
-                <span class="table-badge"
-                  >View &middot; {activeTab.fetchedCount} rows</span
-                >
+        {#if hasTabs}
+          <!-- Content area -->
+          <div class="content-area">
+            {#if view === 'query' && activeTab}
+              <div class="vsplit" class:resizing={resizeTarget === 'vsplit'}>
+                <div class="vsplit-top" style="height:{editorHeight}px">
+                  <QueryEditor
+                    onExecute={handleExecute}
+                    tabId={activeTab.id}
+                    content={activeTab.baseSql || ''}
+                    onContentChange={(val) => {
+                      if (activeTab) activeTab.baseSql = val;
+                    }}
+                    isRunning={queryRunning}
+                    onCancel={() => cancelQuery().catch(() => {})}
+                  />
+                </div>
+                <div class="vsplit-handle" onmousedown={startVResize}></div>
+                <div class="vsplit-bottom">
+                  <ResultsGrid
+                    columns={activeTab.columns}
+                    rows={activeTab.rows}
+                    fetchedCount={activeTab.fetchedCount}
+                    totalCount={activeTab.totalCount}
+                    isEnd={activeTab.isEnd}
+                    truncated={activeTab.truncated}
+                    duration={activeTab.duration}
+                    error={activeTab.error}
+                    tabId={activeTab.id}
+                    initFilters={activeTab.filters}
+                    initSortCol={activeTab.sortCol}
+                    initSortDir={activeTab.sortDir}
+                    compact={showChatPanel}
+                    loading={activeTab.refetching || false}
+                    summary={activeTab.summary}
+                    onDescribeFilters={describeFilters}
+                    onStateChange={(updates) =>
+                      handleGridStateChange(activeTab.id, updates)}
+                    onNeedMore={() => handleNeedMore(activeTab.id)}
+                    onCountAll={() => handleCountAll(activeTab.id)}
+                  />
+                </div>
               </div>
+            {:else if view === 'table' && activeTab}
               <ResultsGrid
                 columns={activeTab.columns}
                 rows={activeTab.rows}
@@ -1181,39 +1101,148 @@
                 onNeedMore={() => handleNeedMore(activeTab.id)}
                 onCountAll={() => handleCountAll(activeTab.id)}
               />
-            {:else}
+            {:else if view === 'view' && activeTab}
+              <div class="view-sub-bar">
+                <button
+                  class="sub-tab"
+                  class:active={viewSubView === 'data'}
+                  onclick={() => switchViewSubView(activeTab.id, 'data')}
+                >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <rect x="3" y="3" width="18" height="18" rx="2" /><path
+                      d="M3 9h18"
+                    /><path d="M3 15h18" /><path d="M9 3v18" />
+                  </svg>
+                  <span>Data</span>
+                </button>
+                <button
+                  class="sub-tab"
+                  class:active={viewSubView === 'source'}
+                  onclick={() => switchViewSubView(activeTab.id, 'source')}
+                >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <path
+                      d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
+                    /><polyline points="14 2 14 8 20 8" /><line
+                      x1="16"
+                      y1="13"
+                      x2="8"
+                      y2="13"
+                    /><line x1="16" y1="17" x2="8" y2="17" /><polyline
+                      points="10 9 9 9 8 9"
+                    />
+                  </svg>
+                  <span>Source</span>
+                </button>
+              </div>
+
+              {#if viewSubView === 'data'}
+                <div class="table-header">
+                  <span class="table-title"
+                    >{activeTab.schema}.{activeTab.name}</span
+                  >
+                  <span class="table-badge"
+                    >View &middot; {activeTab.fetchedCount} rows</span
+                  >
+                </div>
+                <ResultsGrid
+                  columns={activeTab.columns}
+                  rows={activeTab.rows}
+                  fetchedCount={activeTab.fetchedCount}
+                  totalCount={activeTab.totalCount}
+                  isEnd={activeTab.isEnd}
+                  truncated={activeTab.truncated}
+                  duration={activeTab.duration}
+                  error={activeTab.error}
+                  tabId={activeTab.id}
+                  initFilters={activeTab.filters}
+                  initSortCol={activeTab.sortCol}
+                  initSortDir={activeTab.sortDir}
+                  compact={showChatPanel}
+                  loading={activeTab.refetching || false}
+                  onDescribeFilters={describeFilters}
+                  onStateChange={(updates) =>
+                    handleGridStateChange(activeTab.id, updates)}
+                  onNeedMore={() => handleNeedMore(activeTab.id)}
+                  onCountAll={() => handleCountAll(activeTab.id)}
+                />
+              {:else}
+                <SourceView
+                  title={`${activeTab.schema}.${activeTab.name} (${activeTab.sourceKind || 'view'})`}
+                  source={activeTab.sourceContent || ''}
+                  loading={false}
+                  error={activeTab.sourceError || null}
+                />
+              {/if}
+            {:else if view === 'notebook' && activeTab}
+              <Notebook
+                tabId={activeTab.id}
+                filePath={activeTab.filePath}
+                connectionId={connections.activeProfileId ?? activeConnectionId}
+                database={databaseName}
+              />
+            {:else if view === 'source' && activeTab}
               <SourceView
-                title={`${activeTab.schema}.${activeTab.name} (${activeTab.sourceKind || 'view'})`}
-                source={activeTab.sourceContent || ''}
-                loading={false}
-                error={activeTab.sourceError || null}
+                title={currentObject
+                  ? `${currentObject.schema}.${currentObject.name} (${currentObject.kind})`
+                  : ''}
+                source={sourceContent}
+                loading={sourceLoading}
+                error={sourceError}
               />
             {/if}
-          {:else if view === 'notebook' && activeTab}
-            <Notebook
-              tabId={activeTab.id}
-              filePath={activeTab.filePath}
-              connectionId={connections.activeProfileId ?? activeConnectionId}
-              database={databaseName}
+          </div>
+          <!-- Chat panel (right side) -->
+          {#if showChatPanel}
+            <div
+              class="resize-handle chat-handle"
+              onmousedown={(e) => startResize('chat', e)}
             />
-          {:else if view === 'source' && activeTab}
-            <SourceView
-              title={currentObject
-                ? `${currentObject.schema}.${currentObject.name} (${currentObject.kind})`
-                : ''}
-              source={sourceContent}
-              loading={sourceLoading}
-              error={sourceError}
-            />
+            <div class="chat-wrap" style="width:{chatWidth}px">
+              <ChatPanel
+                onSend={handleAiSend}
+                onRunDml={handleRunDml}
+                onCancelDml={handleCancelDml}
+                onAllowPermission={handleAllowPermission}
+                onRejectPermission={handleRejectPermission}
+                {connected}
+                database={databaseName}
+                {connectionName}
+                onOpenSettings={() => (showAiSettings = true)}
+                onClose={() => (showChatPanel = false)}
+                onNewChat={() => {
+                  createNewChatTab(activeConnectionId);
+                  showChatPanel = true;
+                }}
+                onSwitchConv={(id) => {
+                  switchChatTab(id);
+                  showChatPanel = true;
+                }}
+                onCloseConv={closeChatTab}
+              />
+            </div>
           {/if}
-        </div>
-        <!-- Chat panel (right side) -->
-        {#if showChatPanel}
-          <div
-            class="resize-handle chat-handle"
-            onmousedown={(e) => startResize('chat', e)}
-          />
-          <div class="chat-wrap" style="width:{chatWidth}px">
+        {:else}
+          <!-- Chat full width (no tabs open) -->
+          <div class="chat-full">
             <ChatPanel
               onSend={handleAiSend}
               onRunDml={handleRunDml}
@@ -1224,53 +1253,28 @@
               database={databaseName}
               {connectionName}
               onOpenSettings={() => (showAiSettings = true)}
-              onClose={() => (showChatPanel = false)}
-              onNewChat={() => {
-                createNewChatTab(activeConnectionId);
-                showChatPanel = true;
-              }}
-              onSwitchConv={(id) => {
-                switchChatTab(id);
-                showChatPanel = true;
-              }}
+              onNewChat={() => createNewChatTab(activeConnectionId)}
+              onSwitchConv={switchChatTab}
               onCloseConv={closeChatTab}
             />
           </div>
         {/if}
-      {:else}
-        <!-- Chat full width (no tabs open) -->
-        <div class="chat-full">
-          <ChatPanel
-            onSend={handleAiSend}
-            onRunDml={handleRunDml}
-            onCancelDml={handleCancelDml}
-            onAllowPermission={handleAllowPermission}
-            onRejectPermission={handleRejectPermission}
-            {connected}
-            database={databaseName}
-            {connectionName}
-            onOpenSettings={() => (showAiSettings = true)}
-            onNewChat={() => createNewChatTab(activeConnectionId)}
-            onSwitchConv={switchChatTab}
-            onCloseConv={closeChatTab}
-          />
-        </div>
-      {/if}
-    </div>
-  {:else}
-    <div class="landing-full">
-      <LandingPage onConnect={handleConnect} {connectError} />
-    </div>
-  {/if}
-
-  {#if showAiSettings}
-    <div class="modal-overlay" onclick={() => (showAiSettings = false)}>
-      <div class="modal-content" onclick={(e) => e.stopPropagation()}>
-        <AiSettings onClose={() => (showAiSettings = false)} />
       </div>
-    </div>
-  {/if}
-</div>
+    {:else}
+      <div class="landing-full">
+        <LandingPage onConnect={handleConnect} {connectError} />
+      </div>
+    {/if}
+
+    {#if showAiSettings}
+      <div class="modal-overlay" onclick={() => (showAiSettings = false)}>
+        <div class="modal-content" onclick={(e) => e.stopPropagation()}>
+          <AiSettings onClose={() => (showAiSettings = false)} />
+        </div>
+      </div>
+    {/if}
+  </div>
+</QueryClientProvider>
 
 {#if queryError}
   <div class="toast toast-error" onclick={() => (queryError = null)}>
