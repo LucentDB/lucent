@@ -19,13 +19,19 @@ describe('qk', () => {
   });
 
   it('builds a stable history key from an equal filter', () => {
-    const filter = { connectionId: null, search: 'select', favoriteOnly: false };
+    const filter = {
+      connectionId: null,
+      search: 'select',
+      favoriteOnly: false,
+    };
     expect(qk.history({ ...filter })).toEqual(qk.history({ ...filter }));
   });
 
   it('distinguishes history keys by filter', () => {
     const base = { connectionId: null, search: null, favoriteOnly: false };
-    expect(qk.history(base)).not.toEqual(qk.history({ ...base, favoriteOnly: true }));
+    expect(qk.history(base)).not.toEqual(
+      qk.history({ ...base, favoriteOnly: true }),
+    );
   });
 
   it('keeps drivers and connections on distinct roots', () => {
