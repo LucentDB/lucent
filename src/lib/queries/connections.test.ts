@@ -29,8 +29,17 @@ const PROFILE = {
   updatedAt: '2026-01-01',
 };
 
+/**
+ * Fresh client per test so one test's cache cannot satisfy another's fetch.
+ * `staleTime: Infinity` makes the cascade tests causal: cached data never goes
+ * stale on its own, so a second fetch that hits the wire proves the mutation
+ * actually called invalidateQueries rather than merely being past its freshness
+ * window.
+ */
 function client() {
-  return new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  });
 }
 
 /** Counts calls to one IPC command, so a test can assert a refetch happened. */
@@ -64,8 +73,8 @@ describe('save/delete invalidation cascade', () => {
 
     await saveConnection(c, { profile: PROFILE, password: null });
 
-    // Invalidation marks the entry stale; the next read refetches instead of
-    // serving the pre-save list.
+    // With staleTime: Infinity the pre-save cache would be served forever, so
+    // this refetch happens only because invalidation marked the entry stale.
     await c.fetchQuery(connectionsOptions());
     expect(callsTo('list_connections')).toBe(2);
   });
