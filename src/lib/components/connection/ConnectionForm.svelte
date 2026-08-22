@@ -35,6 +35,7 @@
     connections,
     type ConnectionProfile,
   } from '../../stores/connections.svelte';
+  import { driversQuery } from '../../queries/drivers.ts';
 
   let {
     profile = null,
@@ -47,6 +48,9 @@
   } = $props();
 
   // ─── Form state ───────────────────────────────────────────────────────
+
+  // Driver descriptors are static per build — one IPC call per app run.
+  const drivers = driversQuery();
 
   let name = $state(profile?.name ?? '');
   let driver = $state(profile?.driver ?? 'postgres');
@@ -65,7 +69,9 @@
   let testError = $state<string | null>(null);
 
   /** Field descriptors for the selected driver — drives the form's fields. */
-  const descriptor = $derived(connections.driverFor(driver));
+  const descriptor = $derived(
+    (drivers.data ?? []).find((d) => d.id === driver) ?? null,
+  );
 
   /**
    * A driver's parameters are meaningless to another driver: switching the
@@ -210,7 +216,7 @@
           createdAt: '',
           updatedAt: '',
         };
-        // Use direct invoke so connections.profiles store is NOT mutated and NO card flashes at top of UI
+        // Use direct invoke so the connections query is NOT refetched and NO card flashes at top of UI
         const { invoke } = await import('@tauri-apps/api/core');
         await invoke('save_connection', {
           profile: tempProfile,
@@ -291,7 +297,7 @@
           class="styled-select"
           onchange={resetParamsForDriver}
         >
-          {#each connections.drivers as d (d.id)}
+          {#each drivers.data ?? [] as d (d.id)}
             <option value={d.id}>{d.displayName}</option>
           {/each}
         </select>

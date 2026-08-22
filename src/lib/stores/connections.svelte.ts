@@ -1,8 +1,11 @@
-// Connection profiles store — Svelte 5 runes.
-// Provides reactive state for saved connection profiles and manages
-// IPC calls to the backend.
+// Connection session store — Svelte 5 runes.
+// Owns live-connection state only: which profile is active, connection
+// status, capabilities. The saved-profile CACHE lives in the connections
+// query (src/lib/queries/connections.ts); live status has no server copy to
+// revalidate against, so it must not move there.
 
 import { invoke } from '@tauri-apps/api/core';
+import { queryClient } from '../queries/client.ts';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -60,116 +63,16 @@ export type ConnectionStatus =
 // ─── Store ──────────────────────────────────────────────────────────────────
 
 class ConnectionsStore {
-  /** All saved profiles */
-  profiles = $state<ConnectionProfile[]>([]);
   /** Currently active profile ID (connected or connecting) */
   activeProfileId = $state<string | null>(null);
   /** Connection status */
   status = $state<ConnectionStatus>('disconnected');
   /** Error message when status === 'error' */
   errorMessage = $state<string | null>(null);
-  /** Loading state for initial load */
-  loading = $state(true);
   /** Loading states per profile ID for test-connection */
   testingIds = $state<Set<string>>(new Set());
-  /** Driver descriptors that drive the connection form. Static per build. */
-  drivers = $state<DriverDescriptor[]>([]);
   /** Capabilities of the live connection, or null when disconnected. */
   capabilities = $state<ConnectionCapabilities | null>(null);
-
-  /** Active profile object (derived) */
-  activeProfile = $derived(
-    this.profiles.find((p) => p.id === this.activeProfileId) ?? null,
-  );
-
-  /** Grouped profiles for display */
-  groupedProfiles = $derived.by(() => {
-    const groups: { name: string; profiles: ConnectionProfile[] }[] = [];
-    const grouped = new Map<string, ConnectionProfile[]>();
-
-    for (const p of this.profiles) {
-      const key = p.group ?? '__ungrouped__';
-      if (!grouped.has(key)) grouped.set(key, []);
-      grouped.get(key)!.push(p);
-    }
-
-    for (const [key, list] of grouped) {
-      groups.push({
-        name: key === '__ungrouped__' ? '' : key,
-        profiles: list,
-      });
-    }
-
-    // Sort groups: named groups first alphabetically, ungrouped last
-    groups.sort((a, b) => {
-      if (a.name === '' && b.name === '') return 0;
-      if (a.name === '') return 1;
-      if (b.name === '') return -1;
-      return a.name.localeCompare(b.name);
-    });
-
-    return groups;
-  });
-
-  constructor() {
-    // Call loadProfiles directly — $effect is not valid outside .svelte components.
-    // The store is instantiated at module level, so this runs on import.
-    this.loadProfiles();
-    this.loadDrivers();
-  }
-
-  async loadDrivers() {
-    try {
-      this.drivers = await invoke<DriverDescriptor[]>('list_drivers');
-    } catch (e) {
-      console.error('Failed to load drivers:', e);
-    }
-  }
-
-  driverFor(id: string): DriverDescriptor | null {
-    return this.drivers.find((d) => d.id === id) ?? null;
-  }
-
-  async loadProfiles() {
-    this.loading = true;
-    try {
-      const profiles = await invoke<ConnectionProfile[]>('list_connections');
-      this.profiles = profiles;
-    } catch (e) {
-      console.error('Failed to load profiles:', e);
-    } finally {
-      this.loading = false;
-    }
-  }
-
-  async saveProfile(
-    profile: ConnectionProfile,
-    password?: string,
-  ): Promise<ConnectionProfile> {
-    const saved = await invoke<ConnectionProfile>('save_connection', {
-      profile,
-      password: password ?? null,
-    });
-    // Reload to get fresh state
-    await this.loadProfiles();
-    return saved;
-  }
-
-  async deleteProfile(id: string) {
-    await invoke('delete_connection', { id });
-    if (this.activeProfileId === id) {
-      this.activeProfileId = null;
-    }
-    await this.loadProfiles();
-  }
-
-  async duplicateProfile(id: string): Promise<ConnectionProfile> {
-    const copy = await invoke<ConnectionProfile>('duplicate_connection', {
-      id,
-    });
-    await this.loadProfiles();
-    return copy;
-  }
 
   async getProfile(id: string): Promise<ConnectionProfile | null> {
     try {
@@ -203,8 +106,9 @@ class ConnectionsStore {
       this.capabilities = await invoke<ConnectionCapabilities | null>(
         'connection_capabilities',
       );
-      // Refresh profiles to update last_used
-      this.loadProfiles();
+      // A new connection means a different catalog. Drop cached explorer
+      // branches outright rather than letting a stale tree flash on screen.
+      queryClient.removeQueries({ queryKey: ['explorer'] });
       return result;
     } catch (e) {
       const msg =
@@ -235,6 +139,9 @@ class ConnectionsStore {
       this.capabilities = await invoke<ConnectionCapabilities | null>(
         'connection_capabilities',
       );
+      // A new connection means a different catalog. Drop cached explorer
+      // branches outright rather than letting a stale tree flash on screen.
+      queryClient.removeQueries({ queryKey: ['explorer'] });
     } catch (e) {
       const msg =
         typeof e === 'string'

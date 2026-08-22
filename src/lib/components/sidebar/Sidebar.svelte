@@ -6,11 +6,20 @@
     getSchemaObjects,
   } from '../../ipc/client.js';
   import { connections } from '../../stores/connections.svelte';
+  import { connectionsQuery } from '../../queries/connections.ts';
   import { connectionEndpoint } from '../../connection-format';
   import { dbMatches, schemaMatches, objectMatches } from './sidebar-search.ts';
   import { fetchExplorerSnapshot } from './sidebar-refresh.ts';
 
   let { onObjectClick, onDisconnect, onOpenLogs } = $props();
+
+  // Saved profiles live in the connections query now; the store keeps only
+  // session state. Resolved here for the switcher.
+  const profiles = connectionsQuery();
+  let activeProfile = $derived(
+    (profiles.data ?? []).find((p) => p.id === connections.activeProfileId) ??
+      null,
+  );
 
   let switcherOpen = $state(false);
 
@@ -233,7 +242,7 @@
 
 <div class="sidebar">
   <!-- Connection Switcher -->
-  {#if connections.profiles.length > 0}
+  {#if (profiles.data ?? []).length > 0}
     <div class="connection-switcher">
       <button
         class="switcher-btn"
@@ -257,7 +266,7 @@
           </svg>
         </span>
         <span class="switcher-name">
-          {connections.activeProfile?.name ?? 'Select connection'}
+          {activeProfile?.name ?? 'Select connection'}
         </span>
         <svg
           width="12"
@@ -276,7 +285,7 @@
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="switcher-dropdown" onclick={() => (switcherOpen = false)}>
-          {#each connections.profiles as p}
+          {#each profiles.data ?? [] as p}
             <button
               class="switcher-item"
               class:active={p.id === connections.activeProfileId}

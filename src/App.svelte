@@ -16,8 +16,9 @@
   import Notebook from './lib/components/notebook/Notebook.svelte';
   import LogsDrawer from './lib/components/LogsDrawer.svelte';
   import { notebooks } from './lib/stores/notebooks.svelte.ts';
-  import { QueryClientProvider } from '@tanstack/svelte-query';
+  import { QueryClientProvider, createQuery } from '@tanstack/svelte-query';
   import { queryClient } from './lib/queries/client.ts';
+  import { connectionsOptions } from './lib/queries/connections.ts';
   import { resultSummary } from './lib/utils/resultSummary.js';
   import {
     saveNotebook,
@@ -82,10 +83,23 @@
   // stale, and a context strip naming the wrong database is worse than none.
   // `activeProfile` is null for inline connections, where `config` is the
   // only record of what we're attached to.
-  let connectionName = $derived(connections.activeProfile?.name ?? null);
+  // Saved profiles live in the connections query; the store keeps session
+  // state. App hosts QueryClientProvider for the whole tree, so its own init
+  // cannot read Svelte context — createQuery's explicit client parameter
+  // supplies the same singleton instead.
+  const profilesQuery = createQuery(
+    () => connectionsOptions(),
+    () => queryClient,
+  );
+  const activeProfile = $derived(
+    (profilesQuery.data ?? []).find(
+      (p) => p.id === connections.activeProfileId,
+    ) ?? null,
+  );
+  let connectionName = $derived(activeProfile?.name ?? null);
   let databaseName = $derived(
-    connections.activeProfile?.params['database'] ??
-      connections.activeProfile?.params['path'] ??
+    activeProfile?.params['database'] ??
+      activeProfile?.params['path'] ??
       config?.database ??
       null,
   );
