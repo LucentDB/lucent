@@ -1,6 +1,12 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { history } from '../../stores/history.svelte';
+  import { history } from '../../stores/history.svelte.ts';
+  import {
+    historyQuery,
+    groupByDate,
+    toggleFavoriteMutation,
+    deleteHistoryEntryMutation,
+    clearHistoryMutation,
+  } from '../../queries/history.ts';
   import HistoryEntry from './HistoryEntry.svelte';
 
   let {
@@ -14,9 +20,12 @@
   let activeTab = $state<'history' | 'saved'>('history');
   let searchInput: HTMLInputElement | undefined = $state();
 
-  onMount(() => {
-    history.loadHistory();
-  });
+  // Mounting the query is what loads now; changing the filter re-keys it.
+  const entries = historyQuery(() => history.filter);
+  const groups = $derived(groupByDate(entries.data ?? []));
+  const favorite = toggleFavoriteMutation();
+  const remove = deleteHistoryEntryMutation();
+  const clear = clearHistoryMutation();
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === '/' && !e.ctrlKey && !e.metaKey) {
@@ -40,7 +49,7 @@
   }
 
   function handleClear() {
-    history.clearHistory();
+    if (confirm('Clear all query history?')) clear.mutate();
   }
 </script>
 
@@ -70,7 +79,6 @@
       class:active={activeTab === 'history'}
       onclick={() => {
         activeTab = 'history';
-        history.loadHistory();
       }}>History</button
     >
     <button
@@ -140,20 +148,20 @@
 
   <!-- Content -->
   <div class="panel-content">
-    {#if history.loading}
+    {#if entries.isPending}
       <div class="state-msg">Loading...</div>
-    {:else if activeTab === 'saved' && history.entries.length === 0}
+    {:else if activeTab === 'saved' && (entries.data ?? []).length === 0}
       <div class="state-msg">
         <p>No saved queries</p>
         <p class="state-sub">Star queries to save them for later</p>
       </div>
-    {:else if history.entries.length === 0}
+    {:else if (entries.data ?? []).length === 0}
       <div class="state-msg">
         <p>No query history yet</p>
         <p class="state-sub">Run a query to see it here</p>
       </div>
     {:else}
-      {#each history.groupedEntries as group}
+      {#each groups as group}
         <div class="date-group">
           <div class="group-header">
             <span class="group-label">{group.label}</span>
@@ -162,8 +170,8 @@
           {#each group.entries as entry (entry.id)}
             <HistoryEntry
               entry={entry as any}
-              onToggleFavorite={(id) => history.toggleFavorite(id)}
-              onDelete={(id) => history.deleteEntry(id)}
+              onToggleFavorite={(id) => favorite.mutate({ id })}
+              onDelete={(id) => remove.mutate({ id })}
               onRerun={(sql) => onRerun?.(sql)}
               onCopy={handleCopy}
             />

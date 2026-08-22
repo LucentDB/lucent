@@ -1,17 +1,19 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, fireEvent, cleanup } from '@testing-library/svelte';
+import { render, fireEvent, cleanup, waitFor } from '@testing-library/svelte';
 
-// ChatLanding pulls in the history and schema-summary stores, both of which
-// reach for Tauri IPC on construction/use. Stub the boundary so these stay
-// pure render tests.
+// ChatLanding pulls in stores that reach for Tauri IPC. Stub the boundary so
+// these stay pure render tests.
+const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn(async () => []),
+  invoke: (...args: unknown[]) => invoke(...args),
   Channel: class {},
 }));
 
-import ChatLanding from './ChatLanding.svelte';
+import ChatLandingHarness from './ChatLandingHarness.svelte';
+import { QueryClient } from '@tanstack/svelte-query';
 import { history } from '../../stores/history.svelte.ts';
 import { schemaSummary } from '../../stores/schema-summary.svelte.ts';
+import { qk, type HistoryFilter } from '../../queries/keys.ts';
 import type { HistoryEntry } from '../../stores/history.svelte.ts';
 
 function historyEntry(over: Partial<HistoryEntry> = {}): HistoryEntry {
@@ -32,10 +34,23 @@ function historyEntry(over: Partial<HistoryEntry> = {}): HistoryEntry {
   };
 }
 
-function setup(props: Record<string, unknown> = {}) {
+/** The filter the untouched store produces — the key seeded tests read from. */
+const DEFAULT_FILTER: HistoryFilter = {
+  connectionId: null,
+  search: null,
+  favoriteOnly: false,
+};
+
+function setup(props: Record<string, unknown> = {}, entries: HistoryEntry[] | null = null) {
   const onSend = vi.fn();
-  const result = render(ChatLanding, { onSend, ...props });
-  return { ...result, onSend };
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  });
+  if (entries !== null) {
+    client.setQueryData(qk.history(DEFAULT_FILTER), entries);
+  }
+  const result = render(ChatLandingHarness, { onSend, client, ...props });
+  return { ...result, onSend, client };
 }
 
 /**
@@ -47,9 +62,11 @@ function text(el: Element | null | undefined): string {
 }
 
 beforeEach(() => {
-  history.entries = [];
-  history.loading = false;
-  history.error = null;
+  invoke.mockReset();
+  invoke.mockResolvedValue([]);
+  history.setSearch('');
+  history.setFilterConnection(null);
+  history.setFavoritesOnly(false);
   schemaSummary.reset();
 });
 
@@ -76,8 +93,7 @@ describe('ChatLanding — disconnected', () => {
   });
 
   it('hides recent queries, which belong to a connection', () => {
-    history.entries = [historyEntry()];
-    const { queryByText } = setup({ connected: false });
+    const { queryByText } = setup({ connected: false }, [historyEntry()]);
     expect(queryByText('Recent queries')).toBeNull();
   });
 
@@ -162,32 +178,35 @@ describe('ChatLanding — connected', () => {
 
 describe('ChatLanding — recent queries', () => {
   it('lists recent queries with their outcome', () => {
-    history.entries = [historyEntry({ sql: 'SELECT * FROM invoices' })];
-    const { getByText, container } = setup({
-      connected: true,
-      database: 'shop',
-    });
+    const { getByText, container } = setup(
+      { connected: true, database: 'shop' },
+      [historyEntry({ sql: 'SELECT * FROM invoices' })],
+    );
     expect(getByText('Recent queries')).toBeTruthy();
     expect(text(container)).toContain('SELECT * FROM invoices');
     expect(text(container)).toContain('42 rows');
   });
 
   it('renders no NaN when the backend omits the numeric fields', () => {
-    history.entries = [
-      {
-        ...historyEntry(),
-        rowCount: undefined,
-        durationMs: undefined,
-        executedAt: undefined,
-      } as unknown as HistoryEntry,
-    ];
-    const { container } = setup({ connected: true });
+    const { container } = setup(
+      { connected: true },
+      [
+        {
+          ...historyEntry(),
+          rowCount: undefined,
+          durationMs: undefined,
+          executedAt: undefined,
+        } as unknown as HistoryEntry,
+      ],
+    );
     expect(text(container)).not.toContain('NaN');
   });
 
   it('asks the copilot to explain the query rather than re-running it', async () => {
-    history.entries = [historyEntry({ sql: 'SELECT 1' })];
-    const { container, onSend } = setup({ connected: true });
+    const { container, onSend } = setup(
+      { connected: true },
+      [historyEntry({ sql: 'SELECT 1' })],
+    );
 
     const button = Array.from(container.querySelectorAll('button')).find((b) =>
       text(b).includes('SELECT 1'),
@@ -200,15 +219,17 @@ describe('ChatLanding — recent queries', () => {
   });
 
   it('asks for a fix when the recent query failed', async () => {
-    history.entries = [
-      historyEntry({
-        sql: 'SELECT * FROM ordrs',
-        status: 'error',
-        rowCount: null,
-        error: 'relation "ordrs" does not exist',
-      }),
-    ];
-    const { container, onSend } = setup({ connected: true });
+    const { container, onSend } = setup(
+      { connected: true },
+      [
+        historyEntry({
+          sql: 'SELECT * FROM ordrs',
+          status: 'error',
+          rowCount: null,
+          error: 'relation "ordrs" does not exist',
+        }),
+      ],
+    );
 
     const button = Array.from(container.querySelectorAll('button')).find((b) =>
       text(b).includes('ordrs'),
@@ -219,29 +240,35 @@ describe('ChatLanding — recent queries', () => {
   });
 
   it('caps the list at three entries', () => {
-    history.entries = Array.from({ length: 10 }, (_, i) =>
-      historyEntry({ id: `h${i}`, sql: `SELECT ${i}` }),
+    const { container } = setup(
+      { connected: true },
+      Array.from({ length: 10 }, (_, i) =>
+        historyEntry({ id: `h${i}`, sql: `SELECT ${i}` }),
+      ),
     );
-    const { container } = setup({ connected: true });
     expect(container.querySelectorAll('.recents .item')).toHaveLength(3);
   });
 
   // The screenshot showed the same browse query three times over.
   it('collapses repeated runs of the same statement', () => {
-    history.entries = Array.from({ length: 5 }, (_, i) =>
-      historyEntry({
-        id: `h${i}`,
-        sql: 'SELECT * FROM bookings.airports_data',
-      }),
+    const { container } = setup(
+      { connected: true },
+      Array.from({ length: 5 }, (_, i) =>
+        historyEntry({
+          id: `h${i}`,
+          sql: 'SELECT * FROM bookings.airports_data',
+        }),
+      ),
     );
-    const { container } = setup({ connected: true });
     expect(container.querySelectorAll('.recents .item')).toHaveLength(1);
   });
 
-  it('hides the section entirely when history failed to load', () => {
-    history.entries = [historyEntry()];
-    history.error = 'boom';
-    const { queryByText } = setup({ connected: true });
+  it('hides the section entirely when history failed to load', async () => {
+    invoke.mockRejectedValue('boom');
+    const { client, queryByText } = setup({ connected: true });
+    await waitFor(() =>
+      expect(client.getQueryState(qk.history(DEFAULT_FILTER))?.error).toBeTruthy(),
+    );
     expect(queryByText('Recent queries')).toBeNull();
   });
 });

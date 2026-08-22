@@ -7,6 +7,7 @@
   import Icon from '../icons/Icon.svelte';
   import { aiConfig } from '../../stores/ai-config.svelte.ts';
   import { history } from '../../stores/history.svelte.ts';
+  import { historyQuery } from '../../queries/history.ts';
   import { schemaSummary } from '../../stores/schema-summary.svelte.ts';
   import { buildSuggestions, CAPABILITIES } from './suggestions.ts';
   import {
@@ -45,12 +46,16 @@
     ),
   );
 
+  // The query mounts with the landing and shares the cache with HistoryPanel,
+  // so no manual lazy-fetch is needed here any more.
+  const entries = historyQuery(() => history.filter);
+
   // Browsing a table re-runs the same statement per page, so raw history is
   // often one query repeated — deduped before slicing, or the list would be
   // three identical rows.
   const recents = $derived(
-    connected && !history.error
-      ? dedupeBySql(history.entries).slice(0, RECENT_LIMIT)
+    connected && !entries.error
+      ? dedupeBySql(entries.data ?? []).slice(0, RECENT_LIMIT)
       : [],
   );
 
@@ -62,18 +67,6 @@
     return parts;
   });
 
-  // HistoryPanel loads history in every other path, so fetch here only when
-  // the landing is the first thing a user sees. The guard is a plain boolean,
-  // not $state: a successful load that returns zero rows would otherwise
-  // re-satisfy this condition and loop forever.
-  let historyRequested = false;
-  $effect(() => {
-    if (!connected || historyRequested) return;
-    if (!history.loading && history.entries.length === 0) {
-      historyRequested = true;
-      history.loadHistory();
-    }
-  });
 </script>
 
 <div class="landing">
