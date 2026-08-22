@@ -343,7 +343,13 @@
       },
     });
 
-    await sendMessage(message, aiSession.channel, convId, activeConnectionId);
+    await sendMessage(
+      message,
+      aiSession.channel,
+      convId,
+      activeConnectionId,
+      connections.activeProfileId,
+    );
   }
 
   async function handleAllowPermission() {

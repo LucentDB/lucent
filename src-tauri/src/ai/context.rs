@@ -196,13 +196,39 @@ pub fn build_system_prompt(
     }
     lines.push(String::new());
 
-    // ── Per-connection facts (after the cacheable prefix) ────────────────
+    // ── Active Database Connection Facts (per-connection header) ────────
+    lines.push("ACTIVE DATABASE CONNECTION:".into());
+    let engine = match (capabilities, schema.server_version.is_empty()) {
+        (Some(caps), false) => format!("{} ({})", caps.display_name, schema.server_version),
+        (Some(caps), true) => caps.display_name.clone(),
+        (None, false) => format!("Database ({})", schema.server_version),
+        (None, true) => "Connected Database".into(),
+    };
+    lines.push(format!("- Engine / Database Type: {engine}"));
+
     if let Some(caps) = capabilities {
+        let dialect_desc = match caps.sql_dialect {
+            lucent_protocol::SqlDialect::PostgreSql => {
+                "PostgreSQL dialect (use standard PostgreSQL SQL, double quotes \"identifier\" for table/column names, single quotes 'value' for strings, ::type for casting, ILIKE for case-insensitive matching, JSONB operators ->/->>, CTEs with WITH, and window functions)"
+            }
+            lucent_protocol::SqlDialect::DuckDb => {
+                "DuckDB dialect (use DuckDB SQL, double quotes \"identifier\" for table/column names, single quotes 'value' for strings, QUALIFY clause for window filters, COLUMNS(*) expressions, list/struct operations, and native parquet/csv direct reading)"
+            }
+            lucent_protocol::SqlDialect::BigQuery => {
+                "Google BigQuery dialect (use backticks `identifier` for table/column names and standard BigQuery SQL syntax)"
+            }
+            _ => "Standard SQL dialect (use standard SQL syntax)",
+        };
+        lines.push(format!("- SQL Dialect: {dialect_desc}"));
         if let Some(block) = enforcement_block(caps.readonly, &caps.display_name) {
-            lines.push(String::new());
-            lines.push(block);
+            lines.push(format!("- {block}"));
         }
     }
+
+    if !schema.database_name.is_empty() {
+        lines.push(format!("- Database Name / Target: \"{}\"", schema.database_name));
+    }
+    lines.push(String::new());
 
     // ── Dynamic content (changes per database / per connection) ─────────
     lines.push(format!(
@@ -255,6 +281,17 @@ pub fn build_system_prompt(
     lines.join("\n")
 }
 
+/// Helper to parse a clean database name from a connection URI or path,
+/// trimming any trailing slashes so DuckDB filepaths or URL keys don't yield empty names.
+pub fn parse_database_name(conn_id: &str) -> String {
+    let trimmed = conn_id.trim_end_matches('/');
+    trimmed
+        .rsplit('/')
+        .next()
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
 /// Derive a SchemaTree from the in-memory SchemaGraph. Used when the
 /// TTL-bound tree cache has expired but the graph (which has no TTL and
 /// strictly more information) is available — the system prompt must NEVER
@@ -263,6 +300,14 @@ pub fn build_system_prompt(
 /// the tier renderer, and the tree only contributes the header line.
 pub fn tree_from_graph(
     database_name: String,
+    graph: &crate::ai::schema_graph::SchemaGraph,
+) -> SchemaTree {
+    tree_from_graph_with_version(database_name, String::new(), graph)
+}
+
+pub fn tree_from_graph_with_version(
+    database_name: String,
+    server_version: String,
     graph: &crate::ai::schema_graph::SchemaGraph,
 ) -> SchemaTree {
     let mut by_schema: std::collections::BTreeMap<&str, Vec<String>> =
@@ -275,7 +320,7 @@ pub fn tree_from_graph(
     }
     SchemaTree {
         database_name,
-        server_version: String::new(),
+        server_version,
         schemas: by_schema
             .into_iter()
             .map(|(name, tables)| SchemaNode {
@@ -393,12 +438,21 @@ impl SchemaCache {
 
     pub fn get(&self, conn_id: &str) -> Option<SchemaTree> {
         let g = self.inner.lock().ok()?;
-        let e = g.get(conn_id)?;
-        let valid = e.fetched_at.elapsed() < self.ttl;
-        if !valid {
-            log::debug!("Schema cache expired for {conn_id}");
+        if let Some(e) = g.get(conn_id) {
+            let valid = e.fetched_at.elapsed() < self.ttl;
+            if !valid {
+                log::debug!("Schema cache expired for {conn_id}");
+            }
+            if valid {
+                return Some(e.tree.clone());
+            }
         }
-        valid.then(|| e.tree.clone())
+        // Fallback: if exact key lookup missed (e.g. profile ID vs URI key),
+        // use the most recent valid active entry if any exists.
+        g.values()
+            .filter(|e| e.fetched_at.elapsed() < self.ttl)
+            .max_by_key(|e| e.fetched_at)
+            .map(|e| e.tree.clone())
     }
 
     pub fn set(&self, conn_id: String, tree: SchemaTree) {
@@ -461,11 +515,19 @@ impl SchemaCache {
             .await
             .map_err(|e| format!("failed to fetch objects: {e}"))?;
 
-        let tree = objects_to_schema_tree_with_namespaces(
-            conn_id.rsplit('/').next().unwrap_or(&conn_id).to_string(),
+        let server_version = client
+            .server_info
+            .as_ref()
+            .map(|s| s.version.clone())
+            .unwrap_or_default();
+        let db_name = parse_database_name(&conn_id);
+
+        let mut tree = objects_to_schema_tree_with_namespaces(
+            db_name,
             namespaces.iter().map(|n| n.display()).collect(),
             objects,
         );
+        tree.server_version = server_version;
 
         log::info!(
             "Schema cache refreshed for {conn_id}: {} schemas, {} total objects",
@@ -851,5 +913,85 @@ mod tests {
             super::enforcement_block(ReadOnlyMode::TransactionScoped, "PostgreSQL").is_none(),
             "an intact guarantee adds nothing to the prompt"
         );
+    }
+
+    #[test]
+    fn active_connection_header_includes_engine_dialect_and_database() {
+        use lucent_protocol::{
+            AuthModel, CancelMode, DriverCapabilities, NamespaceModel, PagingStyle, ReadOnlyMode,
+            SqlDialect, StringLiteralStyle, TimeoutSupport,
+        };
+
+        let pg_caps = DriverCapabilities {
+            id: "postgres".into(),
+            display_name: "PostgreSQL".into(),
+            sql_dialect: SqlDialect::PostgreSql,
+            namespace_model: NamespaceModel::DbSchemaObject,
+            readonly: ReadOnlyMode::TransactionScoped,
+            statement_timeout: TimeoutSupport::Statement,
+            cancel: CancelMode::Native,
+            paging: PagingStyle::LimitOffset,
+            identifier_quote: '"',
+            string_literal: StringLiteralStyle::StandardConforming,
+            auth: AuthModel::UserPassword,
+        };
+
+        let p = build_system_prompt(&small(), None, Some(&pg_caps));
+        assert!(p.contains("ACTIVE DATABASE CONNECTION:"));
+        assert!(p.contains("- Engine / Database Type: PostgreSQL (PostgreSQL 16)"));
+        assert!(p.contains("- SQL Dialect: PostgreSQL dialect"));
+        assert!(p.contains("- Database Name / Target: \"testdb\""));
+
+        let duck_caps = DriverCapabilities {
+            id: "duckdb".into(),
+            display_name: "DuckDB".into(),
+            sql_dialect: SqlDialect::DuckDb,
+            namespace_model: NamespaceModel::CatalogSchema,
+            readonly: ReadOnlyMode::GuardOnly,
+            statement_timeout: TimeoutSupport::None,
+            cancel: CancelMode::Interrupt,
+            paging: PagingStyle::LimitOffset,
+            identifier_quote: '"',
+            string_literal: StringLiteralStyle::StandardConforming,
+            auth: AuthModel::FilePath,
+        };
+
+        let duck_tree = SchemaTree {
+            database_name: "analytics.duckdb".into(),
+            server_version: "v1.1.0".into(),
+            schemas: vec![],
+        };
+        let p_duck = build_system_prompt(&duck_tree, None, Some(&duck_caps));
+        assert!(p_duck.contains("- Engine / Database Type: DuckDB (v1.1.0)"));
+        assert!(p_duck.contains("- SQL Dialect: DuckDB dialect"));
+        assert!(p_duck.contains("QUALIFY clause"));
+        assert!(p_duck.contains("- Database Name / Target: \"analytics.duckdb\""));
+    }
+
+    #[test]
+    fn parse_database_name_trims_slashes_and_paths() {
+        assert_eq!(
+            parse_database_name("duckdb:///Users/user/db.duckdb/"),
+            "db.duckdb"
+        );
+        assert_eq!(
+            parse_database_name("duckdb:///Users/user/db.duckdb"),
+            "db.duckdb"
+        );
+        assert_eq!(
+            parse_database_name("postgres://localhost:5432/my_store"),
+            "my_store"
+        );
+        assert_eq!(parse_database_name("my_store"), "my_store");
+    }
+
+    #[test]
+    fn schema_cache_fallback_resolves_active_entry_on_key_mismatch() {
+        let cache = SchemaCache::new(3600);
+        cache.set("postgres://localhost:5432/orders".into(), small());
+        // Exact hit
+        assert!(cache.get("postgres://localhost:5432/orders").is_some());
+        // Mismatched profile ID or UUID still resolves the active valid cache entry
+        assert!(cache.get("profile-uuid-1234").is_some());
     }
 }

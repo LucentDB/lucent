@@ -549,7 +549,9 @@ pub async fn connect(
         resolved.port().unwrap_or(0),
         resolved.get("database").unwrap_or(""),
     );
-    connect_impl(state, resolved).instrument(span).await
+    connect_impl(state, resolved, connection_id.as_deref())
+        .instrument(span)
+        .await
 }
 
 /// Build a driver config from a saved profile plus its keychain secret.
@@ -594,6 +596,7 @@ pub(crate) async fn cached_password(
 async fn connect_impl(
     state: State<'_, AppState>,
     resolved: ConnectionConfig,
+    profile_id: Option<&str>,
 ) -> Result<ConnectResult, CommandError> {
     log::info!(
         "Connecting to database {:?}@{}/{}",
@@ -725,11 +728,15 @@ async fn connect_impl(
             .unwrap_or(""),
         resolved.get("database").unwrap_or("")
     );
-    state
+    if let Ok(tree) = state
         .schema_cache
         .refresh(conn_id.clone(), &client, worker_conn_id)
         .await
-        .ok();
+    {
+        if let Some(pid) = profile_id {
+            state.schema_cache.set(pid.to_string(), tree);
+        }
+    }
 
     // Build semantic schema index — Tier-1 harvest inline (~5–50ms), Tier-2
     // enriched in the background by IndexingManager. Non-blocking failure,
@@ -2055,8 +2062,14 @@ async fn build_system_prompt(
         .map(|g| crate::ai::mschema::select_tier(g).0)
         .unwrap_or(crate::ai::mschema::ContextTier::Pull);
     log::info!("Tier selected: {:?}", tier);
-    let prompt = if let Some(tree) = state.schema_cache.get(connection_id) {
-        let capabilities = state.capabilities().await;
+    let capabilities = state.capabilities().await;
+    let current_db = state.current_database.lock().await.clone();
+    let prompt = if let Some(mut tree) = state.schema_cache.get(connection_id) {
+        if let Some(db) = &current_db {
+            if tree.database_name.is_empty() || tree.database_name == connection_id {
+                tree.database_name = db.clone();
+            }
+        }
         let p = crate::ai::context::build_system_prompt(
             &tree,
             graph_guard.as_ref(),
@@ -2068,13 +2081,15 @@ async fn build_system_prompt(
         log::info!(
             "Schema tree expired for {connection_id}; rendering system prompt from in-memory graph"
         );
-        let db_name = connection_id
-            .rsplit('/')
-            .next()
-            .unwrap_or(connection_id)
-            .to_string();
-        let tree = crate::ai::context::tree_from_graph(db_name, g);
-        let capabilities = state.capabilities().await;
+        let db_name = current_db.unwrap_or_else(|| {
+            crate::ai::context::parse_database_name(connection_id)
+        });
+        let version = state
+            .client_handle()
+            .await
+            .and_then(|c| c.server_info.map(|s| s.version))
+            .unwrap_or_default();
+        let tree = crate::ai::context::tree_from_graph_with_version(db_name, version, g);
         crate::ai::context::build_system_prompt(&tree, Some(g), capabilities.as_ref())
     } else {
         log::warn!(

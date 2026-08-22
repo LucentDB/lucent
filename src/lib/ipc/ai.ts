@@ -267,6 +267,7 @@ export async function sendMessage(
   channel: Channel<AiChannelEvent>,
   conversationId: string,
   connectionId: string,
+  profileId?: string | null,
 ) {
   chat.isStreaming = true;
   chat.error = null;
@@ -276,6 +277,7 @@ export async function sendMessage(
       channel,
       conversationId,
       connectionId,
+      profileId: profileId ?? null,
     });
   } catch (e) {
     chat.isStreaming = false;

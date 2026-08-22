@@ -592,21 +592,29 @@ async fn run_ai_cell(
             .as_ref()
             .map(|g| crate::ai::mschema::select_tier(g).0)
             .unwrap_or(crate::ai::mschema::ContextTier::Pull);
-        let schema_prompt = if let Some(tree) = state.schema_cache.get(&connection_id_str) {
-            let capabilities = state.capabilities().await;
+        let capabilities = state.capabilities().await;
+        let current_db = state.current_database.lock().await.clone();
+        let schema_prompt = if let Some(mut tree) = state.schema_cache.get(&connection_id_str) {
+            if let Some(db) = &current_db {
+                if tree.database_name.is_empty() || tree.database_name == connection_id_str {
+                    tree.database_name = db.clone();
+                }
+            }
             crate::ai::context::build_system_prompt(
                 &tree,
                 graph_guard.as_ref(),
                 capabilities.as_ref(),
             )
         } else if let Some(g) = graph_guard.as_ref() {
-            let db_name = connection_id_str
-                .rsplit('/')
-                .next()
-                .unwrap_or(&connection_id_str)
-                .to_string();
-            let tree = crate::ai::context::tree_from_graph(db_name, g);
-            let capabilities = state.capabilities().await;
+            let db_name = current_db.unwrap_or_else(|| {
+                crate::ai::context::parse_database_name(&connection_id_str)
+            });
+            let version = state
+                .client_handle()
+                .await
+                .and_then(|c| c.server_info.map(|s| s.version))
+                .unwrap_or_default();
+            let tree = crate::ai::context::tree_from_graph_with_version(db_name, version, g);
             crate::ai::context::build_system_prompt(&tree, Some(g), capabilities.as_ref())
         } else {
             "Database context not yet loaded.".to_string()

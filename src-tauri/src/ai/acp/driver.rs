@@ -481,6 +481,22 @@ fn acp_tool_guidance() -> String {
         .to_string()
 }
 
+/// The fallback guidance when the agent runtime has not connected MCP over stdio.
+/// Informs the model that Lucent has provisioned the `./lucent-tool` CLI helper in its workspace
+/// and provides complete database context and schema details.
+fn acp_fallback_tool_guidance(agent_id: &str) -> String {
+    format!(
+        "\n\nDATABASE TOOLS IN ACP:\n\
+         Your agent runtime ({agent_id}) has not connected Lucent's MCP server over stdio, but Lucent has provisioned a local CLI tool in your working directory:\n\
+         - `./lucent-tool <tool_name> '<json_arguments>'` (or `lucent-tool.cmd` on Windows)\n\
+         Available database tools: `search_schema`, `get_objects_info`, `run_readonly_query`, `preview_dml`.\n\
+         \n\
+         CRITICAL INSTRUCTIONS:\n\
+         - If you have bash or terminal execution capabilities, run `./lucent-tool run_readonly_query '<json_arguments>'` to query the live database rather than reading local files.\n\
+         - If you only have text generation capabilities, use the active database connection and schema information provided to write SQL matching the database dialect for the user."
+    )
+}
+
 /// How long the driver waits on the first prompt for the agent's MCP client
 /// to connect the DB-tools bridge (spec D4). `LUCENT_ACP_TOOLS_GATE_MS`
 /// overrides for tests.
@@ -492,10 +508,8 @@ fn tools_gate_timeout() -> Duration {
         .unwrap_or(Duration::from_secs(5))
 }
 
-/// Composes the first prompt: the tools-available preamble when the bridge
-/// connected, else the honest no-tools preamble with the system prompt
-/// omitted (its tool instructions would tempt a tool-less agent to
-/// fabricate results — spec D4).
+/// Composes the first prompt: preserves the rich system prompt with active database connection
+/// context and schema in all cases, appending either the native MCP guidance or the CLI fallback guidance.
 pub fn first_prompt_text(
     system_prompt: &str,
     message: &str,
@@ -505,14 +519,17 @@ pub fn first_prompt_text(
     if tools_ok {
         format!("{system_prompt}{}\n\n{message}", acp_tool_guidance())
     } else {
-        format!("{}\n\n{message}", no_tools_preamble(agent_id))
+        format!(
+            "{system_prompt}{}\n\n{message}",
+            acp_fallback_tool_guidance(agent_id)
+        )
     }
 }
 
 /// The honest first-prompt preamble when the agent never connected Lucent's
 /// DB-tool bridge: no tool claims (the model must not promise tools it
 /// doesn't have) and a graceful fallback — SQL the user can run in Lucent's
-/// query editor. Replaces the real system prompt for the first turn.
+/// query editor.
 pub fn no_tools_preamble(agent_id: &str) -> String {
     format!(
         "You are connected to a database through Lucent, a database client.\n\n\
@@ -956,12 +973,12 @@ mod tests {
 
         let without = first_prompt_text("sys preamble", "hello", "stub", false);
         assert!(
-            without.contains("THOSE TOOLS ARE NOT AVAILABLE"),
-            "honest no-tools preamble: {without}"
+            without.contains("lucent-tool"),
+            "fallback cli guidance present: {without}"
         );
         assert!(
-            !without.contains("sys preamble"),
-            "the tool-laden system prompt is omitted when tools never connected"
+            without.contains("sys preamble"),
+            "the system prompt and schema details are preserved when mcp bridge is not connected"
         );
         assert!(without.contains("hello"));
     }
@@ -1010,12 +1027,12 @@ mod tests {
             .unwrap();
         let stderr = process.stderr_snippet();
         assert!(
-            stderr.contains("THOSE TOOLS ARE NOT AVAILABLE"),
-            "the honest preamble reached the agent: {stderr:?}"
+            stderr.contains("lucent-tool"),
+            "the fallback preamble reached the agent: {stderr:?}"
         );
         assert!(
-            !stderr.contains("sys preamble"),
-            "the tool-laden system prompt was dropped: {stderr:?}"
+            stderr.contains("sys preamble"),
+            "the system prompt and schema context are preserved: {stderr:?}"
         );
 
         let events = sink.0.lock().unwrap().clone();
