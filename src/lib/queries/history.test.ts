@@ -53,7 +53,9 @@ describe('historyOptions', () => {
 
   it('passes a non-empty search through', async () => {
     invoke.mockResolvedValue([]);
-    await client().fetchQuery(historyOptions({ ...NO_FILTER, search: 'select' }));
+    await client().fetchQuery(
+      historyOptions({ ...NO_FILTER, search: 'select' }),
+    );
     expect(invoke).toHaveBeenCalledWith('list_history', {
       connectionId: null,
       search: 'select',
@@ -157,7 +159,11 @@ describe('groupByDate', () => {
       { ...ENTRY, id: 'b', dateGroup: 'Today' },
       { ...ENTRY, id: 'c', dateGroup: 'Yesterday' },
     ]);
-    expect(groups.map((g) => g.label)).toEqual(['Today', 'Yesterday', 'August 2026']);
+    expect(groups.map((g) => g.label)).toEqual([
+      'Today',
+      'Yesterday',
+      'August 2026',
+    ]);
   });
 
   it('keeps insertion order inside a bucket', () => {

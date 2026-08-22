@@ -41,7 +41,10 @@ const DEFAULT_FILTER: HistoryFilter = {
   favoriteOnly: false,
 };
 
-function setup(props: Record<string, unknown> = {}, entries: HistoryEntry[] | null = null) {
+function setup(
+  props: Record<string, unknown> = {},
+  entries: HistoryEntry[] | null = null,
+) {
   const onSend = vi.fn();
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
@@ -188,25 +191,21 @@ describe('ChatLanding — recent queries', () => {
   });
 
   it('renders no NaN when the backend omits the numeric fields', () => {
-    const { container } = setup(
-      { connected: true },
-      [
-        {
-          ...historyEntry(),
-          rowCount: undefined,
-          durationMs: undefined,
-          executedAt: undefined,
-        } as unknown as HistoryEntry,
-      ],
-    );
+    const { container } = setup({ connected: true }, [
+      {
+        ...historyEntry(),
+        rowCount: undefined,
+        durationMs: undefined,
+        executedAt: undefined,
+      } as unknown as HistoryEntry,
+    ]);
     expect(text(container)).not.toContain('NaN');
   });
 
   it('asks the copilot to explain the query rather than re-running it', async () => {
-    const { container, onSend } = setup(
-      { connected: true },
-      [historyEntry({ sql: 'SELECT 1' })],
-    );
+    const { container, onSend } = setup({ connected: true }, [
+      historyEntry({ sql: 'SELECT 1' }),
+    ]);
 
     const button = Array.from(container.querySelectorAll('button')).find((b) =>
       text(b).includes('SELECT 1'),
@@ -219,17 +218,14 @@ describe('ChatLanding — recent queries', () => {
   });
 
   it('asks for a fix when the recent query failed', async () => {
-    const { container, onSend } = setup(
-      { connected: true },
-      [
-        historyEntry({
-          sql: 'SELECT * FROM ordrs',
-          status: 'error',
-          rowCount: null,
-          error: 'relation "ordrs" does not exist',
-        }),
-      ],
-    );
+    const { container, onSend } = setup({ connected: true }, [
+      historyEntry({
+        sql: 'SELECT * FROM ordrs',
+        status: 'error',
+        rowCount: null,
+        error: 'relation "ordrs" does not exist',
+      }),
+    ]);
 
     const button = Array.from(container.querySelectorAll('button')).find((b) =>
       text(b).includes('ordrs'),
@@ -267,7 +263,9 @@ describe('ChatLanding — recent queries', () => {
     invoke.mockRejectedValue('boom');
     const { client, queryByText } = setup({ connected: true });
     await waitFor(() =>
-      expect(client.getQueryState(qk.history(DEFAULT_FILTER))?.error).toBeTruthy(),
+      expect(
+        client.getQueryState(qk.history(DEFAULT_FILTER))?.error,
+      ).toBeTruthy(),
     );
     expect(queryByText('Recent queries')).toBeNull();
   });

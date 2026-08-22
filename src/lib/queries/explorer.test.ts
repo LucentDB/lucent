@@ -39,7 +39,9 @@ function mockCatalog() {
     if (cmd === 'get_databases') return [{ name: 'app', is_current: true }];
     if (cmd === 'get_schemas') return [{ name: 'public', path: ['public'] }];
     if (cmd === 'get_schema_objects') {
-      return { objects: [{ name: `t_${args.namespace?.join('.')}`, kind: 'table' }] };
+      return {
+        objects: [{ name: `t_${args.namespace?.join('.')}`, kind: 'table' }],
+      };
     }
     throw new Error(`unexpected ${cmd}`);
   });

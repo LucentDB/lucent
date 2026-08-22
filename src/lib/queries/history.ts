@@ -42,7 +42,10 @@ function invalidateAll(client: QueryClient) {
   return client.invalidateQueries({ queryKey: ['history'] });
 }
 
-export async function toggleFavorite(client: QueryClient, vars: { id: string }) {
+export async function toggleFavorite(
+  client: QueryClient,
+  vars: { id: string },
+) {
   await invoke('toggle_history_favorite', { id: vars.id });
   await invalidateAll(client);
 }
