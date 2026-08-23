@@ -557,11 +557,11 @@
     updateTab(tabId, { isFetchingMore: true });
     queryRunCount += 1;
     try {
-      // The wire takes one key until phase ③ widens SortSpec to a list.
       // Built as a new object, not mutated — see the repo's immutability rule.
+      // The full sort list crosses: phase ③ widened SortSpec to a list.
       const opts = {
         ...fetchMoreOptions(tab, CHUNK_SIZE),
-        sort: wireSortFor(tab.sorting, tab.columns)[0] ?? null,
+        sort: wireSortFor(tab.sorting, tab.columns),
       };
       const result =
         tab.kind === 'view' || tab.kind === 'table'
@@ -591,11 +591,11 @@
     const merged = { ...tab, ...updates };
     queryRunCount += 1;
     try {
-      // The wire takes one key until phase ③ widens SortSpec to a list.
       // Built as a new object, not mutated — see the repo's immutability rule.
+      // The full sort list crosses: phase ③ widened SortSpec to a list.
       const opts = {
         ...refetchOptions(merged, CHUNK_SIZE),
-        sort: wireSortFor(merged.sorting, merged.columns)[0] ?? null,
+        sort: wireSortFor(merged.sorting, merged.columns),
       };
       const result =
         merged.kind === 'view' || merged.kind === 'table'

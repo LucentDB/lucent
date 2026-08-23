@@ -67,7 +67,7 @@ describe('cell view state', () => {
     const args = fetchPage.mock.calls[0];
     expect(args[3]).toBe(10); // limit
     expect(args[4]).toBe(0); // offset — a sort change must restart paging
-    expect(args[5]).toEqual({ column: 'n', direction: 'desc' }); // id resolved back to name for the wire
+    expect(args[5]).toEqual([{ column: 'n', direction: 'desc' }]); // ids resolved back to names for the wire — full list since phase ③
     expect(view.stateFor(id).rows).toEqual([[9]]);
   });
 
