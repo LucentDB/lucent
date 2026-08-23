@@ -8,6 +8,7 @@
   import { createGridEngine } from './engine.svelte.ts';
   import { createPagedStream } from './pagedStream.svelte.ts';
   import { formatCell } from './format.js';
+  import { toTsv, toCsv } from './serialize.js';
   import {
     normalize,
     applyable,
@@ -192,7 +193,29 @@
     ArrowRight: 'right',
   };
 
+  /**
+   * What Cmd+C copies, in priority order: an active cell range, else a row
+   * selection, else nothing (so the browser's own copy still works on, say,
+   * selected text in the filter bar).
+   */
+  function copySelection(format = 'tsv') {
+    const cells = engine.selectedCellRangesData();
+    // `payload`, not `rows` — the local must not shadow the accumulated-buffer prop.
+    const payload =
+      cells.length > 0
+        ? cells
+        : engine.selectedRowIndices().map((i) => rows[i]).filter(Boolean);
+    if (payload.length === 0) return false;
+    const text = format === 'csv' ? toCsv(payload) : toTsv(payload);
+    navigator.clipboard?.writeText(text).catch(() => {});
+    return true;
+  }
+
   function handleGridKeydown(e) {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'c') {
+      if (copySelection('tsv')) e.preventDefault();
+      return;
+    }
     if (ARROWS[e.key]) {
       e.preventDefault();
       engine.moveCellSelection(ARROWS[e.key], e.shiftKey);
@@ -348,12 +371,18 @@
             { id: 'filter-out', label: 'Filter by is not null' },
             { separator: true },
             { id: 'copy', label: 'Copy value' },
+            { separator: true },
+            { id: 'copy-selection-tsv', label: 'Copy selection (TSV)' },
+            { id: 'copy-selection-csv', label: 'Copy selection (CSV)' },
           ]
         : [
             { id: 'filter', label: 'Filter by this value' },
             { id: 'filter-out', label: 'Filter out this value' },
             { separator: true },
             { id: 'copy', label: 'Copy value' },
+            { separator: true },
+            { id: 'copy-selection-tsv', label: 'Copy selection (TSV)' },
+            { id: 'copy-selection-csv', label: 'Copy selection (CSV)' },
           ],
   );
 
@@ -372,6 +401,8 @@
 
   function handleCellMenuSelect(id) {
     const { column, typeName, value } = cellMenu;
+    if (id === 'copy-selection-tsv') return void copySelection('tsv');
+    if (id === 'copy-selection-csv') return void copySelection('csv');
     if (id === 'copy') {
       navigator.clipboard?.writeText(formatCell(value)).catch(() => {});
       return;
