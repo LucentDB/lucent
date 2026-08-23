@@ -3,14 +3,15 @@
   // column cell renderers: those need FlexRender in the body, which would
   // break the rule that only engine.svelte.ts touches the adapter. Spec §3.3.
   import { formatCell, cellClass } from './format.js';
+  import GridGutter from './GridGutter.svelte';
 
   let {
     table,
     pageRows = [],
     pageOffset = 0,
     columnWidths = {},
-    checkedRows = new Set(),
-    onToggleCheck,
+    selectedRows = new Set(),
+    onSelectRow,
     onCellContextMenu,
   } = $props();
 
@@ -30,10 +31,14 @@
     {@const tableRow = table.getRowModel().rows[absolute]}
     <tr class:even={absolute % 2 === 0}>
       <td class="row-num cell-start">
-        <input
-          type="checkbox"
-          onchange={() => onToggleCheck(absolute)}
-          checked={checkedRows.has(absolute)}
+        <GridGutter
+          rowNumber={absolute + 1}
+          selected={selectedRows.has(absolute)}
+          onSelect={(e) =>
+            onSelectRow(absolute, {
+              extend: e.shiftKey,
+              toggle: e.metaKey || e.ctrlKey,
+            })}
         />
       </td>
       {#each tableRow?.getStartVisibleCells() ?? [] as cell, ci (cell.id)}
@@ -92,9 +97,6 @@
     padding: var(--space-2) 4px;
     width: 44px;
     border-right: 1px solid var(--grid-line);
-  }
-  td.row-num input {
-    cursor: pointer;
   }
   td.cell-null {
     color: var(--text-muted);
@@ -155,14 +157,5 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  /* Checkbox styling (body side; the header copy stays in ResultsGrid
-     until Task 8 rewrites it) */
-  td input[type='checkbox'] {
-    width: 14px;
-    height: 14px;
-    accent-color: var(--accent);
-    cursor: pointer;
   }
 </style>

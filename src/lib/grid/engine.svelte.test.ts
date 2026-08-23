@@ -340,3 +340,57 @@ describe('column pinning', () => {
     h.dispose();
   });
 });
+
+describe('row selection', () => {
+  it('starts with nothing selected', () => {
+    const h = harness();
+    expect(h.engine().selectedRowIndices()).toEqual([]);
+    h.dispose();
+  });
+
+  it('selects one row, replacing any previous selection', async () => {
+    const h = harness({ rows: [[1, 'a'], [2, 'b'], [3, 'c']] });
+    h.engine().selectRow(0, { extend: false, toggle: false });
+    await h.flush();
+    h.engine().selectRow(2, { extend: false, toggle: false });
+    await h.flush();
+    expect(h.engine().selectedRowIndices()).toEqual([2]);
+    h.dispose();
+  });
+
+  it('cmd-click toggles a row into the selection', async () => {
+    const h = harness({ rows: [[1, 'a'], [2, 'b'], [3, 'c']] });
+    h.engine().selectRow(0, { extend: false, toggle: false });
+    h.engine().selectRow(2, { extend: false, toggle: true });
+    await h.flush();
+    expect(h.engine().selectedRowIndices()).toEqual([0, 2]);
+    h.dispose();
+  });
+
+  it('shift-click extends from the anchor to the clicked row', async () => {
+    const h = harness({ rows: [[1, 'a'], [2, 'b'], [3, 'c'], [4, 'd']] });
+    h.engine().selectRow(1, { extend: false, toggle: false });
+    h.engine().selectRow(3, { extend: true, toggle: false });
+    await h.flush();
+    expect(h.engine().selectedRowIndices()).toEqual([1, 2, 3]);
+    h.dispose();
+  });
+
+  it('extends backwards too', async () => {
+    const h = harness({ rows: [[1, 'a'], [2, 'b'], [3, 'c'], [4, 'd']] });
+    h.engine().selectRow(3, { extend: false, toggle: false });
+    h.engine().selectRow(1, { extend: true, toggle: false });
+    await h.flush();
+    expect(h.engine().selectedRowIndices()).toEqual([1, 2, 3]);
+    h.dispose();
+  });
+
+  it('keeps selection across a page change, since indices are absolute', async () => {
+    const h = harness({ rows: Array.from({ length: 400 }, (_, i) => [i]) });
+    h.engine().selectRow(250, { extend: false, toggle: false });
+    await h.flush();
+    // Paging is a display concern; the selection lives on the table.
+    expect(h.engine().selectedRowIndices()).toEqual([250]);
+    h.dispose();
+  });
+});

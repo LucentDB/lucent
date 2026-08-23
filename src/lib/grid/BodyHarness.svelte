@@ -11,8 +11,8 @@
     pageRows,
     pageOffset = 0,
     columnWidths = {},
-    checkedRows = new Set(),
-    onToggleCheck = () => {},
+    selectedRows = new Set(),
+    onSelectRow = () => {},
     onCellContextMenu = () => {},
     /** Column ids to pin left before first render — drives group layout. */
     pinLeft = [],
@@ -24,8 +24,11 @@
     pageRows?: unknown[][];
     pageOffset?: number;
     columnWidths?: Record<number, number>;
-    checkedRows?: Set<number>;
-    onToggleCheck?: (absoluteIndex: number) => void;
+    selectedRows?: Set<number>;
+    onSelectRow?: (
+      absoluteIndex: number,
+      opts: { extend: boolean; toggle: boolean },
+    ) => void;
     onCellContextMenu?: (e: MouseEvent, columnIndex: number, value: unknown) => void;
     pinLeft?: string[];
     pinRight?: string[];
@@ -49,8 +52,8 @@
     {pageRows}
     {pageOffset}
     {columnWidths}
-    {checkedRows}
-    {onToggleCheck}
+    {selectedRows}
+    {onSelectRow}
     {onCellContextMenu}
   />
 </table>

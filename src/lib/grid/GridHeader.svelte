@@ -8,10 +8,10 @@
     onOpenMenu,
     onResizeStart,
     onResizeKeydown,
-    onToggleCheckAll,
+    onToggleSelectAllPage,
     /** ID of the column whose menu is open, so aria-expanded can track it. */
     openColumnId = null,
-    allChecked = false,
+    allPageSelected = false,
   } = $props();
 
   const startHeaders = $derived(table.getStartHeaderGroups()[0]?.headers ?? []);
@@ -44,7 +44,12 @@
 <thead>
   <tr>
     <th class="row-num hdr-start">
-      <input type="checkbox" onchange={onToggleCheckAll} checked={allChecked} />
+      <input
+        type="checkbox"
+        onchange={onToggleSelectAllPage}
+        checked={allPageSelected}
+        aria-label="Select all rows on this page"
+      />
     </th>
     {#each startHeaders as header, i (header.id)}
       {@render headerCell(

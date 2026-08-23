@@ -49,20 +49,24 @@ describe('GridBody', () => {
     expect(container.querySelectorAll('.bool-badge').length).toBeGreaterThan(0);
   });
 
-  it('reports the absolute row index when a checkbox is toggled', async () => {
-    const onToggleCheck = vi.fn();
+  it('reports the absolute row index when a gutter is clicked', async () => {
+    const onSelectRow = vi.fn();
     // Page 2 of a 200-row page size: local row 0 is absolute row 200.
-    const { container } = renderBody({ pageOffset: 200, onToggleCheck });
-    const box = container.querySelectorAll('tbody input[type=checkbox]')[0];
-    await fireEvent.change(box);
-    expect(onToggleCheck).toHaveBeenCalledWith(200);
+    const { container } = renderBody({ pageOffset: 200, onSelectRow });
+    await fireEvent.click(container.querySelectorAll('.gutter')[0]);
+    expect(onSelectRow).toHaveBeenCalledWith(200, { extend: false, toggle: false });
   });
 
-  it('reflects checked state from the absolute index set', () => {
-    const { container } = renderBody({ pageOffset: 200, checkedRows: new Set([201]) });
-    const boxes = container.querySelectorAll('tbody input[type=checkbox]');
-    expect((boxes[0] as HTMLInputElement).checked).toBe(false);
-    expect((boxes[1] as HTMLInputElement).checked).toBe(true);
+  it('reflects selection from the absolute index set', () => {
+    const { container } = renderBody({ pageOffset: 200, selectedRows: new Set([201]) });
+    const gutters = container.querySelectorAll('.gutter');
+    expect(gutters[0].className).not.toContain('selected');
+    expect(gutters[1].className).toContain('selected');
+  });
+
+  it('numbers rows absolutely, so page 2 starts at 201', () => {
+    const { container } = renderBody({ pageOffset: 200 });
+    expect(container.querySelectorAll('.gutter')[0].textContent?.trim()).toBe('201');
   });
 
   it('passes the column index and value to the context menu handler', async () => {

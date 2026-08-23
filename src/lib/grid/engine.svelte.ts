@@ -69,6 +69,13 @@ export function createGridEngine(config: GridConfig) {
   // v9.1.2's pinning state is `{ start, end }` (LTR/RTL-agnostic), not the
   // `{ left, right }` shape sketched when this task was planned — keys renamed
   // to match the shipped library.
+  // v9's RowSelectionState is Record<string, true> — values are the literal
+  // true, never false. Keeping this shape makes the table's state getter
+  // assignment-compatible without casts.
+  let rowSelection = $state<Record<string, true>>({});
+  /** The row a shift-click extends FROM. Null until something is selected. */
+  let selectionAnchor: number | null = null;
+
   let pinning = $state<{ start: string[]; end: string[] }>({
     start: [],
     end: [],
@@ -134,8 +141,8 @@ export function createGridEngine(config: GridConfig) {
     isMultiSortEvent: (e: unknown) =>
       (e as { shiftKey?: boolean } | undefined)?.shiftKey === true,
     // Rows are positional arrays with no natural key. Index over the
-    // accumulated buffer is the absolute row number, matching the selection
-    // semantics the old checkedRows Set used.
+    // accumulated buffer is the absolute row number, which is also the
+    // row-selection key: selection survives page changes by construction.
     getRowId: (_row: unknown[], index: number) => String(index),
     get columns() {
       return columnDefs;
@@ -149,6 +156,9 @@ export function createGridEngine(config: GridConfig) {
       },
       get columnPinning() {
         return pinning;
+      },
+      get rowSelection() {
+        return rowSelection;
       },
     },
     onSortingChange: (updater: unknown) => {
@@ -176,6 +186,12 @@ export function createGridEngine(config: GridConfig) {
         end: next?.end ?? [],
       };
     },
+    onRowSelectionChange: (updater: unknown) => {
+      rowSelection =
+        typeof updater === 'function'
+          ? (updater as (p: typeof rowSelection) => typeof rowSelection)(rowSelection)
+          : (updater as typeof rowSelection);
+    },
   });
 
   /** 0-based position in the sort list, or -1 when this column is unsorted. */
@@ -193,6 +209,48 @@ export function createGridEngine(config: GridConfig) {
       column: config.columns[Number(s.id)]?.name ?? s.id,
       direction: s.desc ? ('desc' as const) : ('asc' as const),
     }));
+  }
+
+  /** Absolute row indices, ascending. */
+  function selectedRowIndices(): number[] {
+    return Object.keys(rowSelection)
+      .filter((k) => rowSelection[k])
+      .map(Number)
+      .sort((a, b) => a - b);
+  }
+
+  /**
+   * Gutter click semantics, matching every file manager and spreadsheet:
+   * plain click replaces, cmd/ctrl-click toggles, shift-click extends from
+   * the last plain click.
+   */
+  function selectRow(
+    absoluteIndex: number,
+    opts: { extend: boolean; toggle: boolean },
+  ) {
+    if (opts.extend && selectionAnchor !== null) {
+      const lo = Math.min(selectionAnchor, absoluteIndex);
+      const hi = Math.max(selectionAnchor, absoluteIndex);
+      const next: Record<string, true> = {};
+      for (let i = lo; i <= hi; i += 1) next[String(i)] = true;
+      rowSelection = next;
+      return;
+    }
+    if (opts.toggle) {
+      const next = { ...rowSelection };
+      if (next[String(absoluteIndex)]) delete next[String(absoluteIndex)];
+      else next[String(absoluteIndex)] = true;
+      rowSelection = next;
+      selectionAnchor = absoluteIndex;
+      return;
+    }
+    rowSelection = { [String(absoluteIndex)]: true };
+    selectionAnchor = absoluteIndex;
+  }
+
+  function clearRowSelection() {
+    rowSelection = {};
+    selectionAnchor = null;
   }
 
   /**
@@ -214,6 +272,12 @@ export function createGridEngine(config: GridConfig) {
     get pinning() {
       return pinning;
     },
+    get rowSelection() {
+      return rowSelection;
+    },
+    selectedRowIndices,
+    selectRow,
+    clearRowSelection,
     pinColumn,
     sortIndexOf,
     sortingForWire,

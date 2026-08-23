@@ -15,8 +15,8 @@
     onOpenMenu = () => {},
     onResizeStart = () => {},
     onResizeKeydown = () => {},
-    onToggleCheckAll = () => {},
-    allChecked = false,
+    onToggleSelectAllPage = () => {},
+    allPageSelected = false,
     /** Column ids to pin left before first render — drives group layout. */
     pinLeft = [],
     /** Column ids to pin right before first render — drives group layout. */
@@ -43,7 +43,7 @@
     {onOpenMenu}
     {onResizeStart}
     {onResizeKeydown}
-    {onToggleCheckAll}
-    {allChecked}
+    {onToggleSelectAllPage}
+    {allPageSelected}
   />
 </table>

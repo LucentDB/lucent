@@ -41,7 +41,6 @@
 
   let filters = $state(normalize($state.snapshot(initFilters)));
   let columnWidths = $state({});
-  let checkedRows = $state(new Set());
   let barOpen = $state(false);
   let pickerOpen = $state(false);
   let resizing = $state(null);
@@ -121,7 +120,7 @@
     void tabId;
     untrack(() => {
       filters = normalize(initFilters);
-      checkedRows = new Set();
+      engine.clearRowSelection();
       barOpen = false;
       pickerOpen = false;
       restoringTabState = true;
@@ -140,7 +139,7 @@
   function emitChange() {
     if (restoringTabState) return; // a tab switch restores state, it does not change it
     stream.reset();
-    checkedRows = new Set();
+    engine.clearRowSelection();
     onStateChange?.({ filters, sorting: engine.sorting });
   }
 
@@ -160,23 +159,23 @@
     return engine.table.getColumn(columnId)?.getIsSorted() ?? false;
   }
 
-  function toggleCheckAll() {
-    const visible = stream.pageRows.length;
-    const offset = stream.page * pageSize;
-    if (checkedRows.size === visible) {
-      checkedRows = new Set();
-    } else {
-      checkedRows = new Set(
-        Array.from({ length: visible }, (_, i) => offset + i),
-      );
-    }
+  /** Absolute indices of gutter-selected rows, for cell styling and copy. */
+  const selectedRows = $derived(new Set(engine.selectedRowIndices()));
+
+  function selectRow(absolute, opts) {
+    engine.selectRow(absolute, opts);
   }
 
-  function toggleCheck(absolute) {
-    const next = new Set(checkedRows);
-    if (next.has(absolute)) next.delete(absolute);
-    else next.add(absolute);
-    checkedRows = next;
+  function toggleSelectAllPage() {
+    const offset = stream.page * pageSize;
+    const onPage = stream.pageRows.map((_, i) => offset + i);
+    const allSelected = onPage.every((i) => selectedRows.has(i));
+    if (allSelected) {
+      engine.clearRowSelection();
+      return;
+    }
+    // extend:false/toggle:true per row: already-selected rows stay, others join.
+    for (const i of onPage) engine.selectRow(i, { extend: false, toggle: true });
   }
 
   // Filter bar
@@ -614,18 +613,20 @@
           onOpenMenu={openColumnMenu}
           onResizeStart={startResize}
           onResizeKeydown={handleResizeKeydown}
-          onToggleCheckAll={toggleCheckAll}
+          onToggleSelectAllPage={toggleSelectAllPage}
           openColumnId={columnMenu?.id ?? null}
-          allChecked={checkedRows.size === stream.pageRows.length &&
-            stream.pageRows.length > 0}
+          allPageSelected={stream.pageRows.length > 0 &&
+            stream.pageRows.every(
+              (_, i) => selectedRows.has(stream.page * pageSize + i),
+            )}
         />
         <GridBody
           table={engine.table}
           pageRows={stream.pageRows}
           pageOffset={stream.page * pageSize}
           {columnWidths}
-          {checkedRows}
-          onToggleCheck={toggleCheck}
+          {selectedRows}
+          onSelectRow={selectRow}
           onCellContextMenu={openCellMenu}
         />
       </table>
