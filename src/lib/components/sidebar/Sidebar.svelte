@@ -1,15 +1,15 @@
 <script>
-  import { onMount } from 'svelte';
-  import {
-    getDatabases,
-    getSchemas,
-    getSchemaObjects,
-  } from '../../ipc/client.js';
+  import { useQueryClient } from '@tanstack/svelte-query';
   import { connections } from '../../stores/connections.svelte';
   import { connectionsQuery } from '../../queries/connections.ts';
+  import {
+    databasesQuery,
+    schemasQuery,
+    refreshExplorer as invalidateExplorer,
+  } from '../../queries/explorer.ts';
   import { connectionEndpoint } from '../../connection-format';
   import { dbMatches, schemaMatches, objectMatches } from './sidebar-search.ts';
-  import { fetchExplorerSnapshot } from './sidebar-refresh.ts';
+  import SchemaBranch from './SchemaBranch.svelte';
 
   let { onObjectClick, onDisconnect, onOpenLogs } = $props();
 
@@ -23,20 +23,59 @@
 
   let switcherOpen = $state(false);
 
-  let databases = $state([]);
-  let loading = $state(true);
-  let refreshing = $state(false);
-  let catalogGeneration = 0;
-  let refreshSequence = 0;
-  let error = $state(null);
   let expandedDbs = $state(new Set());
-  let schemasByDb = $state({});
-  let objectsBySchema = $state({});
-  let loadingSchemas = $state(new Set());
-  let loadingObjects = $state(new Set());
   let expandedSchemas = $state(new Set());
   let expandedGroups = $state(new Set());
   let activeObject = $state(null);
+
+  const queryClient = useQueryClient();
+  const conn = $derived(connections.activeProfileId ?? 'inline');
+
+  const dbs = databasesQuery(() => conn);
+  const schemas = schemasQuery(
+    () => conn,
+    () => expandedDbs.size > 0,
+  );
+
+  let databases = $derived(dbs.data ?? []);
+  let loading = $derived(dbs.isPending);
+  let error = $derived(dbs.error ?? schemas.error ?? null);
+  let schemasByDb = $derived(
+    Object.fromEntries(
+      [...expandedDbs].map((db) => [db, schemas.data ?? []]),
+    ),
+  );
+  let isRefreshing = $derived(dbs.isFetching || schemas.isFetching);
+
+  // Objects for mounted schema branches, keyed by name. Search filtering and
+  // the match badge read this; the branches themselves own the queries.
+  let loadedObjects = $state({});
+  function handleObjectsLoaded(name, objects) {
+    // Safe against update loops: SchemaBranch reports each data array once,
+    // so this runs once per fetch cycle, not per observer notification.
+    if (loadedObjects[name] === objects) return;
+    loadedObjects = { ...loadedObjects, [name]: objects };
+    // Opening a schema reveals its object groups directly — the explorer
+    // behaviour test asserts objects are visible one click after expanding.
+    // Refresh re-seeds, so a refresh never collapses what was being explored.
+    const kinds = new Set(expandedGroups);
+    for (const o of objects) kinds.add(`${name}|${o.kind}`);
+    expandedGroups = kinds;
+  }
+
+  // Open the tree on the current database once the catalog arrives — the old
+  // loadDatabases seeded expandedDbs the same way. Seed-once: collapsing every
+  // database afterwards must stick.
+  let expandedSeeded = false;
+  $effect(() => {
+    const names = (dbs.data ?? [])
+      .filter((d) => d.is_current)
+      .map((d) => d.name);
+    if (!expandedSeeded && names.length > 0) {
+      expandedSeeded = true;
+      expandedDbs = new Set(names);
+    }
+  });
 
   let searchQuery = $state('');
   let searchQueryLower = $derived(searchQuery.toLowerCase());
@@ -60,143 +99,17 @@
     onDisconnect?.();
   }
 
-  function init() {
-    loadDatabases();
-  }
-
-  async function loadDatabases() {
-    const generation = ++catalogGeneration;
-    error = null;
-    loading = true;
-    try {
-      const nextDatabases = await getDatabases();
-      if (generation !== catalogGeneration) return;
-
-      databases = nextDatabases;
-      const currentDbs = databases
-        .filter((d) => d.is_current)
-        .map((d) => d.name);
-      expandedDbs = new Set(currentDbs);
-      for (const db of currentDbs) loadSchemasForDb(db, generation);
-    } catch (e) {
-      if (generation === catalogGeneration) {
-        error =
-          typeof e === 'string' ? e : (e.message ?? 'Failed to load databases');
-      }
-    } finally {
-      if (generation === catalogGeneration) loading = false;
-    }
-  }
-
-  async function refreshExplorer(event) {
-    event.stopPropagation();
-    if (refreshing) return;
-
-    const generation = ++catalogGeneration;
-    const refreshId = ++refreshSequence;
-    refreshing = true;
-    error = null;
-    loadingSchemas = new Set();
-    loadingObjects = new Set();
-    try {
-      const snapshot = await fetchExplorerSnapshot({
-        getDatabases,
-        getSchemas,
-        getSchemaObjects,
-      });
-      if (generation !== catalogGeneration) return;
-
-      // Commit only after every catalog request succeeds. Expansion sets stay
-      // untouched, so refresh never collapses the branch being explored.
-      databases = snapshot.databases;
-      schemasByDb = snapshot.schemasByDb;
-      objectsBySchema = snapshot.objectsBySchema;
-    } catch (e) {
-      if (generation === catalogGeneration) {
-        error =
-          typeof e === 'string'
-            ? e
-            : (e.message ?? 'Failed to refresh explorer');
-      }
-    } finally {
-      if (generation === catalogGeneration) {
-        // Invalidate child loads that began while this full snapshot was in
-        // flight. They must not overwrite the committed snapshot afterward.
-        catalogGeneration += 1;
-        loadingSchemas = new Set();
-        loadingObjects = new Set();
-      }
-      if (refreshId === refreshSequence) refreshing = false;
-    }
-  }
-
-  async function loadSchemasForDb(dbName, generation = catalogGeneration) {
-    loadingSchemas = new Set([...loadingSchemas, dbName]);
-    try {
-      const schemas = await getSchemas();
-      if (generation === catalogGeneration && !refreshing) {
-        schemasByDb = { ...schemasByDb, [dbName]: schemas };
-      }
-    } catch (e) {
-      if (generation === catalogGeneration && !refreshing) {
-        error =
-          typeof e === 'object' && e !== null && 'message' in e
-            ? e.message
-            : String(e);
-      }
-    } finally {
-      if (generation === catalogGeneration && !refreshing) {
-        const next = new Set(loadingSchemas);
-        next.delete(dbName);
-        loadingSchemas = next;
-      }
-    }
-  }
-
-  async function loadObjectsForSchema(schema, generation = catalogGeneration) {
-    loadingObjects = new Set([...loadingObjects, schema.name]);
-    try {
-      // List by the namespace PATH — the dotted display name would be
-      // misread as a single segment by multi-segment drivers (DuckDB).
-      const result = await getSchemaObjects(schema.path);
-      if (generation === catalogGeneration && !refreshing) {
-        objectsBySchema = { ...objectsBySchema, [schema.name]: result.objects };
-      }
-    } catch (e) {
-      if (generation === catalogGeneration && !refreshing) {
-        error =
-          typeof e === 'object' && e !== null && 'message' in e
-            ? e.message
-            : String(e);
-      }
-    } finally {
-      if (generation === catalogGeneration && !refreshing) {
-        const next = new Set(loadingObjects);
-        next.delete(schema.name);
-        loadingObjects = next;
-      }
-    }
-  }
-
   function toggleDb(name) {
     const next = new Set(expandedDbs);
-    if (next.has(name)) {
-      next.delete(name);
-    } else {
-      next.add(name);
-      if (!schemasByDb[name]) loadSchemasForDb(name);
-    }
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
     expandedDbs = next;
   }
 
   function toggleSchema(schema) {
     const next = new Set(expandedSchemas);
-    if (next.has(schema.name)) {
-      next.delete(schema.name);
-    } else {
-      next.add(schema.name);
-      if (!objectsBySchema[schema.name]) loadObjectsForSchema(schema);
-    }
+    if (next.has(schema.name)) next.delete(schema.name);
+    else next.add(schema.name);
     expandedSchemas = next;
   }
 
@@ -235,9 +148,10 @@
       .map((k) => ({ kind: k, label: objectLabels[k], items: groups[k] }));
   }
 
-  onMount(() => {
-    init();
-  });
+  async function handleRefresh(event) {
+    event.stopPropagation();
+    await invalidateExplorer(queryClient, conn);
+  }
 </script>
 
 <div class="sidebar">
@@ -366,7 +280,7 @@
     {:else if databases.length === 0}
       <div class="empty-root">Connect to a database to explore</div>
     {:else}
-      {#each databases.filter( (d) => dbMatches(d.name, schemasByDb[d.name], objectsBySchema, searchQueryLower) ) as db}
+      {#each databases.filter( (d) => dbMatches(d.name, schemasByDb[d.name], loadedObjects, searchQueryLower) ) as db}
         <div class="tree-node">
           <div class="db-row-wrap">
             <button class="node-row db-row" onclick={() => toggleDb(db.name)}>
@@ -409,9 +323,9 @@
             {#if db.is_current}
               <button
                 class="refresh-btn"
-                class:spinning={refreshing}
-                onclick={refreshExplorer}
-                disabled={refreshing}
+                class:spinning={isRefreshing}
+                onclick={handleRefresh}
+                disabled={isRefreshing}
                 title="Refresh explorer"
                 aria-label="Refresh explorer"
                 type="button"
@@ -436,10 +350,10 @@
 
           {#if expandedDbs.has(db.name)}
             <div class="children">
-              {#if loadingSchemas.has(db.name)}
+              {#if schemas.isPending}
                 <div class="loading-line">Loading…</div>
               {:else if schemasByDb[db.name]}
-                {#each schemasByDb[db.name].filter( (s) => schemaMatches(s, objectsBySchema[s.name], searchQueryLower) ) as schema}
+                {#each schemasByDb[db.name].filter( (s) => schemaMatches(s, loadedObjects[s.name], searchQueryLower) ) as schema}
                   <div class="schema-node">
                     <button
                       class="node-row schema-row"
@@ -479,8 +393,8 @@
                         />
                       </svg>
                       <span class="schema-name">{schema.name}</span>
-                      {#if searchQuery && objectsBySchema[schema.name]}
-                        {@const matchCount = objectsBySchema[
+                      {#if searchQuery && loadedObjects[schema.name]}
+                        {@const matchCount = loadedObjects[
                           schema.name
                         ].filter((o) =>
                           objectMatches(o.name, searchQueryLower),
@@ -493,12 +407,17 @@
 
                     {#if expandedSchemas.has(schema.name) || searchQuery}
                       <div class="children">
-                        {#if loadingObjects.has(schema.name)}
-                          <div class="loading-line">Loading…</div>
-                        {:else if objectsBySchema[schema.name]}
-                          {#each groupObjects(objectsBySchema[schema.name])
-                            .map( (g) => ({ ...g, items: g.items.filter( (o) => objectMatches(o.name, searchQueryLower) ) }) )
-                            .filter((g) => g.items.length > 0) as group}
+                        <SchemaBranch
+                          conn={conn}
+                          schema={schema}
+                          expanded={expandedSchemas.has(schema.name) ||
+                            !!searchQuery}
+                          ondata={handleObjectsLoaded}
+                        >
+                          {#snippet children(objects)}
+                            {#each groupObjects(objects)
+                              .map( (g) => ({ ...g, items: g.items.filter( (o) => objectMatches(o.name, searchQueryLower) ) }) )
+                              .filter((g) => g.items.length > 0) as group}
                             <div class="group-node">
                               <button
                                 class="group-header"
@@ -647,7 +566,8 @@
                               {/if}
                             </div>
                           {/each}
-                        {/if}
+                          {/snippet}
+                        </SchemaBranch>
                       </div>
                     {/if}
                   </div>
