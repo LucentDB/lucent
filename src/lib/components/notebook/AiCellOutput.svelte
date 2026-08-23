@@ -355,12 +355,10 @@
             pageSize={view.pageSize}
             tabId={cell.id}
             initFilters={view.filters}
-            initSortCol={view.sortCol}
-            initSortDir={view.sortDir}
+            initSorting={view.sorting}
             onStateChange={(s: {
               filters: import('../../ipc/notebook').FilterSpec[];
-              sortCol: string | null;
-              sortDir: 'asc' | 'desc';
+              sorting: { id: string; desc: boolean }[];
             }) => model.cellView.applyState(cell.id, s)}
             onNeedMore={() => model.cellView.fetchMore(cell.id)}
             onCountAll={() => model.cellView.countAll(cell.id)}

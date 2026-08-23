@@ -174,7 +174,9 @@ describe('column header menu', () => {
   it('sorts on click from the keyboard', async () => {
     const { getByRole, onStateChange } = setup();
     await fireEvent.click(getByRole('button', { name: /sort by name/i }));
-    expect(onStateChange.mock.calls[0][0].sortCol).toBe('name');
+    expect(onStateChange.mock.calls[0][0].sorting).toEqual([
+      { id: '1', desc: false },
+    ]);
   });
 
   it('opens a menu of column actions', async () => {
@@ -197,19 +199,17 @@ describe('column header menu', () => {
     await fireEvent.click(getByLabelText('Column actions for name'));
     await fireEvent.click(getByText('Sort descending'));
     expect(onStateChange.mock.calls[0][0]).toMatchObject({
-      sortCol: 'name',
-      sortDir: 'desc',
+      sorting: [{ id: '1', desc: true }],
     });
   });
 
   it('clears the sort from the menu', async () => {
     const { getByLabelText, getByText, onStateChange } = setup({
-      initSortCol: 'name',
-      initSortDir: 'asc',
+      initSorting: [{ id: '1', desc: false }],
     });
     await fireEvent.click(getByLabelText('Column actions for name'));
     await fireEvent.click(getByText('Clear sort'));
-    expect(onStateChange.mock.calls[0][0].sortCol).toBeNull();
+    expect(onStateChange.mock.calls[0][0].sorting).toEqual([]);
   });
 });
 

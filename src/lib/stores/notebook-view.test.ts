@@ -40,7 +40,7 @@ describe('cell view state', () => {
     const v = defaultViewState();
     expect(v.pageSize).toBe(10);
     expect(v.filters).toEqual([]);
-    expect(v.sortCol).toBeNull();
+    expect(v.sorting).toEqual([]);
     expect(v.totalCount).toBeNull();
   });
 
@@ -62,12 +62,12 @@ describe('cell view state', () => {
     fetchPage.mockResolvedValue(page([[9]]));
 
     const view = createCellView(model);
-    await view.applyState(id, { filters: [], sortCol: 'n', sortDir: 'desc' });
+    await view.applyState(id, { filters: [], sorting: [{ id: '0', desc: true }] });
 
     const args = fetchPage.mock.calls[0];
     expect(args[3]).toBe(10); // limit
     expect(args[4]).toBe(0); // offset — a sort change must restart paging
-    expect(args[5]).toEqual({ column: 'n', direction: 'desc' });
+    expect(args[5]).toEqual({ column: 'n', direction: 'desc' }); // id resolved back to name for the wire
     expect(view.stateFor(id).rows).toEqual([[9]]);
   });
 

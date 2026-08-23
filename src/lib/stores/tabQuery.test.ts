@@ -7,15 +7,19 @@ import {
 } from './tabQuery.js';
 
 describe('sortSpecFor', () => {
-  it('returns null when the tab has no sort column set', () => {
-    expect(sortSpecFor({ sortCol: null, sortDir: 'asc' })).toBeNull();
+  it('maps one sort key to a single-element wire array', () => {
+    const tab = { sorting: [{ column: 'created_at', direction: 'desc' }] };
+    expect(sortSpecFor(tab)).toEqual([
+      { column: 'created_at', direction: 'desc' },
+    ]);
   });
 
-  it('returns a column/direction pair when a sort is set', () => {
-    expect(sortSpecFor({ sortCol: 'created_at', sortDir: 'desc' })).toEqual({
-      column: 'created_at',
-      direction: 'desc',
-    });
+  it('maps an empty sorting array to an empty wire array', () => {
+    expect(sortSpecFor({ sorting: [] })).toEqual([]);
+  });
+
+  it('treats a missing sorting field as unsorted', () => {
+    expect(sortSpecFor({})).toEqual([]);
   });
 });
 
@@ -82,14 +86,13 @@ describe('fetchMoreOptions', () => {
   it("continues from the tab's current fetchedCount as the offset", () => {
     const tab = {
       fetchedCount: 400,
-      sortCol: null,
-      sortDir: 'asc',
+      sorting: [],
       filters: [],
     };
     expect(fetchMoreOptions(tab, 200)).toEqual({
       limit: 200,
       offset: 400,
-      sort: null,
+      sort: [],
       filters: [],
     });
   });
@@ -97,14 +100,13 @@ describe('fetchMoreOptions', () => {
   it("carries the tab's current sort and filters forward unchanged", () => {
     const tab = {
       fetchedCount: 200,
-      sortCol: 'id',
-      sortDir: 'desc',
+      sorting: [{ column: 'id', direction: 'desc' }],
       filters: [{ column: 'active', operator: 'eq', value: 'true' }],
     };
     expect(fetchMoreOptions(tab, 200)).toEqual({
       limit: 200,
       offset: 200,
-      sort: { column: 'id', direction: 'desc' },
+      sort: [{ column: 'id', direction: 'desc' }],
       filters: [{ column: 'active', operator: 'eq', value: 'true' }],
     });
   });
@@ -114,14 +116,13 @@ describe('refetchOptions', () => {
   it('always resets offset to 0, regardless of how much was already fetched', () => {
     const tab = {
       fetchedCount: 800,
-      sortCol: 'name',
-      sortDir: 'asc',
+      sorting: [{ column: 'name', direction: 'asc' }],
       filters: [],
     };
     expect(refetchOptions(tab, 200)).toEqual({
       limit: 200,
       offset: 0,
-      sort: { column: 'name', direction: 'asc' },
+      sort: [{ column: 'name', direction: 'asc' }],
       filters: [],
     });
   });
@@ -129,8 +130,7 @@ describe('refetchOptions', () => {
   it('reflects a just-changed sort/filter that has not been applied to fetchedCount yet', () => {
     const tab = {
       fetchedCount: 600,
-      sortCol: 'new_column',
-      sortDir: 'asc',
+      sorting: [{ column: 'new_column', direction: 'asc' }],
       filters: [],
     };
     expect(refetchOptions(tab, 200).offset).toBe(0);

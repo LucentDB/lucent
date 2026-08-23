@@ -42,6 +42,7 @@
     fetchMoreOptions,
     refetchOptions,
     filterSpecFor,
+    sortSpecFor,
   } from './lib/stores/tabQuery.js';
   import { getTheme } from './lib/stores/theme.svelte.js';
   import { schemaSummary } from './lib/stores/schema-summary.svelte.ts';
@@ -556,7 +557,12 @@
     updateTab(tabId, { isFetchingMore: true });
     queryRunCount += 1;
     try {
-      const opts = fetchMoreOptions(tab, CHUNK_SIZE);
+      // The wire takes one key until phase ③ widens SortSpec to a list.
+      // Built as a new object, not mutated — see the repo's immutability rule.
+      const opts = {
+        ...fetchMoreOptions(tab, CHUNK_SIZE),
+        sort: sortSpecFor(tab)[0] ?? null,
+      };
       const result =
         tab.kind === 'view' || tab.kind === 'table'
           ? await browseTable(tab.path ?? [], tab.name, opts)
@@ -585,7 +591,12 @@
     const merged = { ...tab, ...updates };
     queryRunCount += 1;
     try {
-      const opts = refetchOptions(merged, CHUNK_SIZE);
+      // The wire takes one key until phase ③ widens SortSpec to a list.
+      // Built as a new object, not mutated — see the repo's immutability rule.
+      const opts = {
+        ...refetchOptions(merged, CHUNK_SIZE),
+        sort: sortSpecFor(merged)[0] ?? null,
+      };
       const result =
         merged.kind === 'view' || merged.kind === 'table'
           ? await browseTable(merged.path ?? [], merged.name, opts)
@@ -724,8 +735,7 @@
         totalCount: null,
         duration: 0,
         filters: [],
-        sortCol: null,
-        sortDir: 'asc',
+        sorting: [],
         error: null,
       };
       if (!tabs.find((t) => t.id === tabId)) {
@@ -766,8 +776,7 @@
         sourceContent: '',
         sourceError: null,
         filters: [],
-        sortCol: null,
-        sortDir: 'asc',
+        sorting: [],
       };
       tabs = [...tabs, newTab];
       activeTabId = tabId;
@@ -811,8 +820,7 @@
           baseSql: '',
           duration: parseFloat(elapsed),
           filters: [],
-          sortCol: null,
-          sortDir: 'asc',
+          sorting: [],
         };
         tabs = [...tabs, newTab];
         activeTabId = newTab.id;
@@ -840,8 +848,7 @@
       baseSql: '',
       duration: 0,
       filters: [],
-      sortCol: null,
-      sortDir: 'asc',
+      sorting: [],
       summary: null,
       error: null,
     };
@@ -1075,8 +1082,7 @@
                     error={activeTab.error}
                     tabId={activeTab.id}
                     initFilters={activeTab.filters}
-                    initSortCol={activeTab.sortCol}
-                    initSortDir={activeTab.sortDir}
+                    initSorting={activeTab.sorting}
                     compact={showChatPanel}
                     loading={activeTab.refetching || false}
                     summary={activeTab.summary}
@@ -1100,8 +1106,7 @@
                 error={activeTab.error}
                 tabId={activeTab.id}
                 initFilters={activeTab.filters}
-                initSortCol={activeTab.sortCol}
-                initSortDir={activeTab.sortDir}
+                initSorting={activeTab.sorting}
                 compact={showChatPanel}
                 loading={activeTab.refetching || false}
                 onDescribeFilters={describeFilters}
@@ -1183,8 +1188,7 @@
                   error={activeTab.error}
                   tabId={activeTab.id}
                   initFilters={activeTab.filters}
-                  initSortCol={activeTab.sortCol}
-                  initSortDir={activeTab.sortDir}
+                  initSorting={activeTab.sorting}
                   compact={showChatPanel}
                   loading={activeTab.refetching || false}
                   onDescribeFilters={describeFilters}

@@ -27,10 +27,6 @@
     error = null,
     tabId = null,
     initFilters = [],
-    // TEMPORARY: accepted alongside initSorting so the pre-Task-9 consumers
-    // still compile. Deleted in Task 9.
-    initSortCol = null,
-    initSortDir = 'asc',
     initSorting = null,
     onStateChange = null,
     onNeedMore = null,
@@ -42,16 +38,6 @@
     embedded = false,
     summary = null,
   } = $props();
-
-  // TEMPORARY adapter (deleted in Task 9): map the legacy single-sort props
-  // onto the sorting array the engine wants. Column ids are indices.
-  function legacySorting() {
-    if (initSorting) return initSorting;
-    if (!initSortCol) return [];
-    const index = columns.findIndex((c) => c.name === initSortCol);
-    if (index === -1) return [];
-    return [{ id: String(index), desc: initSortDir === 'desc' }];
-  }
 
   let filters = $state(normalize($state.snapshot(initFilters)));
   let columnWidths = $state({});
@@ -111,7 +97,7 @@
       return rows;
     },
     get initialSorting() {
-      return legacySorting();
+      return initSorting ?? [];
     },
     get initialFilters() {
       return filters;
@@ -140,7 +126,7 @@
       pickerOpen = false;
       restoringTabState = true;
       try {
-        engine.table.setSorting(legacySorting());
+        engine.table.setSorting(initSorting ?? []);
       } finally {
         restoringTabState = false;
       }
@@ -151,23 +137,11 @@
     });
   });
 
-  /**
-   * TEMPORARY dual-shape payload (deleted in Task 9): consumers still read the
-   * legacy sortCol/sortDir pair; the engine's sorting array is the authority
-   * and the pair is derived from it, so both shapes describe the same state.
-   */
-  function legacySortFields() {
-    const head = engine.sorting[0];
-    const sortCol = head ? (columns[Number(head.id)]?.name ?? null) : null;
-    const sortDir = head?.desc ? 'desc' : 'asc';
-    return { sortCol, sortDir };
-  }
-
   function emitChange() {
     if (restoringTabState) return; // a tab switch restores state, it does not change it
     stream.reset();
     checkedRows = new Set();
-    onStateChange?.({ filters, sorting: engine.sorting, ...legacySortFields() });
+    onStateChange?.({ filters, sorting: engine.sorting });
   }
 
   function toggleSort(columnId) {

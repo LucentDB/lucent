@@ -1,7 +1,11 @@
 import { applyable, needsValue } from '../grid/filters.js';
 
+/**
+ * The wire `sort` value. An array from here on: phase ③ makes it multi-key,
+ * and shipping the array shape now means the payload type changes once.
+ */
 export function sortSpecFor(tab) {
-  return tab.sortCol ? { column: tab.sortCol, direction: tab.sortDir } : null;
+  return tab.sorting ?? [];
 }
 
 export function filterSpecFor(tab) {
