@@ -10,6 +10,7 @@
     cell,
     model,
     editing: controlledEditing,
+    selected = false,
     onEnterEdit,
     onExitEdit,
   }: {
@@ -17,6 +18,13 @@
     model: NotebookModel;
     /** When supplied, notebook mode owns whether this cell is being edited. */
     editing?: boolean;
+    /**
+     * Accepted for parity with the other cell kinds. The live input no longer
+     * depends on it: gating on selection is what made the cell need two clicks
+     * (the first swapped the rendered prompt for the input mid-gesture, eating
+     * the click that would have entered edit mode).
+     */
+    selected?: boolean;
     onEnterEdit?: () => void;
     onExitEdit?: () => void;
   } = $props();
@@ -51,6 +59,7 @@
   <TextCellEditor
     source={cell.source}
     editing={isEditing && !isRunning}
+    liveWhenIdle={!isRunning}
     placeholder="Ask a question about your data…"
     renderMode="auto"
     onSourceChange={(v) => model.setCellSource(cell.id, v)}

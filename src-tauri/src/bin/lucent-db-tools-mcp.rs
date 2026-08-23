@@ -67,6 +67,48 @@ fn parse_tool_arguments(tool: &str, raw_args: Option<&str>) -> serde_json::Value
     }
 }
 
+/// The self-documentation a CLI-first agent reaches for before guessing.
+///
+/// pi-class runtimes have no `tools/list` to read, and the four tools' JSON
+/// schemas are already available here (`mcp_server::static_tool_schemas`) — so
+/// print them rather than making the model discover the argument shape by
+/// trial and error.
+fn usage() -> String {
+    let mut out = String::from(
+        "lucent-tool — Lucent's database tools, for agents without MCP.\n\
+         \n\
+         USAGE:\n\
+         \x20 lucent-tool <tool> '<json_arguments>'\n\
+         \x20 lucent-tool <tool> \"<primary field>\"   # shorthand, see below\n\
+         \x20 lucent-tool help\n\
+         \n\
+         Every call runs against the database connection open in Lucent right now,\n\
+         through Lucent's guardrails (read-only enforcement, row caps, DML approval).\n\
+         \n\
+         SHORTHAND: a bare, non-JSON argument is read as the tool's primary field —\n\
+         `run_readonly_query`/`preview_dml` take the SQL, `search_schema` the query,\n\
+         `get_objects_info` an object name. Avoids nesting JSON in shell quoting:\n\
+         \x20 lucent-tool run_readonly_query \"SELECT count(*) FROM public.orders\"\n\
+         \n\
+         TOOLS:\n",
+    );
+    for t in lucent_lib::ai::acp::mcp_server::static_tool_schemas() {
+        let schema = serde_json::to_string(&t.input_schema).unwrap_or_default();
+        let summary = t
+            .description
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        out.push_str(&format!(
+            "\n  {}\n    {}\n    args: {}\n",
+            t.name, summary, schema
+        ));
+    }
+    out
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -95,11 +137,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cli_tool_args = args.get(i + 1).cloned();
                 break;
             }
+            "help" | "-h" | "--help" | "list" => {
+                println!("{}", usage());
+                return Ok(());
+            }
             other => {
-                eprintln!("unknown arg: {other}");
+                eprintln!("unknown argument: {other}\n\n{}", usage());
                 std::process::exit(2);
             }
         }
+    }
+    // The sandbox helper script forwards everything after `call`, so `help`
+    // arrives as the tool name — answer it without needing the socket.
+    if matches!(cli_tool.as_deref(), Some("help" | "-h" | "--help" | "list")) {
+        println!("{}", usage());
+        return Ok(());
     }
     let socket = socket
         .or_else(|| std::env::var("LUCENT_ACP_SOCKET").ok())
@@ -215,4 +267,77 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_object_arguments_pass_through_unchanged() {
+        let v = parse_tool_arguments("run_readonly_query", Some(r#"{"sql":"select 1"}"#));
+        assert_eq!(v, serde_json::json!({"sql": "select 1"}));
+    }
+
+    #[test]
+    fn a_bare_argument_becomes_the_tools_primary_field() {
+        // The shorthand the guidance and `help` both advertise: it spares the
+        // model from nesting JSON (with its own quoted SQL) inside shell
+        // quoting, which is where CLI-path calls tend to fail.
+        assert_eq!(
+            parse_tool_arguments("run_readonly_query", Some("SELECT count(*) FROM t")),
+            serde_json::json!({"sql": "SELECT count(*) FROM t"})
+        );
+        assert_eq!(
+            parse_tool_arguments("search_schema", Some("unpaid invoices")),
+            serde_json::json!({"query": "unpaid invoices"})
+        );
+        assert_eq!(
+            parse_tool_arguments("get_objects_info", Some("orders")),
+            serde_json::json!({"objects": [{"name": "orders"}]})
+        );
+        assert_eq!(
+            parse_tool_arguments("preview_dml", Some("UPDATE t SET x = 1")),
+            serde_json::json!({"sql": "UPDATE t SET x = 1", "description": ""})
+        );
+    }
+
+    #[test]
+    fn missing_or_blank_arguments_become_an_empty_object() {
+        assert_eq!(
+            parse_tool_arguments("search_schema", None),
+            serde_json::json!({})
+        );
+        assert_eq!(
+            parse_tool_arguments("search_schema", Some("   ")),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn a_non_object_json_scalar_is_still_treated_as_the_primary_field() {
+        // `42` parses as JSON but isn't an argument map — and a bare SQL string
+        // never parses at all. Both must land on the primary field.
+        assert_eq!(
+            parse_tool_arguments("run_readonly_query", Some("42")),
+            serde_json::json!({"sql": "42"})
+        );
+    }
+
+    #[test]
+    fn usage_documents_every_tool_with_its_schema() {
+        let u = usage();
+        for tool in [
+            "search_schema",
+            "get_objects_info",
+            "run_readonly_query",
+            "preview_dml",
+        ] {
+            assert!(u.contains(tool), "{tool} missing from help: {u}");
+        }
+        // The schemas come from the same source the MCP path serves, so help
+        // can't drift from `tools/list`.
+        assert!(u.contains(r#""required":["sql"]"#), "{u}");
+        assert!(u.contains("SHORTHAND"), "{u}");
+    }
 }

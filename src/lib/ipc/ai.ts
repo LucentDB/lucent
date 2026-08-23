@@ -49,6 +49,10 @@ export type AiChannelEvent =
       summary: string;
       status?: 'completed' | 'failed';
       output: ToolOutputPayload | null;
+      /** Arguments the tool actually ran with, when the call itself reported
+       *  none (an ACP agent reaching the DB tools through the `lucent-tool`
+       *  CLI reports a shell command with no structured input). */
+      input?: unknown;
     }
   | {
       type: 'done';
@@ -149,6 +153,7 @@ export function handleAiEvent(conversationId: string, e: AiChannelEvent) {
         summary: e.summary,
         status: e.status,
         output: e.output ?? undefined,
+        args: e.input,
       });
       break;
     case 'done':

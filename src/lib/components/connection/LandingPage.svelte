@@ -312,7 +312,6 @@
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
-    letter-spacing: -0.04em;
     margin: 0;
     line-height: 1.1;
   }
@@ -345,7 +344,6 @@
     font-weight: 600;
     color: var(--text);
     margin: 0;
-    letter-spacing: -0.02em;
   }
   .back-btn {
     display: flex;
@@ -409,7 +407,6 @@
   }
   .dismiss-btn:hover {
     background: color-mix(in srgb, var(--error) 15%, transparent);
-    transform: scale(1.1);
   }
   .quick-connect-container {
     margin-top: 28px;

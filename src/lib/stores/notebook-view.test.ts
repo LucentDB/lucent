@@ -62,7 +62,10 @@ describe('cell view state', () => {
     fetchPage.mockResolvedValue(page([[9]]));
 
     const view = createCellView(model);
-    await view.applyState(id, { filters: [], sorting: [{ id: '0', desc: true }] });
+    await view.applyState(id, {
+      filters: [],
+      sorting: [{ id: '0', desc: true }],
+    });
 
     const args = fetchPage.mock.calls[0];
     expect(args[3]).toBe(10); // limit

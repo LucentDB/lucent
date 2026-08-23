@@ -35,11 +35,13 @@ vi.mock('@tauri-apps/api/core', () => ({
 const listenMock = vi.fn();
 const listenerCbs: Record<string, (e: { payload: unknown }) => void> = {};
 vi.mock('@tauri-apps/api/event', () => ({
-  listen: vi.fn(async (event: string, cb: (e: { payload: unknown }) => void) => {
-    listenerCbs[event] = cb;
-    listenMock(event, cb);
-    return () => {};
-  }),
+  listen: vi.fn(
+    async (event: string, cb: (e: { payload: unknown }) => void) => {
+      listenerCbs[event] = cb;
+      listenMock(event, cb);
+      return () => {};
+    },
+  ),
 }));
 
 function seedActiveConversationWithMessage(messageId: string) {
@@ -299,7 +301,9 @@ describe('handleAiEvent', () => {
     const c = getConv(conv.id);
     const segs = c.messages[0].session!.segments;
     const byId = Object.fromEntries(
-      segs.map((s) => (s.type === 'tool_call' ? [s.call.id, s.call.status] : [])),
+      segs.map((s) =>
+        s.type === 'tool_call' ? [s.call.id, s.call.status] : [],
+      ),
     );
     expect(byId['call_1']).toBe('completed');
     expect(byId['call_2']).toBe('stopped');

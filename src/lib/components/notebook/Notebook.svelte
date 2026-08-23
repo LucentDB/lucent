@@ -135,7 +135,14 @@
           {cell}
           {model}
           editing={model.selectedCellId === cell.id && model.mode === 'edit'}
-          onEnterEdit={() => model.enterEditMode()}
+          selected={model.selectedCellId === cell.id}
+          onEnterEdit={() => {
+            // Select first: `enterEditMode` is a no-op while nothing is
+            // selected, and focusing a cell's input is a request to edit
+            // *that* cell whether or not the pointer already selected it.
+            model.select(cell.id);
+            model.enterEditMode();
+          }}
           onExitEdit={() => model.enterCommandMode()}
         />
       {/if}

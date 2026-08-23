@@ -14,6 +14,9 @@
     checkedRows = new Set(),
     onToggleCheck = () => {},
     onCellContextMenu = () => {},
+    selBounds = null,
+    onCellMouseDown = () => {},
+    onCellMouseEnter = () => {},
   }: {
     columns?: { name: string; type_name: string }[];
     rows?: unknown[][];
@@ -22,14 +25,29 @@
     columnWidths?: Record<number, number>;
     checkedRows?: Set<number>;
     onToggleCheck?: (absoluteIndex: number) => void;
-    onCellContextMenu?: (e: MouseEvent, columnIndex: number, value: unknown) => void;
+    onCellContextMenu?: (
+      e: MouseEvent,
+      columnIndex: number,
+      value: unknown,
+    ) => void;
+    selBounds?: { r0: number; r1: number; c0: number; c1: number } | null;
+    onCellMouseDown?: (e: MouseEvent, row: number, col: number) => void;
+    onCellMouseEnter?: (row: number, col: number) => void;
   } = $props();
 
   const engine = createGridEngine({
-    get columns() { return columns ?? []; },
-    get rows() { return rows ?? []; },
-    get initialSorting() { return []; },
-    get initialFilters() { return []; },
+    get columns() {
+      return columns ?? [];
+    },
+    get rows() {
+      return rows ?? [];
+    },
+    get initialSorting() {
+      return [];
+    },
+    get initialFilters() {
+      return [];
+    },
   });
 </script>
 
@@ -42,5 +60,8 @@
     {checkedRows}
     {onToggleCheck}
     {onCellContextMenu}
+    {selBounds}
+    {onCellMouseDown}
+    {onCellMouseEnter}
   />
 </table>

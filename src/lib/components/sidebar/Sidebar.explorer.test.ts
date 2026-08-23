@@ -54,6 +54,8 @@ describe('Sidebar explorer', () => {
   it('does not fetch a schema objects list until its branch is expanded', async () => {
     render(SidebarHarness, { props: { onObjectClick: () => {} } });
     await waitFor(() => expect(screen.getByText('public')).toBeTruthy());
-    expect(invoke.mock.calls.filter(([c]) => c === 'get_schema_objects')).toHaveLength(0);
+    expect(
+      invoke.mock.calls.filter(([c]) => c === 'get_schema_objects'),
+    ).toHaveLength(0);
   });
 });

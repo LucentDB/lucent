@@ -1,5 +1,8 @@
 <script lang="ts">
-  import { QueryClientProvider, type QueryClient } from '@tanstack/svelte-query';
+  import {
+    QueryClientProvider,
+    type QueryClient,
+  } from '@tanstack/svelte-query';
   import type { ComponentProps } from 'svelte';
   import ChatLanding from './ChatLanding.svelte';
 

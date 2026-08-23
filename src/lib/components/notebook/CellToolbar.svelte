@@ -168,7 +168,6 @@
   .ref-chip code {
     font-family: var(--font-mono);
     font-size: 10px;
-    letter-spacing: -0.01em;
     line-height: 1;
   }
   :global(.cell:hover) .ref-chip,

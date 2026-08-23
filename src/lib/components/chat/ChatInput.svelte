@@ -158,8 +158,7 @@
       transform var(--transition-fast);
   }
   .send-btn:hover:not(:disabled) {
-    opacity: 0.9;
-    transform: scale(1.05);
+    background: var(--accent-hover);
   }
   /* A translucent accent fill read as a washed-out, half-broken button. A
      neutral fill states "not yet" without diluting the brand colour. */

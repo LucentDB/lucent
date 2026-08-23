@@ -14,6 +14,7 @@
   import AiSettings from './lib/components/chat/AiSettings.svelte';
   import Notebook from './lib/components/notebook/Notebook.svelte';
   import LogsDrawer from './lib/components/LogsDrawer.svelte';
+  import DbIcon from './lib/components/icons/DbIcon.svelte';
   import { notebooks } from './lib/stores/notebooks.svelte.ts';
   import { QueryClientProvider, createQuery } from '@tanstack/svelte-query';
   import { queryClient } from './lib/queries/client.ts';
@@ -75,7 +76,11 @@
   let showPalette = $state(false);
   let showAiSettings = $state(false);
   let showLogs = $state(false);
-  let showChatPanel = $state(true);
+  // The side pane, and only when asked for. Opening a notebook, a query or a
+  // table used to force this back to `true`, so the pane reappeared on every
+  // new tab no matter how many times the user had closed it. The no-tabs
+  // landing renders the chat full-width without consulting this flag.
+  let showChatPanel = $state(false);
   let hasTabs = $derived(tabs.length > 0);
   // Shown on the AI landing's context strip. Sourced from the connections
   // store rather than `config` because the sidebar's switcher calls
@@ -353,7 +358,9 @@
         pauseForPermission(p.conversationId, p);
       },
       onError: (p) => {
-        const target = chat.conversations.find((c) => c.id === p.conversation_id);
+        const target = chat.conversations.find(
+          (c) => c.id === p.conversation_id,
+        );
         if (target) target.error = p.message;
         else chat.error = p.message;
       },
@@ -726,6 +733,7 @@
       const newTab = {
         id: tabId,
         kind: 'source',
+        sourceObjectKind: kind,
         schema,
         path,
         name,
@@ -742,7 +750,6 @@
         tabs = [...tabs, newTab];
         activeTabId = tabId;
       }
-      showChatPanel = true;
     } else if (kind === 'view' || kind === 'matview') {
       const existingTab = tabs.find(
         (t) => t.kind === 'view' && t.schema === schema && t.name === name,
@@ -857,7 +864,6 @@
     view = 'query';
     queryError = null;
     showPalette = false;
-    showChatPanel = true;
   }
 
   function goToNotebook(filePath = null) {
@@ -871,7 +877,6 @@
     tabs = [...tabs, newTab];
     activeTabId = tabId;
     view = 'notebook';
-    showChatPanel = true;
     showPalette = false;
   }
 
@@ -1122,20 +1127,7 @@
                   class:active={viewSubView === 'data'}
                   onclick={() => switchViewSubView(activeTab.id, 'data')}
                 >
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  >
-                    <rect x="3" y="3" width="18" height="18" rx="2" /><path
-                      d="M3 9h18"
-                    /><path d="M3 15h18" /><path d="M9 3v18" />
-                  </svg>
+                  <DbIcon kind="table" size={13} strokeWidth={1.6} />
                   <span>Data</span>
                 </button>
                 <button
@@ -1143,27 +1135,7 @@
                   class:active={viewSubView === 'source'}
                   onclick={() => switchViewSubView(activeTab.id, 'source')}
                 >
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  >
-                    <path
-                      d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
-                    /><polyline points="14 2 14 8 20 8" /><line
-                      x1="16"
-                      y1="13"
-                      x2="8"
-                      y2="13"
-                    /><line x1="16" y1="17" x2="8" y2="17" /><polyline
-                      points="10 9 9 9 8 9"
-                    />
-                  </svg>
+                  <DbIcon kind="source" size={13} strokeWidth={1.6} />
                   <span>Source</span>
                 </button>
               </div>
@@ -1405,7 +1377,9 @@
     background: var(--accent-soft);
     border-bottom-color: var(--accent);
   }
-  .sub-tab svg {
+  .sub-tab :global(svg) {
+    width: 13px;
+    height: 13px;
     flex-shrink: 0;
   }
   .table-header {
@@ -1533,16 +1507,20 @@
   .modal-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.4);
+    background: oklch(0.2 0.01 264 / 0.32);
     display: flex;
     align-items: center;
     justify-content: center;
     z-index: 2000;
   }
+  /* The dialog inside owns its own frame and scrolling, so the shell only
+     supplies the surface, the corner and the float. `overflow: hidden` keeps
+     the title bar and footer clipped to the radius. */
   .modal-content {
-    background: var(--bg);
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
     border-radius: var(--radius-lg);
-    padding: 0;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    overflow: hidden;
+    box-shadow: var(--shadow-float);
   }
 </style>

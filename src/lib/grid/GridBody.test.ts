@@ -20,7 +20,13 @@ const ROWS: unknown[][] = [
 
 function renderBody(overrides: Record<string, unknown> = {}) {
   return render(BodyHarness, {
-    props: { columns: COLUMNS, rows: ROWS, pageRows: ROWS, pageOffset: 0, ...overrides },
+    props: {
+      columns: COLUMNS,
+      rows: ROWS,
+      pageRows: ROWS,
+      pageOffset: 0,
+      ...overrides,
+    },
   });
 }
 
@@ -39,14 +45,66 @@ describe('GridBody', () => {
 
   it('renders a null cell as empty with the null class', () => {
     const { container } = renderBody();
-    const nullCell = container.querySelectorAll('tbody tr')[2].querySelectorAll('td')[1];
+    const nullCell = container
+      .querySelectorAll('tbody tr')[2]
+      .querySelectorAll('td')[1];
     expect(nullCell.className).toContain('cell-null');
     expect(nullCell.textContent?.trim()).toBe('');
   });
 
-  it('renders booleans as a badge, not bare text', () => {
+  it('renders booleans as plain text, not a status badge', () => {
+    // A tinted pill claimed a significance `false` does not have; in a
+    // database grid a boolean is just a value.
+    const { container, getByText } = renderBody();
+    expect(container.querySelectorAll('.bool-badge')).toHaveLength(0);
+    expect(getByText('true')).toBeTruthy();
+    expect(getByText('false')).toBeTruthy();
+  });
+
+  it('fills a lone selected cell solid and leaves a range washed', () => {
+    const solo = renderBody({ selBounds: { r0: 0, r1: 0, c0: 0, c1: 0 } });
+    const cells = solo.container.querySelectorAll('tbody td:not(.row-num)');
+    expect(cells[0].className).toContain('sel-solid');
+    cleanup();
+
+    const range = renderBody({ selBounds: { r0: 0, r1: 1, c0: 0, c1: 1 } });
+    const ranged = range.container.querySelectorAll('tbody td:not(.row-num)');
+    expect(ranged[0].className).toContain('sel');
+    expect(ranged[0].className).not.toContain('sel-solid');
+  });
+
+  it('draws the range marquee only on its outer edges', () => {
+    const { container } = renderBody({
+      selBounds: { r0: 0, r1: 1, c0: 0, c1: 1 },
+    });
+    const cells = [
+      ...container.querySelectorAll('tbody td:not(.row-num)'),
+    ] as HTMLElement[];
+    // Top-left of a 2x2: top and left only, never bottom or right.
+    expect(cells[0].style.boxShadow).toContain('inset 0 1px 0 0');
+    expect(cells[0].style.boxShadow).toContain('inset 1px 0 0 0');
+    expect(cells[0].style.boxShadow).not.toContain('inset -1px 0 0 0');
+  });
+
+  it('marks no cell selected when there is no selection', () => {
     const { container } = renderBody();
-    expect(container.querySelectorAll('.bool-badge').length).toBeGreaterThan(0);
+    expect(container.querySelectorAll('td.sel')).toHaveLength(0);
+  });
+
+  it('reports the cell coordinates on mousedown', async () => {
+    const onCellMouseDown = vi.fn();
+    const { container } = renderBody({ onCellMouseDown });
+    const cells = container.querySelectorAll('tbody td:not(.row-num)');
+    await fireEvent.mouseDown(cells[1]);
+    expect(onCellMouseDown).toHaveBeenCalledWith(expect.anything(), 0, 1);
+  });
+
+  it('reports hover coordinates so a drag can extend the range', async () => {
+    const onCellMouseEnter = vi.fn();
+    const { container } = renderBody({ onCellMouseEnter });
+    const cells = container.querySelectorAll('tbody td:not(.row-num)');
+    await fireEvent.mouseEnter(cells[2]);
+    expect(onCellMouseEnter).toHaveBeenCalledWith(1, 0);
   });
 
   it('reports the absolute row index when a checkbox is toggled', async () => {
@@ -59,7 +117,10 @@ describe('GridBody', () => {
   });
 
   it('reflects checked state from the absolute index set', () => {
-    const { container } = renderBody({ pageOffset: 200, checkedRows: new Set([201]) });
+    const { container } = renderBody({
+      pageOffset: 200,
+      checkedRows: new Set([201]),
+    });
     const boxes = container.querySelectorAll('tbody input[type=checkbox]');
     expect((boxes[0] as HTMLInputElement).checked).toBe(false);
     expect((boxes[1] as HTMLInputElement).checked).toBe(true);
@@ -68,7 +129,9 @@ describe('GridBody', () => {
   it('passes the column index and value to the context menu handler', async () => {
     const onCellContextMenu = vi.fn();
     const { container } = renderBody({ onCellContextMenu });
-    const cell = container.querySelectorAll('tbody tr')[0].querySelectorAll('td')[1];
+    const cell = container
+      .querySelectorAll('tbody tr')[0]
+      .querySelectorAll('td')[1];
     await fireEvent.contextMenu(cell);
     expect(onCellContextMenu).toHaveBeenCalledWith(expect.anything(), 0, 1);
   });

@@ -316,7 +316,6 @@
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
-    letter-spacing: -0.01em;
     transition:
       background var(--transition-fast),
       transform var(--transition-fast),

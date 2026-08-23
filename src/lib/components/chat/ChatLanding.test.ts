@@ -107,9 +107,30 @@ describe('ChatLanding — disconnected', () => {
 });
 
 describe('ChatLanding — connected', () => {
-  it('names the database in the hero', () => {
+  it('names the database in the intro line', () => {
     const { container } = setup({ connected: true, database: 'shop_db' });
-    expect(container.querySelector('.hero')?.textContent).toContain('shop_db');
+    expect(container.querySelector('.intro')?.textContent).toContain('shop_db');
+  });
+
+  // The mark was a gradient-filled rounded square holding a sparkle, sitting
+  // on a radial bloom: the whole 2023 AI-product logo template at once. In a
+  // panel that resizes to 280px it also pushed the input below the fold.
+  it('leads with the input, not a badge and a title', () => {
+    const { container } = setup({ connected: true, database: 'shop_db' });
+    expect(container.querySelector('.mark')).toBeNull();
+    expect(container.querySelector('h1')).toBeNull();
+
+    const intro = container.querySelector('.intro');
+    const composer = container.querySelector('.composer');
+    expect(intro).toBeTruthy();
+    expect(composer).toBeTruthy();
+    // Orientation first, then the input, then the suggestions.
+    expect(intro?.nextElementSibling).toBe(composer);
+  });
+
+  it('carries no tinted glyph tiles on the rows', () => {
+    const { container } = setup({ connected: true, database: 'shop_db' });
+    expect(container.querySelectorAll('.tile')).toHaveLength(0);
   });
 
   it('shows connection, database and model in the context strip', () => {

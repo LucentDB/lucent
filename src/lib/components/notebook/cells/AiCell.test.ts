@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/svelte';
+import { render, screen, cleanup, fireEvent } from '@testing-library/svelte';
 import AiCell from './AiCell.svelte';
 import AiContextIndicator from '../AiContextIndicator.svelte';
 import { createNotebookModel } from '../../../stores/notebook.svelte.ts';
@@ -30,11 +30,13 @@ function createCell(overrides: Record<string, unknown> = {}) {
 }
 
 describe('AiCell', () => {
-  it('renders prompt display when pending', () => {
+  it('renders the prompt placeholder when pending', () => {
     const cell = createCell();
     const model = createNotebookModel();
-    render(AiCell, { props: { cell, model } });
-    expect(screen.getByText(/ask a question about your data/i)).toBeTruthy();
+    const { container } = render(AiCell, { props: { cell, model } });
+    expect(
+      container.querySelector('textarea')?.getAttribute('placeholder'),
+    ).toMatch(/ask a question about your data/i);
   });
 
   it('shows output when status is ok with table result', () => {
@@ -79,28 +81,135 @@ describe('AiCell', () => {
     expect(container.querySelector('.run-btn')).toBeNull();
   });
 
-  it('renders a plain prompt as plain text, not wrapped markdown', () => {
+  it('renders a plain prompt verbatim, never as markdown', () => {
     const model = createNotebookModel();
     model.cells[0].kind = 'ai';
     model.cells[0].source = 'Which airplanes fly the most';
     const { container } = render(AiCell, {
       props: { cell: model.cells[0], model },
     });
-    expect(container.querySelector('.plain')).toBeTruthy();
+    expect(container.querySelector('textarea')?.value).toBe(
+      'Which airplanes fly the most',
+    );
     expect(container.querySelector('.markdown-body')).toBeNull();
   });
 
-  it('follows notebook-controlled edit mode', async () => {
+  it('keeps a live input while the cell is selected, so one click types', async () => {
+    // A SQL cell feels immediate because its editor is already mounted for the
+    // selected cell. Without the same treatment an AI cell needed two clicks:
+    // the first only entered edit mode, the second finally reached an input.
+    const model = createNotebookModel();
+    model.cells[0].kind = 'ai';
+    const { container } = render(AiCell, {
+      props: { cell: model.cells[0], model, editing: false, selected: true },
+    });
+    expect(container.querySelector('textarea')).toBeTruthy();
+    expect(container.querySelector('.display')).toBeNull();
+  });
+
+  it('keeps a live input on an unselected cell too, so the first click types', async () => {
+    // Gating the live input on `selected` is what made the AI cell need two
+    // clicks. The first pointerdown selected the cell, which swapped the
+    // rendered prompt for a textarea in the same tick — so the click that
+    // would have entered edit mode landed on a button that no longer existed.
+    // The SQL cell never had this problem: its editor is already mounted for
+    // any cell near the viewport, so the click lands *in* the input.
+    const model = createNotebookModel();
+    model.cells[0].kind = 'ai';
+    model.cells[0].source = 'which flights are delayed';
+    const { container } = render(AiCell, {
+      props: { cell: model.cells[0], model, editing: false, selected: false },
+    });
+    expect(container.querySelector('textarea')).toBeTruthy();
+    expect(container.querySelector('.display')).toBeNull();
+  });
+
+  it('enters edit mode from a single click on an unselected cell', async () => {
+    const model = createNotebookModel();
+    model.cells[0].kind = 'ai';
+    let entered = 0;
+    const { container } = render(AiCell, {
+      props: {
+        cell: model.cells[0],
+        model,
+        editing: false,
+        selected: false,
+        onEnterEdit: () => entered++,
+      },
+    });
+    // One gesture: the browser focuses the textarea the click landed in.
+    const ta = container.querySelector('textarea')!;
+    await fireEvent.focus(ta);
+    expect(entered).toBe(1);
+  });
+
+  it('never shows a live input while the cell is running', async () => {
+    const model = createNotebookModel();
+    model.cells[0].kind = 'ai';
+    model.cells[0].status = 'running';
+    const { container } = render(AiCell, {
+      props: { cell: model.cells[0], model, editing: false, selected: true },
+    });
+    expect(container.querySelector('textarea')).toBeNull();
+  });
+
+  it('focusing the live input enters edit mode', async () => {
+    const model = createNotebookModel();
+    model.cells[0].kind = 'ai';
+    let entered = 0;
+    const { container } = render(AiCell, {
+      props: {
+        cell: model.cells[0],
+        model,
+        editing: false,
+        selected: true,
+        onEnterEdit: () => entered++,
+      },
+    });
+    const ta = container.querySelector('textarea')!;
+    await fireEvent.focus(ta);
+    expect(entered).toBe(1);
+  });
+
+  // The input is always mounted now, so notebook-controlled edit mode governs
+  // focus rather than which element exists.
+  it('focuses the input when notebook edit mode opens', async () => {
     const model = createNotebookModel();
     model.cells[0].kind = 'ai';
     const { container, rerender } = render(AiCell, {
       props: { cell: model.cells[0], model, editing: false },
     });
+    const ta = container.querySelector('textarea')!;
+    expect(document.activeElement).not.toBe(ta);
 
     await rerender({ cell: model.cells[0], model, editing: true });
-    expect(container.querySelector('textarea')).toBeTruthy();
+    expect(document.activeElement).toBe(ta);
+  });
+
+  it('gives up focus when edit mode closes, so command keys still navigate', async () => {
+    // Notebook's keymap ignores keys whose target is a textarea, so a cell that
+    // keeps focus after Escape kills J/K navigation until you click elsewhere.
+    const model = createNotebookModel();
+    model.cells[0].kind = 'ai';
+    const { container, rerender } = render(AiCell, {
+      props: { cell: model.cells[0], model, editing: true },
+    });
+    const ta = container.querySelector('textarea')!;
+    expect(document.activeElement).toBe(ta);
 
     await rerender({ cell: model.cells[0], model, editing: false });
+    expect(document.activeElement).not.toBe(ta);
+  });
+
+  it('falls back to the rendered prompt while the cell runs', async () => {
+    const model = createNotebookModel();
+    model.cells[0].kind = 'ai';
+    model.cells[0].source = 'which flights are delayed';
+    model.cells[0].status = 'running';
+    const { container } = render(AiCell, {
+      props: { cell: model.cells[0], model, editing: false, selected: true },
+    });
+    expect(container.querySelector('textarea')).toBeNull();
     expect(container.querySelector('.display')).toBeTruthy();
   });
 });

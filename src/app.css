@@ -6,46 +6,64 @@
   box-sizing: border-box;
 }
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,450;14..32,500;14..32,600;14..32,700&display=swap');
+/* ─────────────────────────────────────────────────────────────────────────
+   Lucent runs in a native window, so it is styled as a native application
+   rather than as a web page. Three rules follow from that:
+
+   1. No web fonts. The system face is the right face — SF Pro on macOS,
+      Segoe on Windows — and a desktop app should not fetch a typeface over
+      the network before it can draw text.
+   2. System colors, not framework colors. The accent is macOS systemBlue,
+      converted from #007AFF / #0A84FF rather than approximated, so a
+      selected row reads as system-drawn instead of branded.
+   3. Depth comes from hairlines. Native surfaces separate with a 1px rule at
+      low contrast; large soft shadows are reserved for things that genuinely
+      float above the window, which means menus and popovers, nothing else.
+
+   Neutrals are tinted toward the accent hue at very low chroma. Pure
+   #000/#fff never appear: an untinted gray beside a blue accent reads dead.
+   ───────────────────────────────────────────────────────────────────────── */
 
 :root {
-  /* Backgrounds — three-layer depth */
-  --bg: #f8f8fb;
-  --bg-surface: #ffffff;
-  --bg-elevated: #ffffff;
-  --bg-subtle: #f2f2f6;
-  --bg-hover: #ebebf2;
-  --bg-header: #1a1a2e;
-  --bg-input: #ffffff;
+  /* ── Surfaces: window chrome, content, elevated ─────────────────── */
+  --bg: oklch(0.943 0.003 264);
+  --bg-surface: oklch(0.994 0.002 264);
+  --bg-elevated: oklch(0.998 0.0015 264);
+  --bg-subtle: oklch(0.962 0.003 264);
+  --bg-hover: oklch(0.93 0.004 264);
+  --bg-input: oklch(0.996 0.0015 264);
 
-  /* Text */
-  --text: #09090b;
-  --text-secondary: #52525b;
-  --text-muted: #a1a1aa;
-  --text-on-header: #e0e0e0;
+  /* ── Text ────────────────────────────────────────────────────────── */
+  --text: oklch(0.205 0.008 264);
+  --text-secondary: oklch(0.455 0.01 264);
+  --text-muted: oklch(0.625 0.008 264);
 
-  /* Borders */
-  --border: #e2e2ea;
-  --border-light: #ededf2;
+  /* ── Borders: the primary means of separation ────────────────────── */
+  --border: oklch(0.875 0.005 264);
+  --border-light: oklch(0.925 0.004 264);
 
-  /* Accent */
-  --accent: #6366f1;
-  --accent-hover: #4f46e5;
-  --accent-soft: #eef2ff;
-  --accent-muted: #c7d2fe;
-  --accent-active-line: rgba(99, 102, 241, 0.07);
-  --accent-selection: #c7d2fe;
-  --accent-foreground: #ffffff;
+  /* ── Accent: macOS systemBlue #007AFF ────────────────────────────── */
+  --accent: oklch(0.6028 0.2177 257.4);
+  --accent-hover: oklch(0.552 0.213 257.4);
+  --accent-soft: oklch(0.955 0.025 257.4);
+  --accent-muted: oklch(0.83 0.09 257.4);
+  --accent-active-line: oklch(0.6028 0.2177 257.4 / 0.06);
+  /* Text selection inside editors, which legitimately select text. */
+  --accent-selection: oklch(0.86 0.075 257.4);
+  --accent-foreground: oklch(0.995 0.001 257);
 
-  /* Semantic feedback */
-  --success: #10b981;
-  --success-bg: #ecfdf5;
-  --danger: #ef4444;
-  --danger-bg: #fef2f2;
+  /* ── Semantic feedback: macOS systemGreen / systemRed / systemOrange,
+        darkened for use as text on a light surface. The system values are
+        tuned as fills; at their native lightness they fall under 3:1 on
+        white, and these are used as label colors. ───────────────────── */
+  --success: oklch(0.58 0.16 145);
+  --success-bg: oklch(0.955 0.035 145);
+  --danger: oklch(0.58 0.21 28.7);
+  --danger-bg: oklch(0.96 0.025 28.7);
   /* --error is an alias of --danger; several components reference it. */
   --error: var(--danger);
   --error-bg: var(--danger-bg);
-  --warning: #f59e0b;
+  --warning: oklch(0.65 0.16 62.6);
 
   /* Syntax colours for statically highlighted SQL. Kept to CodeMirror's default
      light palette so read-only SQL matches the live editor exactly. */
@@ -60,13 +78,15 @@
   /* Tokens emitted into read-only SQL blocks and Markdown responses. */
   --syntax-keyword-weight: 600;
 
-  /* Typography stacks — Inter preferred */
+  /* ── Typography: the system face, no web font ─────────────────────
+        -apple-system resolves to SF Pro Text/Display with the correct
+        optical size for the point size, which is why no explicit
+        letter-spacing correction is needed anywhere below. */
   --font-sans:
-    'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-    sans-serif;
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI Variable Text',
+    'Segoe UI', system-ui, sans-serif;
   --font-mono:
-    'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-    monospace;
+    ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
 
   /* Spacing scale */
   --space-1: 4px;
@@ -78,7 +98,7 @@
   --space-8: 32px;
   --space-10: 40px;
 
-  /* Typography scale */
+  /* Typography scale. 13px is the macOS system UI size and the body default. */
   --text-xs: 11px;
   --text-sm: 12px;
   --text-base: 13px;
@@ -94,62 +114,81 @@
   --weight-semibold: 600;
   --weight-bold: 700;
 
-  /* Radii — increased for modern feel */
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
-  --radius-xl: 20px;
+  /* ── Radii: macOS control geometry. Anything at 10px or above reads as
+        a web card rather than a native control. ────────────────────── */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
   --radius-full: 9999px;
 
-  /* Shadows — more nuanced depth */
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04);
-  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.12), 0 4px 8px rgba(0, 0, 0, 0.05);
-  --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  /* ── Elevation. sm/md/card are hairline-scale: they sit a surface a
+        half-step above its neighbour without announcing it. lg and float
+        are for menus and popovers, the only things that truly float. ── */
+  --shadow-sm: 0 1px 1px oklch(0.2 0.01 264 / 0.05);
+  --shadow-md:
+    0 1px 2px oklch(0.2 0.01 264 / 0.07), 0 2px 6px oklch(0.2 0.01 264 / 0.05);
+  --shadow-card: 0 1px 2px oklch(0.2 0.01 264 / 0.05);
+  --shadow-lg:
+    0 4px 16px oklch(0.2 0.01 264 / 0.1), 0 1px 3px oklch(0.2 0.01 264 / 0.06);
   --shadow-float:
-    0 20px 60px rgba(0, 0, 0, 0.14), 0 6px 20px rgba(0, 0, 0, 0.08);
+    0 10px 32px oklch(0.2 0.01 264 / 0.16), 0 2px 8px oklch(0.2 0.01 264 / 0.08);
 
-  /* Transitions */
-  --transition-fast: 0.08s ease;
-  --transition-normal: 0.16s ease;
+  /* ── Motion: short, and eased out. Users are mid-task. ───────────── */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --transition-fast: 0.09s var(--ease-out);
+  --transition-normal: 0.16s var(--ease-out);
 
-  /* Grid lines */
-  --grid-line: #e2e2e6;
-  --grid-header-border: #d4d4d8;
+  /* ── Grid ─────────────────────────────────────────────────────────── */
+  --grid-line: oklch(0.895 0.004 264);
+  --grid-header-border: oklch(0.845 0.005 264);
+  /* A dense row, as a native table view. */
+  --grid-row-h: 24px;
 
-  /* Focus ring */
-  --ring: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+  /* ── Focus. A ring means "the keyboard is here", never "this is
+        selected"; selection is drawn by the selected thing itself. ─── */
+  --ring: 0 0 0 3px oklch(0.6028 0.2177 257.4 / 0.3);
+  --ring-focus: var(--ring);
 }
 
 :root.dark {
-  --bg: #111114;
-  --bg-surface: #18181f;
-  --bg-elevated: #21212b;
-  --bg-subtle: #27272e;
-  --bg-hover: #2e2e38;
-  --bg-header: #0d0d12;
-  --bg-input: #1e1e28;
-  --text: #f4f4f6;
-  --text-secondary: #a1a1aa;
-  --text-muted: #6b6b78;
-  --text-on-header: #d4d4d8;
-  --border: rgba(255, 255, 255, 0.08);
-  --border-light: rgba(255, 255, 255, 0.04);
-  --border-active: rgba(129, 140, 248, 0.4);
-  --accent: #818cf8;
-  --accent-hover: #6366f1;
-  --accent-soft: rgba(99, 102, 241, 0.15);
-  --accent-muted: rgba(129, 140, 248, 0.3);
-  --accent-active-line: rgba(129, 140, 248, 0.08);
-  --accent-selection: rgba(99, 102, 241, 0.3);
-  --accent-foreground: #111114;
-  --success: #34d399;
-  --success-bg: rgba(52, 211, 153, 0.12);
-  --danger: #f87171;
-  --danger-bg: rgba(248, 113, 113, 0.12);
+  --bg: oklch(0.205 0.004 264);
+  --bg-surface: oklch(0.245 0.005 264);
+  --bg-elevated: oklch(0.285 0.006 264);
+  --bg-subtle: oklch(0.265 0.005 264);
+  --bg-hover: oklch(0.325 0.007 264);
+  --bg-input: oklch(0.255 0.005 264);
+
+  --text: oklch(0.955 0.002 264);
+  --text-secondary: oklch(0.72 0.006 264);
+  --text-muted: oklch(0.545 0.008 264);
+
+  /* Translucent so a border layers correctly over whichever surface it
+     lands on, which varies more in dark mode than in light. */
+  --border: oklch(1 0 0 / 0.1);
+  --border-light: oklch(1 0 0 / 0.055);
+  --border-active: oklch(0.6243 0.2056 255.5 / 0.5);
+
+  /* macOS systemBlue, dark variant #0A84FF */
+  --accent: oklch(0.6243 0.2056 255.5);
+  --accent-hover: oklch(0.68 0.19 255.5);
+  --accent-soft: oklch(0.6243 0.2056 255.5 / 0.16);
+  --accent-muted: oklch(0.6243 0.2056 255.5 / 0.35);
+  --accent-active-line: oklch(0.6243 0.2056 255.5 / 0.1);
+  --accent-selection: oklch(0.6243 0.2056 255.5 / 0.35);
+  --accent-foreground: oklch(0.99 0.001 255);
+
+  /* Dark surfaces take the system values as-is: they read correctly
+     against a dark ground without the lightness correction light mode
+     needs. */
+  --success: oklch(0.7701 0.2243 145);
+  --success-bg: oklch(0.7701 0.2243 145 / 0.14);
+  --danger: oklch(0.6633 0.2236 28.3);
+  --danger-bg: oklch(0.6633 0.2236 28.3 / 0.14);
   --error: var(--danger);
   --error-bg: var(--danger-bg);
-  --warning: #fbbf24;
+  --warning: oklch(0.7824 0.1711 67.2);
+
   /* High-contrast dark SQL palette shared by the editor and read-only blocks. */
   --syn-keyword: #c678dd;
   --syn-string: #98c379;
@@ -158,15 +197,18 @@
   --syn-type: #e5c07b;
   --syn-variable: #e06c75;
   --syn-operator: #56b6c2;
-  --grid-line: rgba(255, 255, 255, 0.06);
-  --grid-header-border: rgba(255, 255, 255, 0.12);
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.35);
-  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.65), 0 6px 16px rgba(0, 0, 0, 0.45);
-  --shadow-card: 0 2px 10px rgba(0, 0, 0, 0.35), 0 1px 3px rgba(0, 0, 0, 0.25);
-  --shadow-float:
-    0 24px 72px rgba(0, 0, 0, 0.7), 0 8px 24px rgba(0, 0, 0, 0.45);
-  --ring-focus: 0 0 0 3px rgba(129, 140, 248, 0.35);
+
+  --grid-line: oklch(1 0 0 / 0.07);
+  --grid-header-border: oklch(1 0 0 / 0.13);
+
+  --shadow-sm: 0 1px 1px oklch(0 0 0 / 0.3);
+  --shadow-md: 0 1px 2px oklch(0 0 0 / 0.4), 0 2px 6px oklch(0 0 0 / 0.3);
+  --shadow-card: 0 1px 2px oklch(0 0 0 / 0.3);
+  --shadow-lg: 0 4px 16px oklch(0 0 0 / 0.5), 0 1px 3px oklch(0 0 0 / 0.35);
+  --shadow-float: 0 10px 32px oklch(0 0 0 / 0.6), 0 2px 8px oklch(0 0 0 / 0.4);
+
+  --ring: 0 0 0 3px oklch(0.6243 0.2056 255.5 / 0.35);
+  --ring-focus: var(--ring);
 }
 
 html,
@@ -215,18 +257,16 @@ body,
 
 body {
   font-family: var(--font-sans);
-  font-size: var(--text-md);
-  line-height: 1.5;
+  /* 13px, the macOS system UI size. */
+  font-size: var(--text-base);
+  line-height: 1.45;
   color: var(--text);
   background: var(--bg);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  letter-spacing: -0.01em;
   transition:
     color var(--transition-normal),
-    background var(--transition-normal),
-    border-color var(--transition-normal),
-    box-shadow var(--transition-normal);
+    background var(--transition-normal);
 }
 
 button {
@@ -239,25 +279,14 @@ textarea {
   font: inherit;
 }
 
+/* Keyboard focus only. A ring that appears on click is the web's habit, not
+   the platform's. */
 :focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline-offset: 1px;
 }
 
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: var(--radius-full);
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: var(--text-muted);
-}
+/* Scrollbars are deliberately left to the platform: WebKit on macOS draws
+   the native overlay scrollbar, which fades when idle. The 6px custom thumb
+   this replaces was visible at all times and marked the app as a web page
+   from across the room. */

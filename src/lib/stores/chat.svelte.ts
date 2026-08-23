@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { ToolOutputPayload, AgentPermissionPayload } from '../ipc/ai.ts';
+import { argsMissing } from './tool-args.ts';
 
 export interface TokenUsage {
   promptTokens: number;
@@ -266,6 +267,9 @@ export function updateToolResult(
     summary: string;
     status?: ToolCallStatus;
     output?: ToolCallCard['output'];
+    /** Backfilled arguments — only replaces what the card already has when
+     *  the call reported none (the ACP CLI path; see `AiEvent::ToolResult`). */
+    args?: unknown;
   },
 ) {
   const session = findMessage(convId, messageId)?.session;
@@ -274,6 +278,10 @@ export function updateToolResult(
     if (seg.type === 'tool_call' && seg.call.id === toolId) {
       seg.call = {
         ...seg.call,
+        args:
+          argsMissing(seg.call.args) && update.args !== undefined
+            ? update.args
+            : seg.call.args,
         summary: update.summary,
         output: update.output,
         // Explicit status wins; legacy events (the rig path pre-status)

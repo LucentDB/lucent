@@ -80,11 +80,17 @@ pub fn build_system_prompt(
         "3. run_readonly_query — Execute SELECT/WITH/EXPLAIN (read-only). Results auto-display."
             .into(),
     );
+    // The argument shapes are spelled out for every tool, not just the first
+    // two: an agent reaching these through Lucent's CLI helper (ACP runtimes
+    // that drop `mcpServers`) has no `tools/list` to read them from, and
+    // guessing the field name costs it a turn.
+    lines.push("   Args: {\"sql\":\"SELECT ...\"}".into());
     lines.push(String::new());
     lines.push(
         "4. preview_dml — Preview INSERT/UPDATE/DELETE (never executes). Pauses for user approval."
             .into(),
     );
+    lines.push("   Args: {\"sql\":\"UPDATE ...\"}".into());
     lines.push(String::new());
     lines.push("RULES:".into());
     lines.push(
@@ -226,7 +232,10 @@ pub fn build_system_prompt(
     }
 
     if !schema.database_name.is_empty() {
-        lines.push(format!("- Database Name / Target: \"{}\"", schema.database_name));
+        lines.push(format!(
+            "- Database Name / Target: \"{}\"",
+            schema.database_name
+        ));
     }
     lines.push(String::new());
 
@@ -285,11 +294,7 @@ pub fn build_system_prompt(
 /// trimming any trailing slashes so DuckDB filepaths or URL keys don't yield empty names.
 pub fn parse_database_name(conn_id: &str) -> String {
     let trimmed = conn_id.trim_end_matches('/');
-    trimmed
-        .rsplit('/')
-        .next()
-        .unwrap_or(trimmed)
-        .to_string()
+    trimmed.rsplit('/').next().unwrap_or(trimmed).to_string()
 }
 
 /// Derive a SchemaTree from the in-memory SchemaGraph. Used when the

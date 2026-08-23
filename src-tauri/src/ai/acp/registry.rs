@@ -1,22 +1,53 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Whether an ACP agent can use Lucent's database tools.
-/// With multi-layer tool delivery (ACP session/new mcpServers, workspace .mcp.json,
-/// and ./lucent-tool CLI helper in sandbox cwd), database tools are universally available.
+/// Whether an ACP agent connects the MCP server Lucent hands it in
+/// `session/new`. Every agent reaches the database one way or another (the
+/// `lucent-tool` CLI helper in the sandbox cwd is the universal path); this is
+/// specifically about the *native MCP* channel, which decides whether the
+/// first-prompt preamble may claim native tools and whether waiting on the
+/// bridge handshake can ever pay off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DbToolSupport {
-    /// Verified: the agent connects client-provided MCP servers or workspace tools.
+    /// Verified: the agent connects client-provided MCP servers.
     Supported,
-    /// Known to not support tools.
+    /// Verified NOT to: `mcpServers` is accepted and dropped. These agents
+    /// reach the database through the CLI helper instead.
     Unsupported,
-    /// Not verified either way.
+    /// Not verified either way — probe the bridge and find out.
     Unknown,
 }
 
-pub fn db_tool_support(_agent_id: &str) -> DbToolSupport {
-    DbToolSupport::Supported
+/// Agents verified to connect the MCP server passed in `session/new`.
+///
+/// - `opencode` — asserted end-to-end by `real_agent_smoke_test`.
+/// - `claude-acp` — Claude Code implements `session/new`'s `mcpServers`.
+const MCP_SUPPORTED_AGENTS: &[&str] = &["opencode", "claude-acp"];
+
+/// Agents verified to accept `mcpServers` and drop it. They still reach the
+/// database — through the `lucent-tool` CLI helper in the sandbox cwd — so this
+/// is a channel limitation, not a missing capability.
+///
+/// - `pi-acp` — pi has no MCP support at all, by design ("**No MCP.** Build CLI
+///   tools with READMEs", pi's README). The adapter stores `mcpServers` on its
+///   session object and spawns `pi --mode rpc` without it, so the bridge
+///   handshake can never arrive and waiting on it only stalls the first turn.
+/// - `cursor`, `github-copilot-cli`, `glm-acp-agent` — observed to ignore the
+///   field (see the ACP notes in `AGENTS.md`).
+const MCP_UNSUPPORTED_AGENTS: &[&str] =
+    &["pi-acp", "cursor", "github-copilot-cli", "glm-acp-agent"];
+
+/// Curated per-agent verdict. `Unknown` is the honest default: the driver
+/// probes the bridge handshake at runtime and behaves accordingly.
+pub fn db_tool_support(agent_id: &str) -> DbToolSupport {
+    if MCP_SUPPORTED_AGENTS.contains(&agent_id) {
+        return DbToolSupport::Supported;
+    }
+    if MCP_UNSUPPORTED_AGENTS.contains(&agent_id) {
+        return DbToolSupport::Unsupported;
+    }
+    DbToolSupport::Unknown
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,12 +251,20 @@ mod tests {
 
     #[test]
     fn db_tool_support_curates_the_registry_agents() {
+        // Verified to connect `session/new`'s mcpServers.
         assert_eq!(db_tool_support("opencode"), DbToolSupport::Supported);
         assert_eq!(db_tool_support("claude-acp"), DbToolSupport::Supported);
-        assert_eq!(db_tool_support("codex-acp"), DbToolSupport::Supported);
-        assert_eq!(db_tool_support("pi-acp"), DbToolSupport::Supported);
-        assert_eq!(db_tool_support("cursor"), DbToolSupport::Supported);
-        assert_eq!(db_tool_support("gemini"), DbToolSupport::Supported);
+        // Verified to accept and drop it — these reach the DB over the CLI helper.
+        assert_eq!(db_tool_support("pi-acp"), DbToolSupport::Unsupported);
+        assert_eq!(db_tool_support("cursor"), DbToolSupport::Unsupported);
+        assert_eq!(
+            db_tool_support("github-copilot-cli"),
+            DbToolSupport::Unsupported
+        );
+        // Unverified agents are not claimed either way: the driver probes the
+        // bridge handshake instead of guessing.
+        assert_eq!(db_tool_support("codex-acp"), DbToolSupport::Unknown);
+        assert_eq!(db_tool_support("gemini"), DbToolSupport::Unknown);
 
         // Every summary carries its verdict (the Settings badge contract).
         let reg = bundled_snapshot();
@@ -240,14 +279,14 @@ mod tests {
         );
         assert_eq!(
             by_id["pi-acp"].db_tools,
-            DbToolSupport::Supported,
-            "supported verdict survives summarize for pi-acp"
+            DbToolSupport::Unsupported,
+            "unsupported verdict survives summarize for pi-acp"
         );
         // Serde contract: camelCase on the wire (the frontend reads dbTools).
         let json = serde_json::to_value(&by_id["opencode"]).unwrap();
         assert_eq!(json["dbTools"], "supported");
         let json = serde_json::to_value(&by_id["pi-acp"]).unwrap();
-        assert_eq!(json["dbTools"], "supported");
+        assert_eq!(json["dbTools"], "unsupported");
     }
 
     #[test]

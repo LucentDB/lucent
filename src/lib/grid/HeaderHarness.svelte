@@ -19,10 +19,18 @@
   } = $props();
 
   const engine = createGridEngine({
-    get columns() { return columns; },
-    get rows() { return rows; },
-    get initialSorting() { return []; },
-    get initialFilters() { return []; },
+    get columns() {
+      return columns;
+    },
+    get rows() {
+      return rows;
+    },
+    get initialSorting() {
+      return [];
+    },
+    get initialFilters() {
+      return [];
+    },
   });
 </script>
 

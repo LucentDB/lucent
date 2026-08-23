@@ -228,7 +228,6 @@
     font-weight: 500;
     color: var(--text);
     outline: none;
-    letter-spacing: -0.015em;
   }
   input::placeholder {
     color: var(--text-muted);
@@ -288,7 +287,6 @@
   .item-label {
     font-size: 15px;
     font-weight: 500;
-    letter-spacing: -0.01em;
   }
   .item-desc {
     font-size: 13px;

@@ -17,6 +17,29 @@
     preview_dml: 'lock',
   };
 
+  // A tool id (`run_readonly_query`) is prettified for display; anything else
+  // is shown verbatim. ACP carries no tool name — `name` is the agent's own
+  // free-text title, which for a bash-first agent is the whole shell command.
+  // Underscore-stripping plus `text-transform: capitalize` turned those into
+  // commands that were never run (`airplanes_data` → `Airplanes Data`), so the
+  // transform is confined to names that actually are identifiers.
+  const TOOL_ID = /^[a-z][a-z0-9_]*$/;
+  let isToolId = $derived(TOOL_ID.test(tool.name));
+  let displayName = $derived(
+    isToolId ? tool.name.replace(/_/g, ' ') : tool.name,
+  );
+
+  // The status column is a short completion indicator, never a content
+  // preview: an agent that reports a tool's stdout would otherwise fill the
+  // header with the Markdown row preview that the body already renders.
+  const STATUS_MAX = 80;
+  function statusText(summary: string): string {
+    const line = summary.split('\n', 1)[0].trim();
+    return line.length > STATUS_MAX
+      ? `${line.slice(0, STATUS_MAX - 1)}…`
+      : line;
+  }
+
   let statusIcon = $derived.by(() => {
     switch (tool.status) {
       case 'failed':
@@ -42,15 +65,14 @@
       case 'failed':
         return 'Failed';
       case 'completed':
-        return tool.summary || 'Done';
+        return tool.summary ? statusText(tool.summary) : 'Done';
       case 'stopped':
         return 'Stopped';
       case 'running':
         return 'Running…';
       default: {
         if (tool.summary === 'error') return 'Failed';
-        if (tool.summary?.startsWith('error')) return tool.summary;
-        if (tool.summary) return tool.summary;
+        if (tool.summary) return statusText(tool.summary);
         return cellCompleted ? 'Done' : 'Running…';
       }
     }
@@ -143,7 +165,7 @@
         </svg>
       {/if}
     </span>
-    <span class="tcc-name">{tool.name.replace(/_/g, ' ')}</span>
+    <span class="tcc-name" class:raw={!isToolId}>{displayName}</span>
     <span class="tcc-status">{statusLabel}</span>
     <svg
       class="tcc-chevron"
@@ -283,6 +305,17 @@
     color: var(--text-secondary);
     text-transform: capitalize;
     font-size: var(--text-xs);
+  }
+
+  /* A free-text agent title (often a full shell command): exact casing, and
+     it must not push the status chip off the row. */
+  .tcc-name.raw {
+    text-transform: none;
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 55%;
   }
 
   .tcc-status {

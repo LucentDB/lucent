@@ -189,10 +189,10 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    height: 24px;
+    height: 22px;
     padding: 0 3px 0 var(--space-2);
     border: 1px solid var(--border);
-    border-radius: var(--radius-full);
+    border-radius: var(--radius-sm);
     background: var(--accent-soft);
     font-size: var(--text-sm);
     animation: chip-in 0.14s cubic-bezier(0.22, 1, 0.36, 1);
