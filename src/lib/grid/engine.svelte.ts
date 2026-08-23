@@ -33,11 +33,6 @@ export interface SortState {
   desc: boolean;
 }
 
-export interface WireSort {
-  column: string;
-  direction: 'asc' | 'desc';
-}
-
 export interface GridConfig {
   readonly columns: GridColumn[];
   readonly rows: unknown[][];
@@ -141,20 +136,11 @@ export function createGridEngine(config: GridConfig) {
     },
   });
 
-  /** Table sorting state → the IPC `sort` shape, ids resolved back to names. */
-  function sortingForWire(): WireSort[] {
-    return sorting.map((s) => ({
-      column: config.columns[Number(s.id)]?.name ?? s.id,
-      direction: s.desc ? 'desc' : 'asc',
-    }));
-  }
-
   return {
     table,
     get sorting() {
       return sorting;
     },
-    sortingForWire,
   };
 }
 

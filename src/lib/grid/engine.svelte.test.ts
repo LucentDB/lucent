@@ -184,37 +184,6 @@ describe('reactivity across the getter boundary', () => {
   });
 });
 
-describe('sortingForWire', () => {
-  it('maps sorting state onto the IPC shape, in order', async () => {
-    const h = harness();
-    h.engine().table.setSorting([
-      { id: '1', desc: false },
-      { id: '0', desc: true },
-    ]);
-    await h.flush();
-    expect(h.engine().sortingForWire()).toEqual([
-      { column: 'email', direction: 'asc' },
-      { column: 'id', direction: 'desc' },
-    ]);
-    h.dispose();
-  });
-
-  it('returns an empty array when nothing is sorted', () => {
-    const h = harness();
-    expect(h.engine().sortingForWire()).toEqual([]);
-    h.dispose();
-  });
-
-  it('notifies the caller when sorting changes', async () => {
-    const onSortingChange = vi.fn();
-    const h = harness({ onSortingChange });
-    h.engine().table.setSorting([{ id: '0', desc: true }]);
-    await h.flush();
-    expect(onSortingChange).toHaveBeenCalledWith([{ id: '0', desc: true }]);
-    h.dispose();
-  });
-});
-
 describe('GRID_FEATURES', () => {
   it('includes every feature the grid renders against', () => {
     const names = Object.keys(GRID_FEATURES);
