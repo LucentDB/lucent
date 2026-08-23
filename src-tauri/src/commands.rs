@@ -1438,9 +1438,14 @@ pub async fn execute_query(
     sql: String,
     limit: i64,
     offset: i64,
-    sort: Option<crate::query_paging::SortSpec>,
+    // The wire sort became a LIST (multi-key ORDER BY). Tauri command params
+    // cannot carry `#[serde(default)]`, and Option<T> is the framework's
+    // absent/null-tolerant form — so the list arrives wrapped and defaults to
+    // empty, which is exactly what the old Option<SortSpec> gave clients.
+    sort: Option<Vec<crate::query_paging::SortSpec>>,
     filters: Vec<crate::query_paging::FilterSpec>,
 ) -> Result<ExecuteResult, CommandError> {
+    let sort = sort.unwrap_or_default();
     let conn_id = (*state.current_connection_id.lock().await)
         .ok_or_else(|| CommandError::new("QueryError", "not connected — connect first"))?;
     let client = state
@@ -1821,9 +1826,12 @@ pub async fn browse_table(
     name: String,
     limit: i64,
     offset: i64,
-    sort: Option<crate::query_paging::SortSpec>,
+    // Same list-shaped wire sort as execute_query: Option-wrapped because
+    // tauri params cannot take #[serde(default)].
+    sort: Option<Vec<crate::query_paging::SortSpec>>,
     filters: Vec<crate::query_paging::FilterSpec>,
 ) -> Result<ExecuteResult, CommandError> {
+    let sort = sort.unwrap_or_default();
     let conn_id = (*state.current_connection_id.lock().await)
         .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
     let client = state

@@ -361,7 +361,7 @@ async fn run_sql_cell(
     let req = PageRequest {
         limit: DEFAULT_CELL_PAGE_SIZE,
         offset: 0,
-        sort: None,
+        sort: vec![],
         filters: vec![],
     };
     let page_sql = build_page_sql(&rewritten, &req, dialect, builder.as_ref());
