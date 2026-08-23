@@ -1,4 +1,4 @@
-import { applyable, needsValue } from '../components/grid/filters.js';
+import { applyable, needsValue } from '../grid/filters.js';
 
 export function sortSpecFor(tab) {
   return tab.sortCol ? { column: tab.sortCol, direction: tab.sortDir } : null;

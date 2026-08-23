@@ -4,7 +4,7 @@
   import { initIndexingListeners } from './lib/stores/indexing.svelte';
   import Sidebar from './lib/components/sidebar/Sidebar.svelte';
   import QueryEditor from './lib/components/editor/QueryEditor.svelte';
-  import ResultsGrid from './lib/components/grid/ResultsGrid.svelte';
+  import ResultsGrid from './lib/grid/ResultsGrid.svelte';
   import SourceView from './lib/components/source/SourceView.svelte';
   import LandingPage from './lib/components/connection/LandingPage.svelte';
   import CommandPalette from './lib/components/palette/CommandPalette.svelte';

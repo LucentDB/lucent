@@ -4,7 +4,7 @@
   import ToolCallCard from '../chat/ToolCallCard.svelte';
   import MarkdownBody from './MarkdownBody.svelte';
   import SqlBlock from './SqlBlock.svelte';
-  import ResultsGrid from '../grid/ResultsGrid.svelte';
+  import ResultsGrid from '../../grid/ResultsGrid.svelte';
   import { CELL_PAGE_SIZES } from '../../stores/notebook-view.ts';
   import type { ToolCallCard as ToolCallCardType } from '../../stores/chat.svelte.ts';
   import type {

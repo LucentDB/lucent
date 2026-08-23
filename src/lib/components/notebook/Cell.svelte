@@ -1,5 +1,5 @@
 <script lang="ts">
-  import ResultsGrid from '../grid/ResultsGrid.svelte';
+  import ResultsGrid from '../../grid/ResultsGrid.svelte';
   import CellGutter from './CellGutter.svelte';
   import CellToolbar from './CellToolbar.svelte';
   import { CELL_PAGE_SIZES } from '../../stores/notebook-view.ts';
