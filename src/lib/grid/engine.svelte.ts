@@ -108,6 +108,11 @@ export function createGridEngine(config: GridConfig) {
       coreRowModel: createCoreRowModel(),
     },
     ...MANUAL_FLAGS,
+    // Legacy parity: a plain header click always started ascending, for every
+    // column type. v9's default infers a desc-first cycle for numeric columns
+    // (column_getFirstSortDir samples cell values), so pin it off. The column
+    // menu still sets either direction explicitly.
+    sortDescFirst: false,
     // Rows are positional arrays with no natural key. Index over the
     // accumulated buffer is the absolute row number, matching the selection
     // semantics the old checkedRows Set used.

@@ -8,6 +8,8 @@
     onResizeStart,
     onResizeKeydown,
     onToggleCheckAll,
+    /** ID of the column whose menu is open, so aria-expanded can track it. */
+    openColumnId = null,
     allChecked = false,
   } = $props();
 
@@ -51,6 +53,7 @@
             class="col-menu-trigger"
             aria-label="Column actions for {meta.name}"
             aria-haspopup="menu"
+            aria-expanded={openColumnId === header.column.id}
             onclick={(e) => onOpenMenu(e, header.column.id)}
           >
             <svg
@@ -175,6 +178,12 @@
   th.row-num input {
     cursor: pointer;
   }
+  th input[type='checkbox'] {
+    width: 14px;
+    height: 14px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
 
   /* Resize handle — positioned relative to th so it sits exactly on the column border */
   th.sortable {
@@ -240,13 +249,11 @@
     background: var(--bg-surface);
     color: var(--text);
   }
-  /* Revealed on hover, but never hidden from keyboard users — an invisible
-     trigger that still takes focus is a trap. When Task 8 wires the column
-     menu through this component it must also re-add the
-     `.col-menu-trigger[aria-expanded='true'] { opacity: 1 }` rule alongside
-     the aria-expanded attribute (present in ResultsGrid.svelte today). */
+  /* Revealed on hover, but never hidden from keyboard users or while its menu
+     is open — an invisible trigger that still takes focus is a trap. */
   th:hover .col-menu-trigger,
-  .col-menu-trigger:focus-visible {
+  .col-menu-trigger:focus-visible,
+  .col-menu-trigger[aria-expanded='true'] {
     opacity: 1;
   }
 </style>

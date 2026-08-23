@@ -63,4 +63,37 @@ describe('GridPagination', () => {
     });
     expect(getByText(/9,000/)).toBeTruthy();
   });
+
+  it('shows a bare fetched count once the result has ended', () => {
+    const { container } = render(GridPagination, {
+      props: { ...base, isEnd: true },
+    });
+    const info = container.querySelector('.page-info')?.textContent ?? '';
+    expect(info.replace(/\s+/g, ' ')).toContain('of 450');
+    // Neither the provisional '+' nor the old 'fetched' wording may appear.
+    expect(info).not.toContain('+');
+    expect(info).not.toContain('fetched');
+  });
+
+  it('marks the fetched count as provisional while more rows may come', () => {
+    const { container } = render(GridPagination, {
+      props: { ...base, isEnd: false },
+    });
+    const info = container.querySelector('.page-info')?.textContent ?? '';
+    expect(info.replace(/\s+/g, ' ')).toContain('of 450+');
+  });
+
+  it('shows which page is current', () => {
+    const { getByText } = render(GridPagination, {
+      props: { ...base, page: 2 },
+    });
+    expect(getByText('Page 3')).toBeTruthy();
+  });
+
+  it('tightens its padding in embedded mode', () => {
+    const { container } = render(GridPagination, {
+      props: { ...base, embedded: true },
+    });
+    expect(container.querySelector('.pagination.embedded')).toBeTruthy();
+  });
 });
