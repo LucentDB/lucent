@@ -43,8 +43,8 @@ describe('GridHeader', () => {
   it('calls onToggleSort with the column id when the header is clicked', async () => {
     const onToggleSort = vi.fn();
     const { getByLabelText } = renderHeader({ onToggleSort });
-    await fireEvent.click(getByLabelText('Sort by email'));
-    expect(onToggleSort).toHaveBeenCalledWith('1');
+    await fireEvent.click(getByLabelText(/Sort by email/));
+    expect(onToggleSort).toHaveBeenCalledWith('1', expect.anything());
   });
 
   it('calls onOpenMenu from the column actions button', async () => {
@@ -65,10 +65,61 @@ describe('GridHeader', () => {
     expect(first.style.width).toBe('250px');
   });
 
-  it('renders the sort indicator the parent supplies', () => {
-    const { getByText } = renderHeader({
-      sortIndicatorFor: (id: string) => (id === '1' ? ' ▴' : ''),
+});
+
+describe('sort affordances', () => {
+  it('shows an ascending arrow and no badge for a single sort', () => {
+    const { container, getByText } = renderHeader({
+      sortDirectionOf: (id: string) => (id === '1' ? 'asc' : false),
+      sortIndexOf: (id: string) => (id === '1' ? 0 : -1),
     });
-    expect(getByText(/email ▴/)).toBeTruthy();
+    expect(getByText('▴')).toBeTruthy();
+    // One key needs no ordinal — a lone "1" badge is noise.
+    expect(container.querySelector('.sort-badge')).toBeNull();
+  });
+
+  it('shows order badges once a second key exists', () => {
+    const { container } = renderHeader({
+      // Columns render in fixed table order (id is column 0), while badges
+      // carry SORT positions. Column 0 is the first key here, so the badges
+      // read 1, 2 across the row.
+      sortDirectionOf: (id: string) => (id === '0' ? 'asc' : 'desc'),
+      sortIndexOf: (id: string) => (id === '0' ? 0 : 1),
+    });
+    const badges = [...container.querySelectorAll('.sort-badge')].map((b) => b.textContent?.trim());
+    expect(badges).toEqual(['1', '2']);
+  });
+
+  it('shows a descending arrow for a descending key', () => {
+    const { getByText } = renderHeader({
+      sortDirectionOf: (id: string) => (id === '0' ? 'desc' : false),
+      sortIndexOf: (id: string) => (id === '0' ? 0 : -1),
+    });
+    expect(getByText('▾')).toBeTruthy();
+  });
+
+  // The label carries the shift-click hint, so the query is a regex — an
+  // exact match can never hit once Step 3 appends the hint sentence.
+  it('passes the click event through so the parent can see shiftKey', async () => {
+    const onToggleSort = vi.fn();
+    const { getByLabelText } = renderHeader({ onToggleSort });
+    await fireEvent.click(getByLabelText(/Sort by email/), { shiftKey: true });
+    expect(onToggleSort).toHaveBeenCalledWith('1', expect.objectContaining({ shiftKey: true }));
+  });
+
+  it('marks a sorted header for styling', () => {
+    const { container } = renderHeader({
+      sortDirectionOf: (id: string) => (id === '1' ? 'asc' : false),
+      sortIndexOf: (id: string) => (id === '1' ? 0 : -1),
+    });
+    const ths = container.querySelectorAll('thead th');
+    expect(ths[2].className).toContain('active');
+    expect(ths[1].className).not.toContain('active');
+  });
+
+  it('describes multi-sort in the button label so it is discoverable', () => {
+    const { getByLabelText } = renderHeader();
+    // Shift-click is invisible otherwise; screen-reader users get no hint at all.
+    expect(getByLabelText(/Sort by email.*shift.*additional/i)).toBeTruthy();
   });
 });

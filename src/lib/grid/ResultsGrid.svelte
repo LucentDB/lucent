@@ -144,14 +144,20 @@
     onStateChange?.({ filters, sorting: engine.sorting });
   }
 
-  function toggleSort(columnId) {
-    engine.table.getColumn(columnId)?.toggleSorting();
+  function toggleSort(columnId, event) {
+    const column = engine.table.getColumn(columnId);
+    if (!column) return;
+    // Passing the event lets Table apply isMultiSortEvent, so shift-click
+    // appends a key instead of replacing the sort.
+    column.getToggleSortingHandler()?.(event);
   }
 
-  function sortIndicatorFor(columnId) {
-    const dir = engine.table.getColumn(columnId)?.getIsSorted();
-    if (!dir) return '';
-    return dir === 'asc' ? ' ▴' : ' ▾';
+  function sortIndexOf(columnId) {
+    return engine.sortIndexOf(columnId);
+  }
+
+  function sortDirectionOf(columnId) {
+    return engine.table.getColumn(columnId)?.getIsSorted() ?? false;
   }
 
   function toggleCheckAll() {
@@ -577,7 +583,8 @@
         <GridHeader
           table={engine.table}
           {columnWidths}
-          {sortIndicatorFor}
+          {sortIndexOf}
+          {sortDirectionOf}
           onToggleSort={toggleSort}
           onOpenMenu={openColumnMenu}
           onResizeStart={startResize}

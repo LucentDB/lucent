@@ -9,7 +9,8 @@
     columns,
     rows,
     columnWidths = {},
-    sortIndicatorFor = () => '',
+    sortIndexOf = () => -1,
+    sortDirectionOf = () => false,
     onToggleSort = () => {},
     onOpenMenu = () => {},
     onResizeStart = () => {},
@@ -30,7 +31,8 @@
   <GridHeader
     table={engine.table}
     {columnWidths}
-    {sortIndicatorFor}
+    {sortIndexOf}
+    {sortDirectionOf}
     {onToggleSort}
     {onOpenMenu}
     {onResizeStart}

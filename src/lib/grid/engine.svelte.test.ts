@@ -225,6 +225,28 @@ describe('multi-sort', () => {
     h.dispose();
   });
 
+  it('enforces the cap behaviorally: a fourth shift-click is refused', async () => {
+    const h = harness({
+      columns: [
+        { name: 'a', type_name: 'int4' },
+        { name: 'b', type_name: 'int4' },
+        { name: 'c', type_name: 'int4' },
+        { name: 'd', type_name: 'int4' },
+      ],
+      rows: [[1, 2, 3, 4]],
+    });
+    // The same path a shift-click takes in the header: getToggleSortingHandler
+    // applies isMultiSortEvent and appends a key — until the cap.
+    for (const id of ['0', '1', '2', '3']) {
+      h.engine()
+        .table.getColumn(id)
+        ?.getToggleSortingHandler()?.({ shiftKey: true });
+    }
+    await h.flush();
+    expect(h.engine().sorting).toHaveLength(3);
+    h.dispose();
+  });
+
   it('emits every key to the wire, in badge order', async () => {
     const h = harness();
     h.engine().table.setSorting([

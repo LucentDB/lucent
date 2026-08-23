@@ -2,7 +2,8 @@
   let {
     table,
     columnWidths = {},
-    sortIndicatorFor = () => '',
+    sortIndexOf = () => -1,
+    sortDirectionOf = () => false,
     onToggleSort,
     onOpenMenu,
     onResizeStart,
@@ -15,6 +16,11 @@
 
   const headers = $derived(table.getHeaderGroups()[0]?.headers ?? []);
 
+  /** Badges only earn their space once a second key exists. */
+  const sortKeyCount = $derived(
+    headers.filter((h) => sortIndexOf(h.column.id) !== -1).length,
+  );
+
   /** Column meta carries the display name and index; the id is positional. */
   function metaOf(header) {
     return header.column.columnDef.meta ?? {};
@@ -22,6 +28,12 @@
 
   function widthOf(index) {
     return columnWidths[index] || 150;
+  }
+
+  function arrowFor(columnId) {
+    const dir = sortDirectionOf(columnId);
+    if (!dir) return '';
+    return dir === 'asc' ? '▴' : '▾';
   }
 </script>
 
@@ -34,19 +46,27 @@
       {@const meta = metaOf(header)}
       <th
         class="sortable"
-        class:active={header.column.getIsSorted() !== false}
+        class:active={sortDirectionOf(header.column.id) !== false}
         style="width: {widthOf(meta.index)}px; min-width: 80px;"
         title={meta.typeName}
       >
         <div class="col-header">
           <button
             class="col-info"
-            aria-label="Sort by {meta.name}"
-            onclick={() => onToggleSort(header.column.id)}
+            aria-label="Sort by {meta.name}. Shift-click to add an additional sort key."
+            onclick={(e) => onToggleSort(header.column.id, e)}
           >
-            <span class="col-name"
-              >{meta.name}{sortIndicatorFor(header.column.id)}</span
-            >
+            <span class="col-name-and-order">
+              <span class="col-name">{meta.name}</span>
+              {#if sortDirectionOf(header.column.id)}
+                <span class="sort-arrow" aria-hidden="true"
+                  >{arrowFor(header.column.id)}</span
+                >
+                {#if sortKeyCount > 1}
+                  <span class="sort-badge">{sortIndexOf(header.column.id) + 1}</span>
+                {/if}
+              {/if}
+            </span>
             <span class="col-type">{meta.typeName}</span>
           </button>
           <button
@@ -154,6 +174,30 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     width: 100%;
+  }
+  .col-name-and-order {
+    display: flex;
+    align-items: baseline;
+    gap: 3px;
+    min-width: 0;
+  }
+  .sort-arrow {
+    font-size: 0.7rem;
+    opacity: 0.8;
+  }
+
+  .sort-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1rem;
+    height: 1rem;
+    padding: 0 0.2rem;
+    border-radius: 0.5rem;
+    font-size: 0.625rem;
+    font-variant-numeric: tabular-nums;
+    background: var(--accent-soft, rgba(120, 140, 255, 0.18));
+    color: var(--accent, #6b7cff);
   }
   .col-type {
     font-size: 10px;
