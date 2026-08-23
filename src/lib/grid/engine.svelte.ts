@@ -38,6 +38,8 @@ export interface GridConfig {
   readonly rows: unknown[][];
   readonly initialSorting: SortState[];
   readonly initialFilters: unknown[];
+  /** Cap on ORDER BY keys. Beyond three the badge row stops being readable. */
+  readonly maxSortKeys?: number;
   onSortingChange?: (sorting: SortState[]) => void;
 }
 
@@ -77,7 +79,6 @@ export function createGridEngine(config: GridConfig) {
     manualFiltering: true,
     manualPagination: true,
   } satisfies Record<string, boolean>;
-
   const columnDefs = $derived(
     config.columns.map((col, index) => ({
       // Index-based id: `SELECT a, a` yields duplicate names, and Table
@@ -86,6 +87,7 @@ export function createGridEngine(config: GridConfig) {
       accessorFn: (row: unknown[]) => row[index],
       meta: { name: col.name, typeName: col.type_name, index },
       enableSorting: true,
+      enableMultiSort: true,
       enableColumnFilter: true,
       enableResizing: true,
       enableHiding: true,
@@ -112,6 +114,17 @@ export function createGridEngine(config: GridConfig) {
     // cleared. v9's default enableSortingRemoval:true adds a third none state;
     // pin it off so the cycle stays two-state (the menu keeps Clear sort).
     enableSortingRemoval: false,
+    // Multi-sort (phase ③): a plain click still replaces the single key with
+    // the two-state cycle above; shift-click appends up to the cap. Keys are
+    // sent to the backend in this order — badge number IS the ORDER BY
+    // position.
+    enableMultiSort: true,
+    // Shift-click removes the last key too, so a user can walk a sort back
+    // without clearing the whole thing.
+    enableMultiRemove: true,
+    maxMultiSortColCount: config.maxSortKeys ?? 3,
+    isMultiSortEvent: (e: unknown) =>
+      (e as { shiftKey?: boolean } | undefined)?.shiftKey === true,
     // Rows are positional arrays with no natural key. Index over the
     // accumulated buffer is the absolute row number, matching the selection
     // semantics the old checkedRows Set used.
@@ -136,11 +149,30 @@ export function createGridEngine(config: GridConfig) {
     },
   });
 
+  /** 0-based position in the sort list, or -1 when this column is unsorted. */
+  function sortIndexOf(columnId: string): number {
+    return sorting.findIndex((s) => s.id === columnId);
+  }
+
+  /**
+   * The current sort state in wire shape, in badge order. Interactive paths
+   * cannot produce duplicate ids — toggle/multi-sort replace or cycle a
+   * column's existing entry rather than appending a second one.
+   */
+  function sortingForWire(): { column: string; direction: 'asc' | 'desc' }[] {
+    return sorting.map((s) => ({
+      column: config.columns[Number(s.id)]?.name ?? s.id,
+      direction: s.desc ? ('desc' as const) : ('asc' as const),
+    }));
+  }
+
   return {
     table,
     get sorting() {
       return sorting;
     },
+    sortIndexOf,
+    sortingForWire,
   };
 }
 

@@ -184,6 +184,74 @@ describe('reactivity across the getter boundary', () => {
   });
 });
 
+describe('multi-sort', () => {
+  it('reports no sort index for an unsorted column', () => {
+    const h = harness();
+    expect(h.engine().sortIndexOf('0')).toBe(-1);
+    h.dispose();
+  });
+
+  it('reports 0-based positions matching the badge numbers', async () => {
+    const h = harness();
+    h.engine().table.setSorting([
+      { id: '1', desc: false },
+      { id: '0', desc: true },
+    ]);
+    await h.flush();
+    expect(h.engine().sortIndexOf('1')).toBe(0);
+    expect(h.engine().sortIndexOf('0')).toBe(1);
+    h.dispose();
+  });
+
+  it('treats a shift-click as a multi-sort event', () => {
+    const h = harness();
+    const isMulti = h.engine().table.options.isMultiSortEvent;
+    expect(isMulti?.({ shiftKey: true } as never)).toBe(true);
+    expect(isMulti?.({ shiftKey: false } as never)).toBe(false);
+    h.dispose();
+  });
+
+  it('caps the number of sort keys', async () => {
+    const h = harness({
+      columns: [
+        { name: 'a', type_name: 'int4' },
+        { name: 'b', type_name: 'int4' },
+        { name: 'c', type_name: 'int4' },
+        { name: 'd', type_name: 'int4' },
+      ],
+      rows: [[1, 2, 3, 4]],
+    });
+    expect(h.engine().table.options.maxMultiSortColCount).toBe(3);
+    h.dispose();
+  });
+
+  it('emits every key to the wire, in badge order', async () => {
+    const h = harness();
+    h.engine().table.setSorting([
+      { id: '1', desc: false },
+      { id: '0', desc: true },
+    ]);
+    await h.flush();
+    expect(h.engine().sortingForWire()).toEqual([
+      { column: 'email', direction: 'asc' },
+      { column: 'id', direction: 'desc' },
+    ]);
+    h.dispose();
+  });
+
+  it('still does not reorder rows locally with two keys set', async () => {
+    const h = harness();
+    h.engine().table.setSorting([
+      { id: '1', desc: false },
+      { id: '0', desc: true },
+    ]);
+    await h.flush();
+    // Manual mode holds regardless of how many keys are set. Spec D3.
+    expect(h.engine().table.getRowModel().rows.map((r) => r.original)).toEqual(ROWS);
+    h.dispose();
+  });
+});
+
 describe('GRID_FEATURES', () => {
   it('includes every feature the grid renders against', () => {
     const names = Object.keys(GRID_FEATURES);
