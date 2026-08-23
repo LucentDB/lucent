@@ -115,6 +115,26 @@ describe('manual mode — the D3 correctness guards', () => {
     expect(h.engine().table.getRowModel().rows).toHaveLength(ROWS.length);
     h.dispose();
   });
+
+  it('cycles header clicks asc↔desc forever — never a third cleared state', async () => {
+    // Legacy toggleSort flipped asc↔desc indefinitely; v9's default
+    // enableSortingRemoval:true would land on none after the second toggle.
+    // The engine pins enableSortingRemoval:false, so this pins the two-state
+    // cycle ResultsGrid's header has always had.
+    const h = harness();
+    h.engine().table.setSorting([{ id: '0', desc: false }]);
+    await h.flush();
+
+    h.engine().table.getColumn('0')!.toggleSorting();
+    await h.flush();
+    expect(h.engine().table.atoms.sorting.get()).toEqual([{ id: '0', desc: true }]);
+
+    h.engine().table.getColumn('0')!.toggleSorting();
+    await h.flush();
+    // Back to ascending — NOT removed/undefined.
+    expect(h.engine().table.atoms.sorting.get()).toEqual([{ id: '0', desc: false }]);
+    h.dispose();
+  });
 });
 
 describe('column defs', () => {

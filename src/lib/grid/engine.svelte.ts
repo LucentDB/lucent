@@ -113,6 +113,10 @@ export function createGridEngine(config: GridConfig) {
     // (column_getFirstSortDir samples cell values), so pin it off. The column
     // menu still sets either direction explicitly.
     sortDescFirst: false,
+    // Legacy parity: a header click flipped asc↔desc forever and never
+    // cleared. v9's default enableSortingRemoval:true adds a third none state;
+    // pin it off so the cycle stays two-state (the menu keeps Clear sort).
+    enableSortingRemoval: false,
     // Rows are positional arrays with no natural key. Index over the
     // accumulated buffer is the absolute row number, matching the selection
     // semantics the old checkedRows Set used.
