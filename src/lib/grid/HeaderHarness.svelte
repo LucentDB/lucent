@@ -17,6 +17,10 @@
     onResizeKeydown = () => {},
     onToggleCheckAll = () => {},
     allChecked = false,
+    /** Column ids to pin left before first render — drives group layout. */
+    pinLeft = [],
+    /** Column ids to pin right before first render — drives group layout. */
+    pinRight = [],
   } = $props();
 
   const engine = createGridEngine({
@@ -25,6 +29,8 @@
     get initialSorting() { return []; },
     get initialFilters() { return []; },
   });
+  for (const id of pinLeft) engine.pinColumn(id, 'left');
+  for (const id of pinRight) engine.pinColumn(id, 'right');
 </script>
 
 <table>

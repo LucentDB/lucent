@@ -123,3 +123,40 @@ describe('sort affordances', () => {
     expect(getByLabelText(/Sort by email.*shift.*additional/i)).toBeTruthy();
   });
 });
+
+describe('pinned layout', () => {
+  /** The adapter syncs table atoms on the microtask queue; settle before asserting. */
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it('renders three header groups', async () => {
+    const { container } = renderHeader({ pinRight: ['1'] });
+    await settle();
+    expect(container.querySelector('.hdr-start')).toBeTruthy();
+    expect(container.querySelector('.hdr-center')).toBeTruthy();
+    expect(container.querySelector('.hdr-end')).toBeTruthy();
+  });
+
+  it('puts a left-pinned column in the start group', async () => {
+    const { container } = renderHeader({ pinLeft: ['0'] });
+    await settle();
+    // The row-number gutter is also a start-group member, so match on the
+    // whole group's text rather than the first cell.
+    const start = [...container.querySelectorAll('.hdr-start')]
+      .map((el) => el.textContent)
+      .join('');
+    expect(start).toContain('id');
+    expect(start).not.toContain('email');
+  });
+
+  it('marks the inner edge of the start group for the shadow divider', async () => {
+    const { container } = renderHeader({ pinLeft: ['0'] });
+    await settle();
+    expect(container.querySelector('.pinned-edge')).toBeTruthy();
+  });
+
+  it('renders no pinned-edge marker when nothing is pinned', async () => {
+    const { container } = renderHeader();
+    await settle();
+    expect(container.querySelector('.pinned-edge')).toBeNull();
+  });
+});

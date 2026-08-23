@@ -14,11 +14,15 @@
     allChecked = false,
   } = $props();
 
-  const headers = $derived(table.getHeaderGroups()[0]?.headers ?? []);
+  const startHeaders = $derived(table.getStartHeaderGroups()[0]?.headers ?? []);
+  const centerHeaders = $derived(table.getCenterHeaderGroups()[0]?.headers ?? []);
+  const endHeaders = $derived(table.getEndHeaderGroups()[0]?.headers ?? []);
 
   /** Badges only earn their space once a second key exists. */
   const sortKeyCount = $derived(
-    headers.filter((h) => sortIndexOf(h.column.id) !== -1).length,
+    [...startHeaders, ...centerHeaders, ...endHeaders].filter(
+      (h) => sortIndexOf(h.column.id) !== -1,
+    ).length,
   );
 
   /** Column meta carries the display name and index; the id is positional. */
@@ -39,75 +43,92 @@
 
 <thead>
   <tr>
-    <th class="row-num">
+    <th class="row-num hdr-start">
       <input type="checkbox" onchange={onToggleCheckAll} checked={allChecked} />
     </th>
-    {#each headers as header (header.id)}
-      {@const meta = metaOf(header)}
-      <th
-        class="sortable"
-        class:active={sortDirectionOf(header.column.id) !== false}
-        style="width: {widthOf(meta.index)}px; min-width: 80px;"
-        title={meta.typeName}
-      >
-        <div class="col-header">
-          <button
-            class="col-info"
-            aria-label="Sort by {meta.name}. Shift-click to add an additional sort key."
-            onclick={(e) => onToggleSort(header.column.id, e)}
-          >
-            <span class="col-name-and-order">
-              <span class="col-name">{meta.name}</span>
-              {#if sortDirectionOf(header.column.id)}
-                <span class="sort-arrow" aria-hidden="true"
-                  >{arrowFor(header.column.id)}</span
-                >
-                {#if sortKeyCount > 1}
-                  <span class="sort-badge">{sortIndexOf(header.column.id) + 1}</span>
-                {/if}
-              {/if}
-            </span>
-            <span class="col-type">{meta.typeName}</span>
-          </button>
-          <button
-            class="col-menu-trigger"
-            aria-label="Column actions for {meta.name}"
-            aria-haspopup="menu"
-            aria-expanded={openColumnId === header.column.id}
-            onclick={(e) => onOpenMenu(e, header.column.id)}
-          >
-            <svg
-              width="10"
-              height="10"
-              viewBox="0 0 12 12"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.75"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M3 4.5 6 7.5 9 4.5" />
-            </svg>
-          </button>
-          <!-- A button, not a div with role="separator": a focusable separator
-               is valid ARIA but Svelte's a11y checker treats the role as
-               non-interactive, and a button gives the same keyboard affordance
-               without the lint exception. -->
-          <button
-            class="resize-handle"
-            aria-label="Resize {meta.name} column, currently {widthOf(
-              meta.index,
-            )} pixels"
-            onmousedown={(e) => onResizeStart(e, meta.index)}
-            onkeydown={(e) => onResizeKeydown(e, meta.index)}
-            onclick={(e) => e.stopPropagation()}
-          ></button>
-        </div>
-      </th>
+    {#each startHeaders as header, i (header.id)}
+      {@render headerCell(
+        header,
+        i === startHeaders.length - 1 ? 'hdr-start pinned-edge' : 'hdr-start',
+      )}
+    {/each}
+    {#each centerHeaders as header (header.id)}
+      {@render headerCell(header, 'hdr-center')}
+    {/each}
+    {#each endHeaders as header, i (header.id)}
+      {@render headerCell(header, i === 0 ? 'hdr-end pinned-edge' : 'hdr-end')}
     {/each}
   </tr>
 </thead>
+
+{#snippet headerCell(header, extraClass)}
+  {@const meta = metaOf(header)}
+  <th
+    class="sortable {extraClass}"
+    class:active={sortDirectionOf(header.column.id) !== false}
+    style="width: {widthOf(meta.index)}px; min-width: 80px; {extraClass.includes(
+      'hdr-start',
+    )
+      ? `left: ${header.column.getStart('start')}px;`
+      : ''}"
+    title={meta.typeName}
+  >
+    <div class="col-header">
+      <button
+        class="col-info"
+        aria-label="Sort by {meta.name}. Shift-click to add an additional sort key."
+        onclick={(e) => onToggleSort(header.column.id, e)}
+      >
+        <span class="col-name-and-order">
+          <span class="col-name">{meta.name}</span>
+          {#if sortDirectionOf(header.column.id)}
+            <span class="sort-arrow" aria-hidden="true"
+              >{arrowFor(header.column.id)}</span
+            >
+            {#if sortKeyCount > 1}
+              <span class="sort-badge">{sortIndexOf(header.column.id) + 1}</span>
+            {/if}
+          {/if}
+        </span>
+        <span class="col-type">{meta.typeName}</span>
+      </button>
+      <button
+        class="col-menu-trigger"
+        aria-label="Column actions for {meta.name}"
+        aria-haspopup="menu"
+        aria-expanded={openColumnId === header.column.id}
+        onclick={(e) => onOpenMenu(e, header.column.id)}
+      >
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 12 12"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.75"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M3 4.5 6 7.5 9 4.5" />
+        </svg>
+      </button>
+      <!-- A button, not a div with role="separator": a focusable separator
+           is valid ARIA but Svelte's a11y checker treats the role as
+           non-interactive, and a button gives the same keyboard affordance
+           without the lint exception. -->
+      <button
+        class="resize-handle"
+        aria-label="Resize {meta.name} column, currently {widthOf(
+          meta.index,
+        )} pixels"
+        onmousedown={(e) => onResizeStart(e, meta.index)}
+        onkeydown={(e) => onResizeKeydown(e, meta.index)}
+        onclick={(e) => e.stopPropagation()}
+      ></button>
+    </div>
+  </th>
+{/snippet}
 
 <style>
   /* Sticky header */
@@ -232,6 +253,25 @@
   /* Resize handle — positioned relative to th so it sits exactly on the column border */
   th.sortable {
     position: relative;
+  }
+
+  /* Pinned columns stick inside the scroller. This overrides the relative
+     positioning above for start/end cells (sticky elements are still
+     "positioned", so the resize handle keeps anchoring to them). */
+  th.hdr-start {
+    position: sticky;
+    z-index: 2;
+  }
+
+  th.hdr-end {
+    position: sticky;
+    right: 0;
+    z-index: 2;
+  }
+
+  /* Shadow divider on the inner edge of each pinned region. */
+  th.pinned-edge {
+    box-shadow: 2px 0 6px -2px rgba(0, 0, 0, 0.55);
   }
   .resize-handle {
     position: absolute;

@@ -219,9 +219,26 @@
     { id: 'desc', label: 'Sort descending' },
     { id: 'clear-sort', label: 'Clear sort' },
     { separator: true },
+    { id: 'pin-left', label: 'Pin to left' },
+    { id: 'pin-right', label: 'Pin to right' },
+    { id: 'unpin', label: 'Unpin' },
+    { separator: true },
     { id: 'filter', label: 'Filter by this column' },
     { id: 'copy', label: 'Copy column name' },
   ];
+
+  // Spec §4.4: the pin affordances need horizontal room to be worth it.
+  // Below a 640px container they hide; cell-range selection stays at every
+  // width. The wrapper measures itself, so embedded mounts gate correctly too.
+  let wrapperWidth = $state(0);
+  const pinningAvailable = $derived(wrapperWidth >= 640);
+  const columnMenuItems = $derived(
+    pinningAvailable
+      ? COLUMN_MENU_ITEMS
+      : COLUMN_MENU_ITEMS.filter(
+          (i) => !String(i.id ?? '').startsWith('pin') && i.id !== 'unpin',
+        ),
+  );
 
   /** The header passes a column ID; meta carries the display name/type. */
   function openColumnMenu(e, colId) {
@@ -251,6 +268,9 @@
       engine.table.getColumn(id)?.clearSorting();
       return;
     }
+    if (action === 'pin-left') return engine.pinColumn(id, 'left');
+    if (action === 'pin-right') return engine.pinColumn(id, 'right');
+    if (action === 'unpin') return engine.pinColumn(id, false);
     if (action === 'filter') {
       barOpen = true;
       const next = addFilter(filters, column, typeName);
@@ -570,7 +590,12 @@
       {/if}
     </div>
   {:else if columns.length > 0}
-    <div class="table-wrapper" class:loading bind:this={tableWrapperEl}>
+    <div
+      class="table-wrapper"
+      class:loading
+      bind:this={tableWrapperEl}
+      bind:clientWidth={wrapperWidth}
+    >
       {#if loading}
         <div class="refetch-bar" role="status" aria-label="Refreshing rows">
           <span class="refetch-bar-fill"></span>
@@ -629,7 +654,7 @@
   <GridMenu
     x={columnMenu.x}
     y={columnMenu.y}
-    items={COLUMN_MENU_ITEMS}
+    items={columnMenuItems}
     onSelect={handleColumnMenuSelect}
     onClose={() => (columnMenu = null)}
   />

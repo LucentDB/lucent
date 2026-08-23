@@ -66,6 +66,14 @@ export const GRID_FEATURES = {
 export function createGridEngine(config: GridConfig) {
   let sorting = $state<SortState[]>([...config.initialSorting]);
 
+  // v9.1.2's pinning state is `{ start, end }` (LTR/RTL-agnostic), not the
+  // `{ left, right }` shape sketched when this task was planned — keys renamed
+  // to match the shipped library.
+  let pinning = $state<{ start: string[]; end: string[] }>({
+    start: [],
+    end: [],
+  });
+
   /**
    * All three manual flags are pinned per spec D3 even though
    * rowPaginationFeature is deliberately NOT registered in phase 2 —
@@ -139,6 +147,9 @@ export function createGridEngine(config: GridConfig) {
       get sorting() {
         return sorting;
       },
+      get columnPinning() {
+        return pinning;
+      },
     },
     onSortingChange: (updater: unknown) => {
       sorting =
@@ -146,6 +157,24 @@ export function createGridEngine(config: GridConfig) {
           ? (updater as (prev: SortState[]) => SortState[])(sorting)
           : (updater as SortState[]);
       config.onSortingChange?.(sorting);
+    },
+    onColumnPinningChange: (updater: unknown) => {
+      // Every write re-normalizes the two keys: a partial or foreign-shaped
+      // update must not strip `start`/`end` out from under the
+      // getStart/getEnd* readers.
+      const next =
+        typeof updater === 'function'
+          ? (
+              updater as (p: { start: string[]; end: string[] }) => {
+                start?: string[];
+                end?: string[];
+              }
+ )({ ...pinning })
+          : (updater as { start?: string[]; end?: string[] });
+      pinning = {
+        start: next?.start ?? [],
+        end: next?.end ?? [],
+      };
     },
   });
 
@@ -166,11 +195,26 @@ export function createGridEngine(config: GridConfig) {
     }));
   }
 
+  /**
+   * `false` unpins. Pinning is view state only — it never reaches the wire.
+   * The UI speaks left/right; v9's pin API speaks the LTR/RTL-logical
+   * start/end and treats any other string as unpin, so this seam maps.
+   */
+  function pinColumn(columnId: string, side: 'left' | 'right' | false) {
+    table
+      .getColumn(columnId)
+      ?.pin(side === false ? false : side === 'left' ? 'start' : 'end');
+  }
+
   return {
     table,
     get sorting() {
       return sorting;
     },
+    get pinning() {
+      return pinning;
+    },
+    pinColumn,
     sortIndexOf,
     sortingForWire,
   };

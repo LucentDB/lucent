@@ -80,3 +80,54 @@ describe('GridBody', () => {
     expect(rows[1].className).toContain('even');
   });
 });
+
+describe('pinned layout', () => {
+  /** The adapter syncs table atoms on the microtask queue; settle before asserting. */
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it('renders three cell groups', async () => {
+    // start/center always render; end exists once a column is pinned right.
+    const { container } = renderBody({ pinRight: ['1'] });
+    await settle();
+    expect(container.querySelector('td.cell-start')).toBeTruthy();
+    expect(container.querySelector('td.cell-center')).toBeTruthy();
+    expect(container.querySelector('td.cell-end')).toBeTruthy();
+  });
+
+  it('puts a left-pinned column in the start group', async () => {
+    const { container } = renderBody({ pinLeft: ['0'] });
+    await settle();
+    const firstRow = container.querySelectorAll('tbody tr')[0];
+    const startText = [...firstRow.querySelectorAll('td.cell-start')]
+      .map((td) => td.textContent)
+      .join('');
+    expect(startText).toContain('1');
+    expect(startText).not.toContain('true');
+  });
+
+  it('marks the inner edge of the start group for the shadow divider', async () => {
+    const { container } = renderBody({ pinLeft: ['0'] });
+    await settle();
+    expect(
+      container.querySelectorAll('tbody td.pinned-edge').length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('renders no pinned-edge marker when nothing is pinned', async () => {
+    const { container } = renderBody();
+    await settle();
+    expect(container.querySelector('tbody td.pinned-edge')).toBeNull();
+  });
+
+  it('keeps a pinned cell aligned with its header column', async () => {
+    const { container } = renderBody({ pinLeft: ['0'] });
+    await settle();
+    const firstRowStart = container
+      .querySelectorAll('tbody tr')[0]
+      .querySelectorAll('td.cell-start');
+    // The row-number gutter is also a start-group member, so the id column
+    // is the second one.
+    expect(firstRowStart).toHaveLength(2);
+    expect(firstRowStart[1].textContent?.trim()).toBe('1');
+  });
+});

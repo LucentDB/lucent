@@ -14,6 +14,10 @@
     checkedRows = new Set(),
     onToggleCheck = () => {},
     onCellContextMenu = () => {},
+    /** Column ids to pin left before first render — drives group layout. */
+    pinLeft = [],
+    /** Column ids to pin right before first render — drives group layout. */
+    pinRight = [],
   }: {
     columns?: { name: string; type_name: string }[];
     rows?: unknown[][];
@@ -23,6 +27,8 @@
     checkedRows?: Set<number>;
     onToggleCheck?: (absoluteIndex: number) => void;
     onCellContextMenu?: (e: MouseEvent, columnIndex: number, value: unknown) => void;
+    pinLeft?: string[];
+    pinRight?: string[];
   } = $props();
 
   const engine = createGridEngine({
@@ -31,6 +37,10 @@
     get initialSorting() { return []; },
     get initialFilters() { return []; },
   });
+  // Deliberately read once at init: the harness pins before first render so
+  // group layout is settled when the test's first assertions run.
+  for (const id of pinLeft) engine.pinColumn(id, 'left');
+  for (const id of pinRight) engine.pinColumn(id, 'right');
 </script>
 
 <table>

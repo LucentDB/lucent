@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { flushSync } from 'svelte';
 import { createGridEngine, GRID_FEATURES } from './engine.svelte.ts';
 
@@ -292,5 +292,51 @@ describe('GRID_FEATURES', () => {
 
   it('does not yet include cellSelectionFeature — phase 3 adds it with its UI', () => {
     expect(Object.keys(GRID_FEATURES)).not.toContain('cellSelectionFeature');
+  });
+});
+
+describe('column pinning', () => {
+  it('starts with nothing pinned', () => {
+    const h = harness();
+    expect(h.engine().table.getStartVisibleLeafColumns()).toHaveLength(0);
+    h.dispose();
+  });
+
+  it('moves a pinned column into the start group', async () => {
+    const h = harness();
+    h.engine().pinColumn('0', 'left');
+    await h.flush();
+    expect(h.engine().table.getStartVisibleLeafColumns().map((c) => c.id)).toEqual(['0']);
+    expect(h.engine().table.getCenterVisibleLeafColumns().map((c) => c.id)).toEqual(['1']);
+    h.dispose();
+  });
+
+  it('unpins back into the centre group', async () => {
+    const h = harness();
+    h.engine().pinColumn('0', 'left');
+    await h.flush();
+    h.engine().pinColumn('0', false);
+    await h.flush();
+    expect(h.engine().table.getStartVisibleLeafColumns()).toHaveLength(0);
+    expect(h.engine().table.getCenterVisibleLeafColumns()).toHaveLength(2);
+    h.dispose();
+  });
+
+  it('reports whether a column is pinned, for the menu state', async () => {
+    const h = harness();
+    h.engine().pinColumn('1', 'right');
+    await h.flush();
+    expect(h.engine().table.getColumn('1')?.getIsPinned()).toBe('end') /* library's logical region for right */;
+    h.dispose();
+  });
+
+  it('keeps pinning independent of sorting', async () => {
+    const h = harness();
+    h.engine().pinColumn('0', 'left');
+    h.engine().table.setSorting([{ id: '0', desc: true }]);
+    await h.flush();
+    expect(h.engine().table.getColumn('0')?.getIsPinned()).toBe('start') /* library's logical region for left */;
+    expect(h.engine().sortingForWire()).toEqual([{ column: 'id', direction: 'desc' }]);
+    h.dispose();
   });
 });

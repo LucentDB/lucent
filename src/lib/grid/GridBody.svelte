@@ -17,7 +17,7 @@
   // Paging is manual (spec D3), so the table's row model holds the whole
   // accumulated buffer while the body renders one page slice of it. Column
   // order still comes from the table.
-  const leafColumns = $derived(table.getVisibleLeafColumns());
+  const startCount = $derived(table.getStartVisibleLeafColumns().length);
 
   function widthOf(index) {
     return columnWidths[index] || 150;
@@ -27,34 +27,45 @@
 <tbody>
   {#each pageRows as row, i}
     {@const absolute = pageOffset + i}
+    {@const tableRow = table.getRowModel().rows[absolute]}
     <tr class:even={absolute % 2 === 0}>
-      <td class="row-num">
+      <td class="row-num cell-start">
         <input
           type="checkbox"
           onchange={() => onToggleCheck(absolute)}
           checked={checkedRows.has(absolute)}
         />
       </td>
-      {#each leafColumns as column (column.id)}
-        {@const index = column.columnDef.meta?.index ?? 0}
-        {@const cell = row[index]}
-        <td
-          class={cellClass(cell)}
-          style="width: {widthOf(index)}px; min-width: 80px;"
-          oncontextmenu={(e) => onCellContextMenu(e, index, cell)}
-        >
-          {#if typeof cell === 'boolean'}
-            <span class="bool-badge" class:true={cell} class:false={!cell}
-              >{String(cell)}</span
-            >
-          {:else}
-            <span class="cell-content">{formatCell(cell)}</span>
-          {/if}
-        </td>
+      {#each tableRow?.getStartVisibleCells() ?? [] as cell, ci (cell.id)}
+        {@render bodyCell(cell, row, ci === startCount - 1 ? 'cell-start pinned-edge' : 'cell-start')}
+      {/each}
+      {#each tableRow?.getCenterVisibleCells() ?? [] as cell (cell.id)}
+        {@render bodyCell(cell, row, 'cell-center')}
+      {/each}
+      {#each tableRow?.getEndVisibleCells() ?? [] as cell, ci (cell.id)}
+        {@render bodyCell(cell, row, ci === 0 ? 'cell-end pinned-edge' : 'cell-end')}
       {/each}
     </tr>
   {/each}
 </tbody>
+
+{#snippet bodyCell(cell, row, extraClass)}
+  {@const index = cell.column.columnDef.meta?.index ?? 0}
+  {@const value = row[index]}
+  <td
+    class="{cellClass(value)} {extraClass}"
+    style="width: {widthOf(index)}px; min-width: 80px;"
+    oncontextmenu={(e) => onCellContextMenu(e, index, value)}
+  >
+    {#if typeof value === 'boolean'}
+      <span class="bool-badge" class:true={value} class:false={!value}
+        >{String(value)}</span
+      >
+    {:else}
+      <span class="cell-content">{formatCell(value)}</span>
+    {/if}
+  </td>
+{/snippet}
 
 <style>
   /* Zebra + hover + row borders */
@@ -98,6 +109,27 @@
   }
   td.cell-bool {
     text-align: left;
+  }
+
+  /* Pinned columns stick inside the scroller. They need opaque backgrounds or
+     centre-group cells scroll out beneath them — keep the zebra/hover tiers
+     instead of one flat colour so striping survives pinning. */
+  td.cell-start,
+  td.cell-end {
+    position: sticky;
+    z-index: 2;
+    background: var(--bg-surface);
+  }
+  tr.even td.cell-start,
+  tr.even td.cell-end {
+    background: var(--bg-subtle);
+  }
+  tr:hover td.cell-start,
+  tr:hover td.cell-end {
+    background: var(--bg-hover);
+  }
+  td.pinned-edge {
+    box-shadow: 2px 0 6px -2px rgba(0, 0, 0, 0.55);
   }
 
   /* Boolean badges */
