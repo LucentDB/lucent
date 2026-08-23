@@ -1,17 +1,21 @@
 import { describe, it, expect } from 'vitest';
 import {
   sortSpecFor,
+  wireSortFor,
   filterSpecFor,
   fetchMoreOptions,
   refetchOptions,
 } from './tabQuery.js';
 
-describe('sortSpecFor', () => {
+const WIRE_COLUMNS = [
+  { name: 'id', type_name: 'int4' },
+  { name: 'email', type_name: 'text' },
+];
+
+describe('sortSpecFor with a sorting array', () => {
   it('maps one sort key to a single-element wire array', () => {
-    const tab = { sorting: [{ column: 'created_at', direction: 'desc' }] };
-    expect(sortSpecFor(tab)).toEqual([
-      { column: 'created_at', direction: 'desc' },
-    ]);
+    const tab = { sorting: [{ id: '1', desc: true }] };
+    expect(sortSpecFor(tab)).toEqual([{ id: '1', desc: true }]);
   });
 
   it('maps an empty sorting array to an empty wire array', () => {
@@ -20,6 +24,48 @@ describe('sortSpecFor', () => {
 
   it('treats a missing sorting field as unsorted', () => {
     expect(sortSpecFor({})).toEqual([]);
+  });
+});
+
+describe('wireSortFor', () => {
+  it('maps positional ids back to column names, in order', () => {
+    expect(
+      wireSortFor(
+        [{ id: '1', desc: true }, { id: '0', desc: false }],
+        WIRE_COLUMNS,
+      ),
+    ).toEqual([
+      { column: 'email', direction: 'desc' },
+      { column: 'id', direction: 'asc' },
+    ]);
+  });
+
+  it('maps an empty or missing sorting list to an empty wire array', () => {
+    expect(wireSortFor([], WIRE_COLUMNS)).toEqual([]);
+    expect(wireSortFor(undefined, WIRE_COLUMNS)).toEqual([]);
+  });
+
+  it('falls back to the raw id when no column carries it', () => {
+    expect(wireSortFor([{ id: '7', desc: true }], WIRE_COLUMNS)).toEqual([
+      { column: '7', direction: 'desc' },
+    ]);
+  });
+
+  it('resolves a REAL tab sorting into the single-key SortSpec the IPC takes', () => {
+    // Regression: tabs hold engine SortState ({id, desc}); forwarding entries
+    // verbatim fails Rust serde, which needs {column, direction}. This is the
+    // exact composition App.svelte uses before invoke().
+    const tab = {
+      fetchedCount: 200,
+      sorting: [{ id: '1', desc: true }],
+      columns: WIRE_COLUMNS,
+      filters: [],
+    };
+    const opts = {
+      ...fetchMoreOptions(tab, 200),
+      sort: wireSortFor(tab.sorting, tab.columns)[0] ?? null,
+    };
+    expect(opts.sort).toEqual({ column: 'email', direction: 'desc' });
   });
 });
 
@@ -100,13 +146,14 @@ describe('fetchMoreOptions', () => {
   it("carries the tab's current sort and filters forward unchanged", () => {
     const tab = {
       fetchedCount: 200,
-      sorting: [{ column: 'id', direction: 'desc' }],
+      sorting: [{ id: '1', desc: true }],
       filters: [{ column: 'active', operator: 'eq', value: 'true' }],
     };
     expect(fetchMoreOptions(tab, 200)).toEqual({
       limit: 200,
       offset: 200,
-      sort: [{ column: 'id', direction: 'desc' }],
+      // Raw engine state — App.svelte resolves it through wireSortFor before invoke().
+      sort: [{ id: '1', desc: true }],
       filters: [{ column: 'active', operator: 'eq', value: 'true' }],
     });
   });
@@ -116,13 +163,13 @@ describe('refetchOptions', () => {
   it('always resets offset to 0, regardless of how much was already fetched', () => {
     const tab = {
       fetchedCount: 800,
-      sorting: [{ column: 'name', direction: 'asc' }],
+      sorting: [{ id: '0', desc: false }],
       filters: [],
     };
     expect(refetchOptions(tab, 200)).toEqual({
       limit: 200,
       offset: 0,
-      sort: [{ column: 'name', direction: 'asc' }],
+      sort: [{ id: '0', desc: false }],
       filters: [],
     });
   });
@@ -130,7 +177,7 @@ describe('refetchOptions', () => {
   it('reflects a just-changed sort/filter that has not been applied to fetchedCount yet', () => {
     const tab = {
       fetchedCount: 600,
-      sorting: [{ column: 'new_column', direction: 'asc' }],
+      sorting: [{ id: '2', desc: false }],
       filters: [],
     };
     expect(refetchOptions(tab, 200).offset).toBe(0);

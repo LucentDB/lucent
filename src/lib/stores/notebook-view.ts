@@ -1,5 +1,6 @@
 import * as nb from '../ipc/notebook';
-import type { FilterSpec, SortSpec } from '../ipc/notebook';
+import type { FilterSpec } from '../ipc/notebook';
+import { wireSortFor } from './tabQuery.js';
 import type {
   ColumnMeta,
   NotebookModel,
@@ -42,14 +43,6 @@ export function defaultViewState(
 
 function isTable(o: unknown): o is TableOutput {
   return !!o && typeof o === 'object' && 'columns' in o;
-}
-
-function sortSpec(state: CellViewState): SortSpec | null {
-  // The wire takes one key until phase ③ widens SortSpec to a list.
-  const first = state.sorting[0];
-  if (!first) return null;
-  const name = state.columns[Number(first.id)]?.name ?? first.id;
-  return { column: name, direction: first.desc ? 'desc' : 'asc' };
 }
 
 /**
@@ -101,7 +94,8 @@ export function createCellView(model: NotebookModel) {
         model.cells,
         state.pageSize,
         offset,
-        sortSpec(state),
+        // The wire takes one key until phase ③ widens SortSpec to a list.
+        wireSortFor(state.sorting, state.columns)[0] ?? null,
         state.filters,
       );
       const rows = offset === 0 ? out.rows : [...state.rows, ...out.rows];

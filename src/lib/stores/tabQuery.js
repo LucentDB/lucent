@@ -8,6 +8,23 @@ export function sortSpecFor(tab) {
   return tab.sorting ?? [];
 }
 
+/**
+ * The ONE id→name mapper from engine SortState to the IPC SortSpec shape.
+ * Sorting entries carry positional column ids; Rust's SortSpec needs
+ * {column, direction}. Every IPC boundary resolves through this — do not
+ * inline a second copy.
+ * @typedef {{ column: string, direction: 'asc' | 'desc' }} WireSort
+ * @param {{ id: string, desc: boolean }[] | undefined} sorting
+ * @param {{ name: string }[]} columns
+ * @returns {WireSort[]}
+ */
+export function wireSortFor(sorting, columns) {
+  return (sorting ?? []).map((s) => ({
+    column: columns[Number(s.id)]?.name ?? s.id,
+    direction: s.desc ? 'desc' : 'asc',
+  }));
+}
+
 export function filterSpecFor(tab) {
   return applyable(tab.filters).map((f) => ({
     column: f.column,
