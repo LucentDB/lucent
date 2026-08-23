@@ -5,7 +5,6 @@
   import Sidebar from './lib/components/sidebar/Sidebar.svelte';
   import QueryEditor from './lib/components/editor/QueryEditor.svelte';
   import ResultsGrid from './lib/components/grid/ResultsGrid.svelte';
-  import Dashboard from './lib/components/dashboard/Dashboard.svelte';
   import SourceView from './lib/components/source/SourceView.svelte';
   import LandingPage from './lib/components/connection/LandingPage.svelte';
   import CommandPalette from './lib/components/palette/CommandPalette.svelte';
@@ -633,10 +632,6 @@
       const current = tabs.find((t) => t.id === tabId);
       if (current) current.error = formatError(e);
     }
-  }
-
-  async function handleDashboardQuery(sql) {
-    return executeQuery(sql, { limit: CHUNK_SIZE, offset: 0 });
   }
 
   async function handleViewSubView(schema, name, path, subView, kind = 'view') {
