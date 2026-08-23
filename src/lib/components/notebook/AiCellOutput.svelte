@@ -4,7 +4,8 @@
   import ToolCallCard from '../chat/ToolCallCard.svelte';
   import MarkdownBody from './MarkdownBody.svelte';
   import SqlBlock from './SqlBlock.svelte';
-  import ResultsGrid from '../grid/ResultsGrid.svelte';
+  import { workSummary } from './work-summary.ts';
+  import ResultsGrid from '../../grid/ResultsGrid.svelte';
   import { CELL_PAGE_SIZES } from '../../stores/notebook-view.ts';
   import type { ToolCallCard as ToolCallCardType } from '../../stores/chat.svelte.ts';
   import type {
@@ -144,17 +145,16 @@
     return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
   }
 
-  let statusLine = $derived.by(() => {
-    if (isRunning) return 'Thinking…';
-    const parts: string[] = [];
-    if (toolCalls.length) {
-      parts.push(
-        `${toolCalls.length} tool ${toolCalls.length === 1 ? 'call' : 'calls'}`,
-      );
-    }
-    const d = formatDuration(cell.duration_ms);
-    if (d) parts.push(d);
-    return parts.join(' · ');
+  let durationLabel = $derived(formatDuration(cell.duration_ms));
+
+  // What the model did, named. "1 tool call" counted calls without saying what
+  // any of them were, and sat at the far right of the header where it read as
+  // run metadata rather than as the record of the work.
+  let workLabel = $derived.by(() => {
+    const summary = workSummary(toolCalls, messages);
+    // Mid-run, before anything has finished, the honest label is the state.
+    if (!summary && isRunning) return 'Thinking…';
+    return summary;
   });
 
   // Results are hidden mid-run: a half-streamed table is worse than none.
@@ -162,16 +162,16 @@
 
   // Nothing produced and nothing in progress: render no chrome at all.
   let hasAnything = $derived(
-    isRunning || hasActivity || showTabs || !!statusLine,
+    isRunning || hasActivity || showTabs || !!durationLabel || !!workLabel,
   );
 </script>
 
 {#if hasAnything}
   <div class="ai-output">
-    <!-- One header bar carries both the tab strip and the run status, so the
-         boundary between the prompt above and the answer below is a single
-         rule rather than two stacked meta bars. -->
-    {#if showTabs || statusLine}
+    <!-- The header carries the tab strip and, at the far right, how long the
+         run took. What the model *did* is not metadata, so it gets its own row
+         below rather than a corner of this one. -->
+    {#if showTabs || durationLabel}
       <div class="output-header">
         {#if showTabs}
           <div class="tabs-header" role="tablist">
@@ -189,41 +189,58 @@
               </button>
             {/each}
           </div>
-          <!-- Only when tabs precede it, so a lone status line stays left-aligned. -->
-          <span class="header-spacer"></span>
         {/if}
-        {#if statusLine}
-          <button
-            class="activity-status"
-            class:inert={!hasActivity}
-            onclick={() => hasActivity && (activityOpen = !activityOpen)}
-            disabled={!hasActivity}
-            type="button"
-            aria-expanded={hasActivity ? activityOpen : undefined}
-            title={hasActivity ? 'Show what the model did' : ''}
+        <span class="header-spacer"></span>
+        {#if durationLabel}
+          <span class="run-duration" title="How long this cell took to run"
+            >{durationLabel}</span
           >
-            <span class="activity-label">{statusLine}</span>
-            {#if hasActivity}
-              <svg
-                class="chevron"
-                class:open={activityOpen}
-                width="10"
-                height="10"
-                viewBox="0 0 16 16"
-                fill="none"
-                aria-hidden="true"
-              >
-                <path
-                  d="M6 4l4 4-4 4"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-              </svg>
-            {/if}
-          </button>
         {/if}
+      </div>
+    {/if}
+
+    <!-- The work the model did, on its own full-width row and reading from the
+         left, where the eye already is. Doubles as the disclosure for the
+         step-by-step log below it. -->
+    {#if workLabel}
+      <div class="work-strip">
+        <button
+          class="work-summary"
+          class:inert={!hasActivity}
+          onclick={() => hasActivity && (activityOpen = !activityOpen)}
+          disabled={!hasActivity}
+          type="button"
+          aria-expanded={hasActivity ? activityOpen : undefined}
+          title={hasActivity
+            ? activityOpen
+              ? 'Hide the model’s work'
+              : 'Show the model’s work'
+            : ''}
+        >
+          {#if hasActivity}
+            <svg
+              class="chevron"
+              class:open={activityOpen}
+              width="10"
+              height="10"
+              viewBox="0 0 16 16"
+              fill="none"
+              aria-hidden="true"
+            >
+              <path
+                d="M6 4l4 4-4 4"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          {/if}
+          <span class="work-label">{workLabel}</span>
+          {#if isRunning}
+            <span class="pulse" aria-hidden="true"></span>
+          {/if}
+        </button>
       </div>
     {/if}
 
@@ -232,13 +249,13 @@
         <div class="activity-body">
           {#each activityItems as item}
             {#if item.type === 'thinking'}
+              <!-- Its own duration, never the cell's: falling back to
+                   `cell.duration_ms` made a one-sentence closing thought claim
+                   the whole run's time. Undefined means still streaming, which
+                   is exactly what ThinkingCard renders as "Thinking…". -->
               <ThinkingCard
                 content={item.msg.thinking as string}
-                durationMs={isRunning
-                  ? undefined
-                  : ((item.msg.durationMs as number | undefined) ??
-                    cell.duration_ms ??
-                    1000)}
+                durationMs={item.msg.durationMs as number | undefined}
               />
             {:else}
               <ToolCallCard tool={item.tool} cellCompleted={!isRunning} />
@@ -355,12 +372,10 @@
             pageSize={view.pageSize}
             tabId={cell.id}
             initFilters={view.filters}
-            initSortCol={view.sortCol}
-            initSortDir={view.sortDir}
+            initSorting={view.sorting}
             onStateChange={(s: {
               filters: import('../../ipc/notebook').FilterSpec[];
-              sortCol: string | null;
-              sortDir: 'asc' | 'desc';
+              sorting: { id: string; desc: boolean }[];
             }) => model.cellView.applyState(cell.id, s)}
             onNeedMore={() => model.cellView.fetchMore(cell.id)}
             onCountAll={() => model.cellView.countAll(cell.id)}
@@ -399,35 +414,93 @@
     border-bottom: 1px solid var(--border-light, var(--border));
     background: var(--bg-subtle);
   }
-  .activity-status {
+
+  /* ─── Work summary: its own full-width row, reading from the left ─── */
+  .work-strip {
+    display: flex;
+    padding: 3px 8px;
+    background: var(--bg-subtle);
+    border-bottom: 1px solid var(--border-light, var(--border));
+  }
+  .work-summary {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 2px 4px;
-    border: none;
+    min-width: 0;
+    padding: 2px 6px;
+    border: 1px solid transparent;
     border-radius: var(--radius-sm);
     background: none;
-    color: var(--text-muted);
+    color: var(--text-secondary);
     font-size: var(--text-xs);
     text-align: left;
     cursor: pointer;
-    align-self: center;
-    transition: color 0.15s;
+    transition:
+      color 0.15s,
+      background 0.15s,
+      border-color 0.15s;
   }
-  .activity-status:hover:not(.inert) {
+  /* The row doubles as the disclosure for the step log, which a bare text
+     label never advertised. */
+  .work-summary:hover:not(.inert) {
     color: var(--text);
+    background: var(--bg);
+    border-color: var(--border-light, var(--border));
   }
   /* No log to open: still informative, just not a control. */
-  .activity-status.inert {
+  .work-summary.inert {
     cursor: default;
   }
-  .activity-status:focus-visible {
+  .work-summary:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
   }
-  .activity-label {
+  /* Mid-run the strip (or the open log) is the last row in the card, and a
+     rule with nothing under it reads as a truncated section. */
+  .work-strip:last-child,
+  .activity:last-child {
+    border-bottom: none;
+  }
+  .work-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
+  }
+  /* Run cost, as metadata: right-aligned in the header, away from the work. */
+  .run-duration {
+    align-self: center;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+  }
+  /* Keeps the run legible as *in progress* without a spinner competing with
+     the gutter's own running indicator. */
+  .pulse {
+    flex-shrink: 0;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%,
+    100% {
+      opacity: 0.35;
+      transform: scale(0.85);
+    }
+    50% {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .pulse {
+      animation: none;
+      opacity: 0.8;
+    }
   }
   .chevron {
     flex-shrink: 0;

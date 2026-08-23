@@ -2,7 +2,9 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/svelte';
-import ConnectionForm from './ConnectionForm.svelte';
+// Rendered through the harness because the form reads drivers from the
+// connections query, which needs a QueryClient in Svelte context.
+import ConnectionFormHarness from './ConnectionFormHarness.svelte';
 import type { ConnectionProfile } from '../../stores/connections.svelte';
 import componentSource from './ConnectionForm.svelte?raw';
 
@@ -67,7 +69,7 @@ const profile: ConnectionProfile = {
 
 describe('connection form actions', () => {
   it('keeps action buttons intact when a connection test returns a long error', async () => {
-    render(ConnectionForm, { profile, onCancel: vi.fn() });
+    render(ConnectionFormHarness, { profile, onCancel: vi.fn() });
 
     await screen.getByRole('button', { name: 'Test Connection' }).click();
     await screen.findByText(

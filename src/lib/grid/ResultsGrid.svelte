@@ -1,24 +1,22 @@
-<script context="module">
-  /**
-   * Render one cell for display.
-   *
-   * Numbers are rendered verbatim — NO locale separators. This is a database
-   * client: users select and copy these values, and `4,200,000,000,000` is not
-   * a number anyone can paste back into a query. `String(n)` also renders
-   * floats at their shortest round-trippable form, which is what we want.
-   */
-  export function formatCell(value) {
-    if (value === null || value === undefined) return '';
-    if (typeof value === 'boolean') return String(value);
-    if (typeof value === 'number') return String(value);
-    return String(value);
-  }
-</script>
-
 <script>
   import { untrack, onDestroy } from 'svelte';
   import FilterBar from './FilterBar.svelte';
   import GridMenu from './GridMenu.svelte';
+  import GridHeader from './GridHeader.svelte';
+  import GridBody from './GridBody.svelte';
+  import GridPagination from './GridPagination.svelte';
+  import { createGridEngine } from './engine.svelte.ts';
+  import { createPagedStream } from './pagedStream.svelte.ts';
+  import { formatCell } from './format.js';
+  import {
+    EMPTY,
+    boundsOf,
+    cellAt,
+    extendTo,
+    moveBy,
+    rowAt,
+    selectionToTsv,
+  } from './selection.js';
   import {
     normalize,
     applyable,
@@ -38,8 +36,7 @@
     error = null,
     tabId = null,
     initFilters = [],
-    initSortCol = null,
-    initSortDir = 'asc',
+    initSorting = null,
     onStateChange = null,
     onNeedMore = null,
     onCountAll = null,
@@ -51,43 +48,102 @@
     summary = null,
   } = $props();
 
+  let filters = $state(normalize($state.snapshot(initFilters)));
+  let columnWidths = $state({});
   let checkedRows = $state(new Set());
   let barOpen = $state(false);
   let pickerOpen = $state(false);
-  let columnWidths = $state({});
   let resizing = $state(null);
-  let filters = $state(normalize($state.snapshot(initFilters)));
-  let sortCol = $state($state.snapshot(initSortCol));
-  let sortDir = $state($state.snapshot(initSortDir));
-  let page = $state(0);
+  let resizeGuide = $state(null);
   let tableWrapperEl = $state(null);
-
+  let tableEl = $state(null);
   let columnMenu = $state(null);
   let cellMenu = $state(null);
+
+  // Cell selection. The grid owns the value; selection.js owns the rules.
+  let selection = $state(EMPTY);
+  let dragSelecting = $state(false);
 
   // Clears the document-level drag listeners if the grid unmounts mid-drag.
   // Without this, an unmount leaves mousemove/mouseup attached to `document`
   // and the body cursor stuck at col-resize until the next mouseup.
   let activeDragCleanup = null;
 
-  // Reset state when tab changes — Svelte reuses the same component instance
-  // for the same {#if} branch, so internal $state persists across tab switches.
-  // Preserve columnWidths across tab switches so manual column resizing survives
-  // page navigation, sort changes, and tab switching.
+  // Both factories open $effect scopes, so both are called here at init.
+  // Every reactive input crosses as a getter — a value would silently freeze
+  // the grid on page one. Spec §3.2.
+  //
+  // ORDER MATTERS: `stream` is constructed FIRST. The engine's
+  // onSortingChange callback closes over `stream` via emitChange, and `const`
+  // bindings are in their temporal dead zone until initialised — so creating
+  // the engine first would throw a ReferenceError if it ever emitted during
+  // construction.
+  const stream = createPagedStream({
+    get rows() {
+      return rows;
+    },
+    get fetchedCount() {
+      return fetchedCount;
+    },
+    get isEnd() {
+      return isEnd;
+    },
+    get totalCount() {
+      return totalCount;
+    },
+    get pageSize() {
+      return pageSize;
+    },
+    get tabId() {
+      return tabId;
+    },
+    onNeedMore: () => onNeedMore?.(),
+    onScrollReset: () => {
+      if (tableWrapperEl) tableWrapperEl.scrollTop = 0;
+    },
+  });
+
+  const engine = createGridEngine({
+    get columns() {
+      return columns;
+    },
+    get rows() {
+      return rows;
+    },
+    get initialSorting() {
+      return initSorting ?? [];
+    },
+    get initialFilters() {
+      return filters;
+    },
+    onSortingChange: () => emitChange(),
+  });
+
+  // Reset local UI state on tab switch. Reading initFilters directly would make
+  // it a dependency, so every parent re-emit would collapse the filter row
+  // mid-type. Paging resets inside the stream via its own tabId effect; only
+  // the purely local UI state is handled here.
+  //
+  // Sorting is ALSO restored to the incoming tab's saved sort: Svelte reuses
+  // this component instance across tabs, so without this the previous tab's
+  // header indicators and emitted sort would leak into the new one. The
+  // restore must not look like a user-initiated change — no refetch, no
+  // onStateChange — which is what restoringTabState suppresses.
+  let restoringTabState = false;
+
   $effect(() => {
-    // Only re-run on tab switch. Reading initFilters/initSortCol/initSortDir
-    // directly would make them dependencies, so every parent re-emit (e.g. a
-    // filter refetch) would re-run this and collapse the filter row mid-type.
     void tabId;
     untrack(() => {
       filters = normalize(initFilters);
-      sortCol = initSortCol;
-      sortDir = initSortDir;
       checkedRows = new Set();
       barOpen = false;
       pickerOpen = false;
-      page = 0;
-      isFetchingMore = false;
+      restoringTabState = true;
+      try {
+        engine.table.setSorting(initSorting ?? []);
+      } finally {
+        restoringTabState = false;
+      }
       if (tableWrapperEl) {
         tableWrapperEl.scrollTop = 0;
         tableWrapperEl.scrollLeft = 0;
@@ -95,36 +151,45 @@
     });
   });
 
-  // Reset to page 0 when a fresh fetch arrives (fetchedCount resets to ≤ 200
-  // after sort/filter change or re-execute in the same tab).
-  $effect(() => {
-    void fetchedCount;
-    if (fetchedCount > 0 && fetchedCount <= pageSize) {
-      page = 0;
-      if (tableWrapperEl) {
-        tableWrapperEl.scrollTop = 0;
-      }
+  function emitChange() {
+    if (restoringTabState) return; // a tab switch restores state, it does not change it
+    stream.reset();
+    checkedRows = new Set();
+    onStateChange?.({ filters, sorting: engine.sorting });
+  }
+
+  function toggleSort(columnId) {
+    engine.table.getColumn(columnId)?.toggleSorting();
+  }
+
+  function sortIndicatorFor(columnId) {
+    const dir = engine.table.getColumn(columnId)?.getIsSorted();
+    if (!dir) return '';
+    return dir === 'asc' ? ' ▴' : ' ▾';
+  }
+
+  function toggleCheckAll() {
+    const visible = stream.pageRows.length;
+    const offset = stream.page * pageSize;
+    if (checkedRows.size === visible) {
+      checkedRows = new Set();
+    } else {
+      checkedRows = new Set(
+        Array.from({ length: visible }, (_, i) => offset + i),
+      );
     }
-  });
+  }
 
-  // Clamp page so it never points past the fetched data (handles race conditions
-  // where goNext advances before fetchedCount catches up, or tab state resets).
-  let maxPage = $derived(Math.max(0, Math.ceil(fetchedCount / pageSize) - 1));
-  $effect(() => {
-    void maxPage;
-    if (page > maxPage) {
-      page = maxPage;
-    }
-  });
+  function toggleCheck(absolute) {
+    const next = new Set(checkedRows);
+    if (next.has(absolute)) next.delete(absolute);
+    else next.add(absolute);
+    checkedRows = next;
+  }
 
-  // Current page's rows
-  let pageRows = $derived(rows.slice(page * pageSize, (page + 1) * pageSize));
-
-  // "Next" is enabled unless we've reached the end AND the next page isn't cached.
-  let canGoNext = $derived(!isEnd || (page + 1) * pageSize < fetchedCount);
-
-  /** The whole result is in hand and fits one page — nothing left to page. */
-  let fitsOnePage = $derived(isEnd && fetchedCount <= pageSize);
+  // Filter bar
+  let barVisible = $derived(barOpen || filters.length > 0);
+  let hasActiveFilters = $derived(applyable(filters).length > 0);
 
   /**
    * Counting is only worth offering when rows might exist beyond what we hold.
@@ -134,46 +199,6 @@
   let canCountAll = $derived(
     !!onCountAll && totalCount === null && !isEnd && fetchedCount > 0,
   );
-
-  // Local guard to prevent racing ahead of in-flight fetches when clicking Next rapidly
-  let isFetchingMore = $state(false);
-
-  async function goNext() {
-    if (isFetchingMore) return;
-    const nextPage = page + 1;
-    const nextOffset = nextPage * pageSize;
-    if (nextOffset >= fetchedCount) {
-      // Need to fetch — onNeedMore fetches the next chunk from offset=fetchedCount
-      isFetchingMore = true;
-      try {
-        await onNeedMore?.();
-      } finally {
-        isFetchingMore = false;
-      }
-    }
-    // Only advance if the next page actually has data now (either it was cached,
-    // or the fetch filled it). Importantly: isEnd means "no more rows" — it should
-    // NEVER let us advance past the last valid page.
-    if (fetchedCount > nextPage * pageSize) {
-      page = nextPage;
-    }
-  }
-
-  function goPrev() {
-    page = Math.max(0, page - 1);
-  }
-
-  function emitChange() {
-    // Reset to the first page directly rather than inferring it from a
-    // fetchedCount that no longer drops to 0 on refetch.
-    page = 0;
-    checkedRows = new Set();
-    onStateChange?.({ filters, sortCol, sortDir });
-  }
-
-  // Filter bar
-  let barVisible = $derived(barOpen || filters.length > 0);
-  let hasActiveFilters = $derived(applyable(filters).length > 0);
 
   function toggleBar() {
     // Never hide the bar while a filter exists — Clear all is the way out.
@@ -206,32 +231,35 @@
     { id: 'copy', label: 'Copy column name' },
   ];
 
-  function openColumnMenu(e, col) {
+  /** The header passes a column ID; meta carries the display name/type. */
+  function openColumnMenu(e, colId) {
     e.stopPropagation();
+    const column = engine.table.getColumn(colId);
+    if (!column) return;
+    const meta = column.columnDef.meta ?? {};
     const r = e.currentTarget.getBoundingClientRect();
     columnMenu = {
-      column: col.name,
-      typeName: col.type_name,
+      id: colId,
+      column: meta.name,
+      typeName: meta.typeName,
       x: r.left,
       y: r.bottom + 4,
     };
   }
 
-  function handleColumnMenuSelect(id) {
-    const { column, typeName } = columnMenu;
-    if (id === 'asc' || id === 'desc') {
-      sortCol = column;
-      sortDir = id;
-      emitChange();
+  function handleColumnMenuSelect(action) {
+    const { column, typeName, id } = columnMenu;
+    if (action === 'asc' || action === 'desc') {
+      // An explicit desc argument makes toggleSorting a deterministic SET —
+      // re-picking the current direction keeps it sorted that way.
+      engine.table.getColumn(id)?.toggleSorting(action === 'desc');
       return;
     }
-    if (id === 'clear-sort') {
-      sortCol = null;
-      sortDir = 'asc';
-      emitChange();
+    if (action === 'clear-sort') {
+      engine.table.getColumn(id)?.clearSorting();
       return;
     }
-    if (id === 'filter') {
+    if (action === 'filter') {
       barOpen = true;
       const next = addFilter(filters, column, typeName);
       const added = next[next.length - 1];
@@ -239,7 +267,7 @@
       if (isComplete(added)) emitChange();
       return;
     }
-    if (id === 'copy') {
+    if (action === 'copy') {
       navigator.clipboard?.writeText(column).catch(() => {});
     }
   }
@@ -297,27 +325,126 @@
     }
   }
 
-  function toggleSort(colIndex) {
-    const column = columns[colIndex]?.name;
-    if (!column) return;
-    if (sortCol === column) {
-      sortDir = sortDir === 'asc' ? 'desc' : 'asc';
-    } else {
-      sortCol = column;
-      sortDir = 'asc';
-    }
-    checkedRows = new Set();
-    emitChange();
+  // --- Cell selection ---------------------------------------------------
+  // Visible column position -> index into the raw row tuple. Columns can be
+  // hidden and reordered, so a copy must follow what is on screen rather than
+  // the query's column order.
+  let visibleColIndexes = $derived(
+    engine.table
+      .getVisibleLeafColumns()
+      .map((c) => c.columnDef.meta?.index ?? 0),
+  );
+  let selBounds = $derived(boundsOf(selection));
+  let gridShape = $derived({
+    rows: stream.pageRows.length,
+    cols: visibleColIndexes.length,
+  });
+
+  function onCellMouseDown(e, row, col) {
+    // Right-click opens the cell menu and must not move the selection out
+    // from under it.
+    if (e.button !== 0) return;
+    selection = e.shiftKey ? extendTo(selection, row, col) : cellAt(row, col);
+    dragSelecting = true;
+    // The table owns the keyboard, so a click has to hand it focus or the
+    // arrow keys would go nowhere.
+    tableEl?.focus({ preventScroll: true });
+    beginDragSelect();
   }
 
-  function sortIndicator(colIndex) {
-    if (sortCol !== columns[colIndex]?.name) return '';
-    return sortDir === 'asc' ? ' ▴' : ' ▾';
+  function onCellMouseEnter(row, col) {
+    if (!dragSelecting) return;
+    selection = extendTo(selection, row, col);
   }
+
+  /**
+   * The pointer can leave the table mid-drag, so the release is caught on the
+   * document. Registered per drag and torn down on release, which also keeps
+   * `activeDragCleanup` honest if the grid unmounts while the button is down.
+   */
+  function beginDragSelect() {
+    if (activeDragCleanup !== null) return;
+    function stop() {
+      dragSelecting = false;
+      document.removeEventListener('mouseup', stop);
+      activeDragCleanup = null;
+    }
+    document.addEventListener('mouseup', stop);
+    activeDragCleanup = stop;
+  }
+
+  function copySelection() {
+    const text = selectionToTsv(stream.pageRows, visibleColIndexes, selBounds);
+    if (text === '') return;
+    navigator.clipboard?.writeText(text).catch(() => {});
+  }
+
+  /**
+   * Keyboard navigation for the cell cursor.
+   *
+   * Deliberately bound to the table wrapper rather than to the window: five
+   * ResultsGrid instances can be mounted at once, and a window listener would
+   * have every one of them react to the same arrow key. Handled keys also stop
+   * propagating, because Notebook's command-mode keymap only ignores events
+   * from INPUT/TEXTAREA/SELECT — a focused div is not on that list, so an
+   * arrow press here would otherwise also move the notebook's cell selection.
+   */
+  function handleGridKeydown(e) {
+    const { rows, cols } = gridShape;
+    if (rows === 0 || cols === 0) return;
+    const mod = e.metaKey || e.ctrlKey;
+    const extend = e.shiftKey;
+    let next = null;
+
+    if (mod && e.key === 'c') {
+      copySelection();
+    } else if (mod && e.key === 'a') {
+      selection = {
+        anchor: { row: 0, col: 0 },
+        cursor: { row: rows - 1, col: cols - 1 },
+      };
+    } else if (e.key === 'ArrowDown') {
+      next = moveBy(selection, 1, 0, { rows, cols, extend });
+    } else if (e.key === 'ArrowUp') {
+      next = moveBy(selection, -1, 0, { rows, cols, extend });
+    } else if (e.key === 'ArrowRight') {
+      next = moveBy(selection, 0, 1, { rows, cols, extend });
+    } else if (e.key === 'ArrowLeft') {
+      next = moveBy(selection, 0, -1, { rows, cols, extend });
+    } else if (e.key === 'Tab') {
+      next = moveBy(selection, 0, e.shiftKey ? -1 : 1, { rows, cols });
+    } else if (e.key === 'Home') {
+      next = moveBy(selection, 0, -cols, { rows, cols, extend });
+    } else if (e.key === 'End') {
+      next = moveBy(selection, 0, cols, { rows, cols, extend });
+    } else if (e.key === 'PageDown') {
+      next = moveBy(selection, rows, 0, { rows, cols, extend });
+    } else if (e.key === 'PageUp') {
+      next = moveBy(selection, -rows, 0, { rows, cols, extend });
+    } else if (e.key === 'Escape') {
+      selection = EMPTY;
+    } else {
+      return;
+    }
+
+    if (next !== null) selection = next;
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
+  /**
+   * A selection is a set of coordinates into the visible page, so it stops
+   * meaning anything once the page, the tab or the column set changes. Reading
+   * only the identifiers keeps this from firing on every streamed batch.
+   */
+  $effect(() => {
+    void tabId;
+    void stream.page;
+    void visibleColIndexes.length;
+    selection = EMPTY;
+  });
 
   // --- Column resize ---
-  let resizeGuide = $state(null);
-
   const MIN_COL_WIDTH = 80;
   const MAX_COL_WIDTH = 800;
 
@@ -409,34 +536,6 @@
   onDestroy(() => {
     activeDragCleanup?.();
   });
-
-  // --- Checkbox ---
-  function toggleCheckAll() {
-    const visibleCount = pageRows.length;
-    if (checkedRows.size === visibleCount) {
-      checkedRows = new Set();
-    } else {
-      checkedRows = new Set(
-        Array.from({ length: visibleCount }, (_, i) => page * pageSize + i),
-      );
-    }
-  }
-
-  function toggleCheck(i) {
-    const absoluteIndex = page * pageSize + i;
-    const next = new Set(checkedRows);
-    if (next.has(absoluteIndex)) next.delete(absoluteIndex);
-    else next.add(absoluteIndex);
-    checkedRows = next;
-  }
-
-  // --- Cell formatting ---
-  function cellClass(value) {
-    if (value === null || value === undefined) return 'cell-null';
-    if (typeof value === 'boolean') return 'cell-bool';
-    if (typeof value === 'number') return 'cell-number';
-    return '';
-  }
 </script>
 
 <svelte:window onkeydown={handleWindowKeydown} />
@@ -607,134 +706,57 @@
       {#if resizeGuide !== null}
         <div class="resize-guide" style="left: {resizeGuide}px"></div>
       {/if}
-      <table>
-        <thead>
-          <tr>
-            <th class="row-num">
-              <input
-                type="checkbox"
-                onchange={toggleCheckAll}
-                checked={checkedRows.size === pageRows.length &&
-                  pageRows.length > 0}
-              />
-            </th>
-            {#each columns as col, i}
-              <th
-                class="sortable"
-                class:active={sortCol === col.name}
-                style="width: {getColWidth(i)}px; min-width: 80px;"
-                title={col.type_name}
-              >
-                <div class="col-header">
-                  <button
-                    class="col-info"
-                    aria-label="Sort by {col.name}"
-                    onclick={() => toggleSort(i)}
-                  >
-                    <span class="col-name">{col.name}{sortIndicator(i)}</span>
-                    <span class="col-type">{col.type_name}</span>
-                  </button>
-                  <button
-                    class="col-menu-trigger"
-                    aria-label="Column actions for {col.name}"
-                    aria-haspopup="menu"
-                    aria-expanded={columnMenu?.column === col.name}
-                    onclick={(e) => openColumnMenu(e, col)}
-                  >
-                    <svg
-                      width="10"
-                      height="10"
-                      viewBox="0 0 12 12"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="1.75"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      aria-hidden="true"
-                    >
-                      <path d="M3 4.5 6 7.5 9 4.5" />
-                    </svg>
-                  </button>
-                  <!-- A button, not a div with role="separator": a focusable
-                       separator is valid ARIA but Svelte's a11y checker treats
-                       the role as non-interactive, and a button gives the same
-                       keyboard affordance without the lint exception. -->
-                  <button
-                    class="resize-handle"
-                    aria-label="Resize {col.name} column, currently {getColWidth(
-                      i,
-                    )} pixels"
-                    onmousedown={(e) => startResize(e, i)}
-                    onkeydown={(e) => handleResizeKeydown(e, i)}
-                    onclick={(e) => e.stopPropagation()}
-                  ></button>
-                </div>
-              </th>
-            {/each}
-          </tr>
-        </thead>
-        <tbody>
-          {#each pageRows as row, i}
-            <tr class:even={(page * pageSize + i) % 2 === 0}>
-              <td class="row-num">
-                <input
-                  type="checkbox"
-                  onchange={() => toggleCheck(i)}
-                  checked={checkedRows.has(page * pageSize + i)}
-                />
-              </td>
-              {#each row as cell, j}
-                <td
-                  class={cellClass(cell)}
-                  style="width: {getColWidth(j)}px; min-width: 80px;"
-                  oncontextmenu={(e) => openCellMenu(e, j, cell)}
-                >
-                  {#if typeof cell === 'boolean'}
-                    <span
-                      class="bool-badge"
-                      class:true={cell}
-                      class:false={!cell}>{String(cell)}</span
-                    >
-                  {:else}
-                    <span class="cell-content">{formatCell(cell)}</span>
-                  {/if}
-                </td>
-              {/each}
-            </tr>
-          {/each}
-        </tbody>
+      <table
+        bind:this={tableEl}
+        role="grid"
+        tabindex="0"
+        aria-label="Query results"
+        aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Meta+C"
+        onkeydown={handleGridKeydown}
+      >
+        <GridHeader
+          table={engine.table}
+          {columnWidths}
+          {sortIndicatorFor}
+          onToggleSort={toggleSort}
+          onOpenMenu={openColumnMenu}
+          onResizeStart={startResize}
+          onResizeKeydown={handleResizeKeydown}
+          onToggleCheckAll={toggleCheckAll}
+          openColumnId={columnMenu?.id ?? null}
+          allChecked={checkedRows.size === stream.pageRows.length &&
+            stream.pageRows.length > 0}
+        />
+        <GridBody
+          table={engine.table}
+          pageRows={stream.pageRows}
+          pageOffset={stream.page * pageSize}
+          {columnWidths}
+          {checkedRows}
+          onToggleCheck={toggleCheck}
+          onCellContextMenu={openCellMenu}
+          {selBounds}
+          {onCellMouseDown}
+          {onCellMouseEnter}
+        />
       </table>
     </div>
 
     <!-- Page-based pagination: hidden when all rows fit on one page -->
-    {#if !fitsOnePage}
-      <div class="pagination">
-        <span class="page-info">
-          Rows {Math.min(
-            page * pageSize + 1,
-            fetchedCount,
-          ).toLocaleString()}–{Math.min(
-            (page + 1) * pageSize,
-            fetchedCount,
-          ).toLocaleString()}
-          {#if totalCount !== null}
-            of {totalCount.toLocaleString()}
-          {:else if isEnd}
-            of {fetchedCount.toLocaleString()}
-          {:else}
-            of {fetchedCount.toLocaleString()}+
-          {/if}
-        </span>
-        <div class="page-controls">
-          <button class="page-btn" onclick={goPrev} disabled={page === 0}
-            >&lsaquo; Prev</button
-          >
-          <span class="page-number">Page {page + 1}</span>
-          <button class="page-btn" onclick={goNext} disabled={!canGoNext}
-            >Next &rsaquo;</button
-          >
-        </div>
-      </div>
+    {#if !stream.fitsOnePage}
+      <GridPagination
+        page={stream.page}
+        firstRowNumber={stream.firstRowNumber}
+        lastRowNumber={stream.lastRowNumber}
+        {fetchedCount}
+        {totalCount}
+        {isEnd}
+        canGoNext={stream.canGoNext}
+        isFetchingMore={stream.isFetchingMore}
+        onNext={stream.goNext}
+        onPrev={stream.goPrev}
+        {embedded}
+      />
     {/if}
   {/if}
 </div>
@@ -774,14 +796,12 @@
     border-radius: 0;
     background: transparent;
   }
-  .results-grid.embedded th,
-  .results-grid.embedded td {
+  /* Header/body cells live in child components now — Svelte scoping needs
+     :global for these descendant selectors to reach them. */
+  .results-grid.embedded :global(th),
+  .results-grid.embedded :global(td) {
     padding-top: 2px;
     padding-bottom: 2px;
-  }
-  .results-grid.embedded .pagination {
-    padding: 4px 8px;
-    border-top: 1px solid var(--border);
   }
 
   /* Toolbar */
@@ -789,8 +809,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: var(--space-2) var(--space-4);
-    height: 40px;
+    padding: 0 var(--space-3);
+    height: 32px;
     border-bottom: 1px solid var(--border);
     background: var(--bg-surface);
   }
@@ -870,8 +890,8 @@
   .error-panel-message {
     max-width: 600px;
     padding: var(--space-3);
-    background: rgba(0, 0, 0, 0.04);
-    border-radius: var(--radius-md);
+    background: var(--bg-subtle);
+    border-radius: var(--radius-sm);
     font-family: var(--font-mono);
     font-size: var(--text-sm);
     line-height: 1.6;
@@ -887,23 +907,28 @@
   .tool-btn {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 4px 12px;
+    gap: 5px;
+    padding: 3px 9px;
     border: 1px solid var(--border);
-    border-radius: 20px;
-    background: var(--bg-surface);
+    border-radius: var(--radius-sm);
+    background: var(--bg-elevated);
     color: var(--text-secondary);
     font-size: var(--text-sm);
     font-weight: var(--weight-medium);
     cursor: pointer;
-    transition: all var(--transition-fast);
+    box-shadow: var(--shadow-sm);
+    transition:
+      background var(--transition-fast),
+      border-color var(--transition-fast),
+      color var(--transition-fast);
   }
   /* Compact (icon-only) mode collapses pill to a square ghost button */
   .tool-btn.icon-only {
-    padding: 5px;
-    border-radius: var(--radius-md);
+    padding: 4px;
+    border-radius: var(--radius-sm);
     border-color: transparent;
     background: transparent;
+    box-shadow: none;
   }
   .tool-btn.icon-only:hover {
     border-color: transparent;
@@ -918,10 +943,10 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 28px;
-    height: 28px;
+    width: 24px;
+    height: 24px;
     border: none;
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--text-secondary);
     cursor: pointer;
@@ -934,9 +959,7 @@
   }
   .tool-btn:hover {
     background: var(--bg-hover);
-    border-color: var(--text-muted);
     color: var(--text);
-    transform: scale(1.02);
   }
   .tool-btn.active {
     background: var(--accent-soft);
@@ -954,143 +977,30 @@
     border-top: 1px solid var(--grid-line);
     position: relative;
   }
+  /* Tabbed into rather than clicked: the grid needs to say where the keyboard
+     went before any cell is selected. A click selects a cell, and the cell's
+     own fill is the indicator from then on. */
+  table:focus {
+    outline: none;
+  }
+  table:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
   table {
     width: 100%;
     table-layout: fixed;
     border-collapse: collapse;
     font-size: var(--text-base);
   }
-
-  /* Sticky header */
-  thead {
-    position: sticky;
-    top: 0;
-    z-index: 2;
-  }
-  thead tr:first-child th {
-    background: var(--bg-elevated);
-    border-bottom: 2px solid var(--grid-header-border);
-    box-shadow: 0 1px 0 var(--grid-line);
-  }
-  th {
-    text-align: left;
-    padding: 4px 8px;
-    height: 38px;
-    background: var(--bg-elevated);
-    border-bottom: 2px solid var(--grid-header-border);
-    border-right: 1px solid var(--grid-line);
-    font-weight: var(--weight-semibold);
-    font-size: var(--text-xs);
-    color: var(--text);
-    white-space: nowrap;
-    user-select: none;
-    box-sizing: border-box;
-  }
-  th:last-child {
-    border-right: none;
-  }
-  th.sortable {
-    cursor: pointer;
-  }
-  .col-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 4px;
-    width: 100%;
-    height: 100%;
-  }
-  .col-info {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    justify-content: center;
-    gap: 1px;
-    background: none;
-    border: none;
-    padding: 0;
-    font: inherit;
-    color: inherit;
-    cursor: pointer;
-    overflow: hidden;
-    min-width: 0;
-    flex: 1;
-    text-align: left;
-  }
-  .col-name {
-    font-weight: var(--weight-semibold);
-    font-size: 12px;
-    letter-spacing: 0.01em;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    width: 100%;
-  }
-  .col-type {
-    font-size: 10px;
-    font-family: var(--font-mono);
-    font-weight: var(--weight-normal);
-    color: var(--text-muted);
-    text-transform: lowercase;
-    opacity: 0.75;
-    letter-spacing: 0;
-    line-height: 1.2;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    width: 100%;
-  }
-  th.row-num {
-    width: 44px;
-    text-align: center;
-    padding: var(--space-2) 4px;
-    border-right: 1px solid var(--grid-line);
-  }
-  th.row-num input {
-    cursor: pointer;
+  /* Refetching keeps the previous rows readable but clearly stale, rather than
+     blanking the grid — blanking used to unmount the filter UI entirely.
+     tbody renders inside GridBody — Svelte scoping needs :global. */
+  .table-wrapper.loading :global(tbody) {
+    opacity: 0.5;
+    transition: opacity var(--transition-normal);
   }
 
-  /* Resize handle — positioned relative to th so it sits exactly on the column border */
-  th.sortable {
-    position: relative;
-  }
-  .resize-handle {
-    position: absolute;
-    right: -8px;
-    top: 0;
-    bottom: 0;
-    width: 16px;
-    padding: 0;
-    border: none;
-    background: transparent;
-    cursor: col-resize;
-    z-index: 3;
-  }
-  /* The 2px indicator is drawn by ::after, so the default ring would sit 16px
-     wide over the neighbouring column. Show the indicator instead. */
-  .resize-handle:focus-visible {
-    outline: none;
-  }
-  .resize-handle:focus-visible::after {
-    background: var(--accent);
-    box-shadow: 0 0 0 1px var(--accent);
-  }
-  .resize-handle::after {
-    content: '';
-    position: absolute;
-    /* Center the 2px indicator within the 16px handle — aligns on the th right border */
-    left: 50%;
-    transform: translateX(-50%);
-    top: 4px;
-    bottom: 4px;
-    width: 2px;
-    background: transparent;
-    border-radius: 1px;
-  }
-
-  .resize-handle:hover::after {
-    background: var(--accent);
-  }
   .resize-guide {
     position: absolute;
     top: 0;
@@ -1110,83 +1020,6 @@
     background: transparent;
     box-shadow: 0 0 4px 2px var(--accent);
     opacity: 0.5;
-  }
-
-  /* Zebra + hover + row borders */
-  tr.even td {
-    background: var(--bg-subtle);
-  }
-  tr:hover td {
-    background: var(--bg-hover);
-  }
-  tr:hover td:first-child {
-    box-shadow: inset 3px 0 0 var(--accent);
-  }
-  td {
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--grid-line);
-    border-right: 1px solid var(--grid-line);
-    white-space: nowrap;
-  }
-  td:last-child {
-    border-right: none;
-  }
-  td.row-num {
-    text-align: center;
-    padding: var(--space-2) 4px;
-    width: 44px;
-    border-right: 1px solid var(--grid-line);
-  }
-  td.row-num input {
-    cursor: pointer;
-  }
-  td.cell-null {
-    color: var(--text-muted);
-    font-style: italic;
-    text-decoration: underline;
-    text-decoration-style: dotted;
-    text-underline-offset: 3px;
-  }
-  td.cell-number {
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-  }
-  td.cell-bool {
-    text-align: left;
-  }
-
-  /* Boolean badges */
-  .bool-badge {
-    display: inline-block;
-    padding: 2px 10px;
-    border-radius: var(--radius-full);
-    font-size: var(--text-sm);
-    font-weight: var(--weight-medium);
-  }
-  .bool-badge.true {
-    background: var(--success-bg);
-    color: var(--success);
-  }
-  .bool-badge.false {
-    background: var(--danger-bg);
-    color: var(--danger);
-  }
-
-  /* Cell content ellipsis */
-  .cell-content {
-    display: block;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  /* Checkbox styling */
-  td input[type='checkbox'],
-  th input[type='checkbox'] {
-    width: 14px;
-    height: 14px;
-    accent-color: var(--accent);
-    cursor: pointer;
   }
 
   /* Empty state */
@@ -1213,48 +1046,6 @@
     color: var(--text-muted);
   }
 
-  /* Pagination */
-  .pagination {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: var(--space-2) var(--space-4);
-    border-top: 1px solid var(--border);
-    background: var(--bg-surface);
-  }
-  .page-info {
-    font-size: var(--text-sm);
-    color: var(--text-secondary);
-  }
-  .page-controls {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .page-btn {
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 4px 12px;
-    border-radius: var(--radius-sm);
-    font-size: var(--text-sm);
-    cursor: pointer;
-    transition: all var(--transition-fast);
-  }
-  .page-btn:hover:not(:disabled) {
-    background: var(--bg-hover);
-  }
-  .page-btn:disabled {
-    opacity: 0.4;
-    cursor: default;
-  }
-  .page-number {
-    font-size: var(--text-sm);
-    color: var(--text-secondary);
-    padding: 0 var(--space-2);
-    font-weight: var(--weight-medium);
-  }
-
   /* Count all rows */
   .total-count {
     color: var(--text-muted);
@@ -1264,12 +1055,6 @@
   .count-btn {
     margin-left: var(--space-2);
     font-size: var(--text-sm);
-  }
-  /* Refetching keeps the previous rows readable but clearly stale, rather than
-     blanking the grid — blanking used to unmount the filter UI entirely. */
-  .table-wrapper.loading tbody {
-    opacity: 0.5;
-    transition: opacity var(--transition-normal);
   }
   /* An indeterminate bar driven by transform, not background-position: a
      gradient sized to its element cannot be swept by shifting its position,
@@ -1315,35 +1100,5 @@
         opacity: 1;
       }
     }
-  }
-
-  .col-menu-trigger {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    width: 18px;
-    height: 18px;
-    border: none;
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--text-muted);
-    cursor: pointer;
-    opacity: 0;
-    transition:
-      opacity var(--transition-fast),
-      background var(--transition-fast),
-      color var(--transition-fast);
-  }
-  .col-menu-trigger:hover {
-    background: var(--bg-surface);
-    color: var(--text);
-  }
-  /* Revealed on hover, but never hidden from keyboard users or while its menu
-     is open — an invisible trigger that still takes focus is a trap. */
-  th:hover .col-menu-trigger,
-  .col-menu-trigger:focus-visible,
-  .col-menu-trigger[aria-expanded='true'] {
-    opacity: 1;
   }
 </style>

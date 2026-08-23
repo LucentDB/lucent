@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   chat,
   createConversation,
+  createNewTab,
   addMessage,
   formatUsageLine,
   pauseForPermission,
@@ -32,8 +33,15 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 const listenMock = vi.fn();
+const listenerCbs: Record<string, (e: { payload: unknown }) => void> = {};
 vi.mock('@tauri-apps/api/event', () => ({
-  listen: (...args: unknown[]) => listenMock(...args),
+  listen: vi.fn(
+    async (event: string, cb: (e: { payload: unknown }) => void) => {
+      listenerCbs[event] = cb;
+      listenMock(event, cb);
+      return () => {};
+    },
+  ),
 }));
 
 function seedActiveConversationWithMessage(messageId: string) {
@@ -46,6 +54,13 @@ function seedActiveConversationWithMessage(messageId: string) {
     content: '',
     createdAt: Date.now(),
   });
+  return conv;
+}
+
+function seedConversation(convId: string) {
+  chat.conversations = [];
+  const conv = createNewTab('conn-1');
+  conv.id = convId;
   return conv;
 }
 
@@ -132,6 +147,7 @@ describe('handleAiEvent', () => {
       type: 'done',
       conversation_id: conv.id,
       final_message: 'Here is the answer',
+      cancelled: false,
       usage: {
         prompt_tokens: 10,
         completion_tokens: 5,
@@ -161,6 +177,7 @@ describe('handleAiEvent', () => {
       type: 'done',
       conversation_id: conv.id,
       final_message: 'ok',
+      cancelled: false,
       usage: {
         prompt_tokens: 120,
         completion_tokens: 45,
@@ -187,6 +204,7 @@ describe('handleAiEvent', () => {
       type: 'done',
       conversation_id: conv.id,
       final_message: 'ok',
+      cancelled: false,
       usage: {
         prompt_tokens: 10,
         completion_tokens: 5,
@@ -219,14 +237,76 @@ describe('handleAiEvent', () => {
     const session = c.messages[0].session!;
     const seg1 = session.segments[0] as {
       type: 'tool_call';
-      call: { summary: string | null };
+      call: { summary: string | null; status?: string };
     };
     const seg2 = session.segments[1] as {
       type: 'tool_call';
-      call: { summary: string | null };
+      call: { summary: string | null; status?: string };
     };
     expect(seg1.call.summary).toBeNull();
     expect(seg2.call.summary).toBe('4 rows');
+    expect(seg2.call.status).toBe('completed');
+  });
+
+  it('forwards explicit tool_result status (completed/failed)', () => {
+    const conv = seedActiveConversationWithMessage('m1');
+    handleAiEvent(conv.id, {
+      type: 'tool_calls',
+      tools: [{ id: 'call_1', name: 'run_readonly_query', args: {} }],
+    });
+    handleAiEvent(conv.id, {
+      type: 'tool_result',
+      id: 'call_1',
+      tool: 'run_readonly_query',
+      summary: 'read-only guard refused',
+      status: 'failed',
+      output: null,
+    });
+    const c = getConv(conv.id);
+    const seg = c.messages[0].session!.segments[0];
+    if (seg.type === 'tool_call') {
+      expect(seg.call.status).toBe('failed');
+      expect(seg.call.summary).toBe('read-only guard refused');
+    }
+  });
+
+  it('marks unresolved tool calls stopped when done arrives with cancelled: true', () => {
+    const conv = seedActiveConversationWithMessage('m1');
+    handleAiEvent(conv.id, {
+      type: 'tool_calls',
+      tools: [
+        { id: 'call_1', name: 'a', args: {} },
+        { id: 'call_2', name: 'b', args: {} },
+      ],
+    });
+    handleAiEvent(conv.id, {
+      type: 'tool_result',
+      id: 'call_1',
+      tool: 'a',
+      summary: 'ok',
+      status: 'completed',
+      output: null,
+    });
+    handleAiEvent(conv.id, {
+      type: 'done',
+      conversation_id: conv.id,
+      final_message: '',
+      cancelled: true,
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        cached_prompt_tokens: 0,
+      },
+    });
+    const c = getConv(conv.id);
+    const segs = c.messages[0].session!.segments;
+    const byId = Object.fromEntries(
+      segs.map((s) =>
+        s.type === 'tool_call' ? [s.call.id, s.call.status] : [],
+      ),
+    );
+    expect(byId['call_1']).toBe('completed');
+    expect(byId['call_2']).toBe('stopped');
   });
 
   it('does nothing and does not throw when no message exists yet for the conversation', () => {
@@ -249,6 +329,109 @@ describe('formatUsageLine', () => {
         cachedPromptTokens: 0,
       }),
     ).toBe('120 in / 45 out tokens');
+  });
+});
+
+describe('createAiSession listeners', () => {
+  beforeEach(() => {
+    chat.conversations = [];
+    chat.isStreaming = false;
+    for (const k of Object.keys(listenerCbs)) delete listenerCbs[k];
+  });
+
+  it('ignores dml_approval events for other conversations', async () => {
+    const conv = seedConversation('conv-a');
+    const session = createAiSession('conv-a');
+    const onDmlApproval = vi.fn();
+    await session.setupListeners({
+      onDmlApproval,
+      onAgentPermission: vi.fn(),
+      onError: vi.fn(),
+    });
+    listenerCbs['ai:dml_approval']?.({
+      payload: {
+        conversation_id: 'conv-b',
+        sql: 'delete from t',
+        description: 'x',
+        estimated_rows_affected: null,
+      },
+    });
+    expect(onDmlApproval).not.toHaveBeenCalled();
+    expect(conv.isPaused).toBe(false);
+  });
+
+  it('routes dml_approval for its own conversation', async () => {
+    seedConversation('conv-a');
+    const session = createAiSession('conv-a');
+    const onDmlApproval = vi.fn();
+    await session.setupListeners({
+      onDmlApproval,
+      onAgentPermission: vi.fn(),
+      onError: vi.fn(),
+    });
+    listenerCbs['ai:dml_approval']?.({
+      payload: {
+        conversation_id: 'conv-a',
+        sql: 'delete from t',
+        description: 'x',
+        estimated_rows_affected: null,
+      },
+    });
+    expect(onDmlApproval).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores agent_permission events for other conversations', async () => {
+    seedConversation('conv-a');
+    const session = createAiSession('conv-a');
+    const onAgentPermission = vi.fn();
+    await session.setupListeners({
+      onDmlApproval: vi.fn(),
+      onAgentPermission,
+      onError: vi.fn(),
+    });
+    listenerCbs['ai:agent_permission']?.({
+      payload: {
+        conversationId: 'conv-b',
+        title: 't',
+        description: 'd',
+        options: [],
+      },
+    });
+    expect(onAgentPermission).not.toHaveBeenCalled();
+  });
+
+  it('ignores error events for other conversations', async () => {
+    const conv = seedConversation('conv-a');
+    const session = createAiSession('conv-a');
+    const onError = vi.fn();
+    await session.setupListeners({
+      onDmlApproval: vi.fn(),
+      onAgentPermission: vi.fn(),
+      onError,
+    });
+    listenerCbs['ai:error']?.({
+      payload: { conversation_id: 'conv-b', message: 'boom' },
+    });
+    expect(onError).not.toHaveBeenCalled();
+    expect(conv.error).toBeNull();
+  });
+
+  it('passes matching error events to the handler', async () => {
+    seedConversation('conv-a');
+    const session = createAiSession('conv-a');
+    const onError = vi.fn();
+    await session.setupListeners({
+      onDmlApproval: vi.fn(),
+      onAgentPermission: vi.fn(),
+      onError,
+    });
+    listenerCbs['ai:error']?.({
+      payload: { conversation_id: 'conv-a', message: 'boom' },
+    });
+    expect(onError).toHaveBeenCalledWith({
+      conversation_id: 'conv-a',
+      message: 'boom',
+    });
   });
 });
 

@@ -4,6 +4,12 @@
     $props();
   let open = $state(false);
 
+  // A failed call opens by itself — the error contract says the failure is
+  // visible, not hidden behind a click (spec D7).
+  $effect(() => {
+    if (tool.status === 'failed') open = true;
+  });
+
   const icons: Record<string, string> = {
     get_objects_info: 'schema',
     search_objects: 'search',
@@ -11,19 +17,65 @@
     preview_dml: 'lock',
   };
 
+  // A tool id (`run_readonly_query`) is prettified for display; anything else
+  // is shown verbatim. ACP carries no tool name — `name` is the agent's own
+  // free-text title, which for a bash-first agent is the whole shell command.
+  // Underscore-stripping plus `text-transform: capitalize` turned those into
+  // commands that were never run (`airplanes_data` → `Airplanes Data`), so the
+  // transform is confined to names that actually are identifiers.
+  const TOOL_ID = /^[a-z][a-z0-9_]*$/;
+  let isToolId = $derived(TOOL_ID.test(tool.name));
+  let displayName = $derived(
+    isToolId ? tool.name.replace(/_/g, ' ') : tool.name,
+  );
+
+  // The status column is a short completion indicator, never a content
+  // preview: an agent that reports a tool's stdout would otherwise fill the
+  // header with the Markdown row preview that the body already renders.
+  const STATUS_MAX = 80;
+  function statusText(summary: string): string {
+    const line = summary.split('\n', 1)[0].trim();
+    return line.length > STATUS_MAX
+      ? `${line.slice(0, STATUS_MAX - 1)}…`
+      : line;
+  }
+
   let statusIcon = $derived.by(() => {
-    if (tool.summary === 'error' || tool.summary?.startsWith('error'))
-      return 'error';
-    if (tool.summary) return 'done';
-    // No summary yet: still running, or cell finished without providing one.
-    return cellCompleted ? 'done' : 'spinner';
+    switch (tool.status) {
+      case 'failed':
+        return 'error';
+      case 'completed':
+        return 'done';
+      case 'stopped':
+        return 'stopped';
+      case 'running':
+        return 'spinner';
+      default: {
+        // Legacy data (pre-status events): error-prefix convention.
+        if (tool.summary === 'error' || tool.summary?.startsWith('error'))
+          return 'error';
+        if (tool.summary) return 'done';
+        return cellCompleted ? 'done' : 'spinner';
+      }
+    }
   });
 
   let statusLabel = $derived.by(() => {
-    if (tool.summary === 'error') return 'Failed';
-    if (tool.summary?.startsWith('error')) return tool.summary;
-    if (tool.summary) return tool.summary;
-    return cellCompleted ? 'Done' : 'Running…';
+    switch (tool.status) {
+      case 'failed':
+        return 'Failed';
+      case 'completed':
+        return tool.summary ? statusText(tool.summary) : 'Done';
+      case 'stopped':
+        return 'Stopped';
+      case 'running':
+        return 'Running…';
+      default: {
+        if (tool.summary === 'error') return 'Failed';
+        if (tool.summary) return statusText(tool.summary);
+        return cellCompleted ? 'Done' : 'Running…';
+      }
+    }
   });
 
   function argDisplay(args: unknown): string {
@@ -45,8 +97,9 @@
 <div
   class="tcc"
   class:open
-  class:done={!!tool.summary}
+  class:done={statusIcon === 'done'}
   class:err={statusIcon === 'error'}
+  class:stopped={statusIcon === 'stopped'}
 >
   <button class="tcc-hdr" onclick={() => (open = !open)}>
     <span class="tcc-icon">
@@ -85,6 +138,18 @@
             y2="15"
           /><line x1="9" y1="9" x2="15" y2="15" />
         </svg>
+      {:else if statusIcon === 'stopped'}
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2.5"
+          stroke-linecap="round"
+        >
+          <line x1="5" y1="12" x2="19" y2="12" />
+        </svg>
       {:else}
         <svg
           width="14"
@@ -100,7 +165,7 @@
         </svg>
       {/if}
     </span>
-    <span class="tcc-name">{tool.name.replace(/_/g, ' ')}</span>
+    <span class="tcc-name" class:raw={!isToolId}>{displayName}</span>
     <span class="tcc-status">{statusLabel}</span>
     <svg
       class="tcc-chevron"
@@ -122,6 +187,14 @@
 
   {#if open}
     <div class="tcc-body">
+      {#if (tool.status === 'failed' || tool.status === 'stopped') && tool.summary}
+        <div class="tcc-section">
+          <div class="tcc-section-label">
+            {tool.status === 'failed' ? 'Error' : 'Stopped'}
+          </div>
+          <pre class="tcc-code tcc-output-text">{tool.summary}</pre>
+        </div>
+      {/if}
       <div class="tcc-section">
         <div class="tcc-section-label">Input</div>
         <pre class="tcc-code">{argDisplay(tool.args)}</pre>
@@ -132,7 +205,14 @@
           <div class="tcc-section-label">Output</div>
           {#if tool.output.type === 'query_result'}
             <div class="tcc-preview">
-              <div class="tcc-preview-hdr">{tool.output.sql}</div>
+              <div class="tcc-preview-hdr">
+                <span class="tcc-preview-sql">{tool.output.sql}</span>
+                <span class="tcc-chip">{tool.output.row_count} rows</span>
+                <span class="tcc-chip">{tool.output.execution_time_ms}ms</span>
+                {#if tool.output.truncated}
+                  <span class="tcc-chip tcc-chip-warn">truncated</span>
+                {/if}
+              </div>
               {#if tool.output.columns && tool.output.rows}
                 <table class="tcc-table">
                   <thead>
@@ -216,11 +296,26 @@
     color: var(--success);
   }
 
+  .tcc.stopped .tcc-icon {
+    color: var(--text-muted);
+  }
+
   .tcc-name {
     font-weight: var(--weight-medium);
     color: var(--text-secondary);
     text-transform: capitalize;
     font-size: var(--text-xs);
+  }
+
+  /* A free-text agent title (often a full shell command): exact casing, and
+     it must not push the status chip off the row. */
+  .tcc-name.raw {
+    text-transform: none;
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 55%;
   }
 
   .tcc-status {
@@ -312,8 +407,34 @@
     background: var(--bg-subtle);
     color: var(--accent);
     border-bottom: 1px solid var(--border);
-    overflow-x: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .tcc-preview-sql {
+    font-family: var(--font-mono);
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .tcc-chip {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-full);
+    padding: 1px 8px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .tcc-chip-warn {
+    color: var(--warning);
   }
 
   .tcc-table {

@@ -281,7 +281,6 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    letter-spacing: -0.015em;
   }
 
   .card-active-badge {

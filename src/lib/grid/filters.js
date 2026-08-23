@@ -2,7 +2,7 @@
 //
 // Deliberately dependency-free: no Svelte, no DOM, no IPC. Every export is a
 // pure function returning new values, so the interesting rules are testable
-// without mounting anything. Same pattern as virtualRange.js in this folder.
+// without mounting anything.
 //
 // A filter is { id, column, operator, value }. `id` is frontend-only and is
 // stripped before the filter reaches the backend — see filterSpecFor in

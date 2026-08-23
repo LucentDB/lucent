@@ -274,7 +274,11 @@ describe('AiCellOutput activity stack', () => {
         conversation_id: 'c',
         final_sql: null,
         response: 'done',
-        messages: [{ thinking: 'pondering' }],
+        // Every closed segment carries its own duration: the live stream
+        // stamps one per segment and the backend's restored snapshot stamps
+        // the run's. A card no longer borrows `cell.duration_ms`, which is
+        // what made every segment claim the whole run's time.
+        messages: [{ thinking: 'pondering', durationMs: 4200 }],
         tool_calls: [],
       },
     });
@@ -282,7 +286,7 @@ describe('AiCellOutput activity stack', () => {
       props: { cell: model.cells[0], model },
     });
     const status = container.querySelector(
-      '.activity-status',
+      '.work-summary',
     ) as HTMLButtonElement;
     expect(status).toBeTruthy();
     expect(status.disabled).toBe(false);
@@ -292,11 +296,13 @@ describe('AiCellOutput activity stack', () => {
     // the record survived, not the thinking text itself.
     await fireEvent.click(status);
     expect(container.querySelector('.activity-body')?.textContent).toContain(
-      'Thought for',
+      'Thought for 4s',
     );
   });
 
   it('states the run cost without offering a log that does not exist', () => {
+    // The duration is run metadata and stays in the header; a cell that did no
+    // work gets no work row at all rather than an empty one.
     const model = aiModel({
       status: 'ok',
       duration_ms: 1200,
@@ -311,11 +317,10 @@ describe('AiCellOutput activity stack', () => {
     const { container } = render(AiCellOutput, {
       props: { cell: model.cells[0], model },
     });
-    const status = container.querySelector(
-      '.activity-status',
-    ) as HTMLButtonElement;
-    expect(status.textContent).toContain('1.2s');
-    expect(status.disabled).toBe(true);
+    expect(container.querySelector('.run-duration')?.textContent).toContain(
+      '1.2s',
+    );
+    expect(container.querySelector('.work-strip')).toBeNull();
   });
 
   it('shows a running status line while the cell runs', () => {
@@ -332,8 +337,195 @@ describe('AiCellOutput activity stack', () => {
     const { container } = render(AiCellOutput, {
       props: { cell: model.cells[0], model },
     });
-    expect(container.querySelector('.activity-status')?.textContent).toContain(
+    expect(container.querySelector('.work-summary')?.textContent).toContain(
       'Thinking',
     );
+    expect(container.querySelector('.pulse')).toBeTruthy();
+  });
+});
+
+describe('AiCellOutput work summary', () => {
+  function ranAQuery(overrides: Record<string, unknown> = {}) {
+    return aiModel({
+      status: 'ok',
+      duration_ms: 68_000,
+      ai_state: {
+        conversation_id: 'c',
+        final_sql: 'SELECT 1',
+        response: 'done',
+        messages: [{ thinking: 'pondering', durationMs: 25_000 }],
+        tool_calls: [
+          { id: 't1', name: 'run_readonly_query', args: { sql: 'SELECT 1' } },
+        ],
+        ...(overrides.ai_state as object),
+      },
+      ...overrides,
+    });
+  }
+
+  it('names the work instead of counting tool calls', () => {
+    const model = ranAQuery();
+    const { container } = render(AiCellOutput, {
+      props: { cell: model.cells[0], model },
+    });
+    const summary = container.querySelector('.work-summary')?.textContent ?? '';
+    expect(summary).toContain('Ran 1 query');
+    expect(summary).toContain('thought for 25s');
+    expect(summary).not.toContain('tool call');
+  });
+
+  it('reads from the left, on its own row below the tabs', () => {
+    const model = ranAQuery();
+    const { container } = render(AiCellOutput, {
+      props: { cell: model.cells[0], model },
+    });
+    // Not inside the header, which is where the right-aligned pill used to sit.
+    expect(container.querySelector('.output-header .work-summary')).toBeNull();
+    expect(container.querySelector('.work-strip .work-summary')).toBeTruthy();
+    const header = container.querySelector('.output-header');
+    const strip = container.querySelector('.work-strip');
+    expect(strip?.previousElementSibling).toBe(header);
+  });
+
+  it('keeps the run duration out of the work row', () => {
+    const model = ranAQuery();
+    const { container } = render(AiCellOutput, {
+      props: { cell: model.cells[0], model },
+    });
+    expect(container.querySelector('.work-summary')?.textContent).not.toContain(
+      '68',
+    );
+    expect(container.querySelector('.run-duration')?.textContent).toContain(
+      '68.0s',
+    );
+  });
+
+  it('expands the step log from the work row', async () => {
+    const model = ranAQuery();
+    const { container } = render(AiCellOutput, {
+      props: { cell: model.cells[0], model },
+    });
+    expect(container.querySelector('.activity-body')).toBeNull();
+    await fireEvent.click(container.querySelector('.work-summary')!);
+    expect(container.querySelector('.activity-body')).toBeTruthy();
+  });
+});
+
+describe('AiCellOutput thinking durations', () => {
+  it('gives each thinking segment its own duration', async () => {
+    // The regression: every card fell back to `cell.duration_ms`, so a
+    // one-sentence closing thought claimed the whole run's time.
+    const model = aiModel({
+      status: 'ok',
+      duration_ms: 89_000,
+      ai_state: {
+        conversation_id: 'c1',
+        final_sql: null,
+        response: 'done',
+        messages: [
+          { thinking: 'a long analysis', durationMs: 80_000 },
+          { thinking: 'I have the data.', durationMs: 2_000 },
+        ],
+        tool_calls: [],
+      },
+    });
+    const { container } = render(AiCellOutput, {
+      props: { cell: model.cells[0], model },
+    });
+    await fireEvent.click(container.querySelector('.work-summary')!);
+    const labels = [...container.querySelectorAll('.tc-label')].map((l) =>
+      (l.textContent ?? '').trim(),
+    );
+    expect(labels).toEqual(['Thought for 80s', 'Thought for 2s']);
+    expect(labels.filter((l) => l.includes('89'))).toHaveLength(0);
+  });
+
+  it('renders a segment with no duration as still thinking', async () => {
+    const model = aiModel({
+      status: 'running',
+      duration_ms: null,
+      ai_state: {
+        conversation_id: 'c1',
+        final_sql: null,
+        response: null,
+        messages: [{ thinking: 'working on it' }],
+        tool_calls: [],
+      },
+    });
+    const { container } = render(AiCellOutput, {
+      props: { cell: model.cells[0], model },
+    });
+    expect(container.textContent).toContain('Thinking…');
+  });
+});
+
+describe('AiCellOutput tool cards', () => {
+  const queryCall = {
+    id: 'tc1',
+    name: 'run_readonly_query',
+    args: { sql: 'SELECT 1 AS n' },
+    summary: '3 rows',
+    output: {
+      type: 'query_result',
+      columns: [{ name: 'n', type: 'int4' }],
+      rows: [[1], [2], [3]],
+      row_count: 3,
+      sql: 'SELECT 1 AS n',
+      execution_time_ms: 4,
+      truncated: false,
+    },
+  };
+
+  function withCall(call: Record<string, unknown>) {
+    return aiModel({
+      status: 'ok',
+      duration_ms: 1_200,
+      ai_state: {
+        conversation_id: 'c1',
+        final_sql: 'SELECT 1 AS n',
+        response: 'here you go',
+        messages: [],
+        tool_calls: [call],
+      },
+    });
+  }
+
+  it('shows the arguments and the result grid, not a bare null', async () => {
+    const model = withCall(queryCall);
+    const { container } = render(AiCellOutput, {
+      props: { cell: model.cells[0], model },
+    });
+    await fireEvent.click(container.querySelector('.work-summary')!);
+    await fireEvent.click(container.querySelector('.tcc-hdr')!);
+    const body = container.querySelector('.tcc-body')!;
+    expect(body.textContent).toContain('SELECT 1 AS n');
+    expect(body.textContent).not.toContain('null');
+    expect(body.querySelector('.tcc-table')).toBeTruthy();
+    expect(body.textContent).toContain('4ms');
+  });
+
+  it('names the tool rather than the shell command that invoked it', async () => {
+    // An ACP agent on the CLI path announces a shell command; the backend
+    // backfills the real tool name and arguments from the bridge.
+    const model = withCall(queryCall);
+    const { container } = render(AiCellOutput, {
+      props: { cell: model.cells[0], model },
+    });
+    await fireEvent.click(container.querySelector('.work-summary')!);
+    const name = container.querySelector('.tcc-name')!;
+    expect(name.textContent).toBe('run readonly query');
+  });
+
+  it('keeps the card header short when the summary is a table preview', async () => {
+    const model = withCall({
+      ...queryCall,
+      summary: 'Query: SELECT 1\nResult: 3 rows\n\n| n |\n|---|\n| 1 |',
+    });
+    const { container } = render(AiCellOutput, {
+      props: { cell: model.cells[0], model },
+    });
+    await fireEvent.click(container.querySelector('.work-summary')!);
+    const status = container.querySelector('.tcc-status')!;
+    expect(status.textContent).toBe('Query: SELECT 1');
   });
 });

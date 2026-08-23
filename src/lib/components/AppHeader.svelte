@@ -9,6 +9,7 @@
   import { connections } from '../stores/connections.svelte';
   import { indexing } from '../stores/indexing.svelte';
   import ReadOnlyBadge from './connection/ReadOnlyBadge.svelte';
+  import DbIcon from './icons/DbIcon.svelte';
 
   let {
     config,
@@ -57,7 +58,9 @@
   function tabIconSvg(tab: any): string {
     if (tab.kind === 'query') return 'query';
     if (tab.kind === 'table') return 'table';
+    if (tab.kind === 'view') return 'view';
     if (tab.kind === 'notebook') return 'notebook';
+    if (tab.kind === 'source' && tab.sourceObjectKind) return tab.sourceObjectKind;
     return 'source';
   }
   function tabLabel(tab: any) {
@@ -250,67 +253,7 @@
               title={tabLabel(tab)}
             >
               <span class="tab-icon {tabIconSvg(tab)}">
-                {#if tab.kind === 'query'}
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  >
-                    <polyline points="16 3 21 3 21 8" /><line
-                      x1="4"
-                      y1="20"
-                      x2="21"
-                      y2="3"
-                    /><polyline points="21 16 21 21 16 21" /><line
-                      x1="15"
-                      y1="15"
-                      x2="21"
-                      y2="21"
-                    /><line x1="4" y1="4" x2="9" y2="9" />
-                  </svg>
-                {:else if tab.kind === 'table'}
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  >
-                    <rect x="3" y="3" width="18" height="18" rx="2" /><path
-                      d="M3 9h18"
-                    /><path d="M3 15h18" /><path d="M9 3v18" />
-                  </svg>
-                {:else if tab.kind === 'notebook'}
-                  <span class="tab-icon-text">📓</span>
-                {:else}
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  >
-                    <path
-                      d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
-                    /><polyline points="14 2 14 8 20 8" /><line
-                      x1="16"
-                      y1="13"
-                      x2="8"
-                      y2="13"
-                    /><line x1="16" y1="17" x2="8" y2="17" />
-                  </svg>
-                {/if}
+                <DbIcon kind={tabIconSvg(tab)} size={12.5} strokeWidth={1.6} />
               </span>
               <span class="tab-label">{tabLabel(tab)}</span>
               {#if isTabDirty(tab.id)}
@@ -806,14 +749,35 @@
   }
   .tab-icon {
     flex-shrink: 0;
-    font-size: var(--text-xs);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 13px;
+    height: 13px;
     line-height: 1;
+  }
+  .tab-icon :global(svg) {
+    width: 13px;
+    height: 13px;
+    flex-shrink: 0;
   }
   .tab-icon.query {
     color: var(--accent);
   }
   .tab-icon.table {
-    color: var(--success);
+    color: #10b981;
+  }
+  .tab-icon.view {
+    color: #6366f1;
+  }
+  .tab-icon.matview {
+    color: #0ea5e9;
+  }
+  .tab-icon.function {
+    color: #a855f7;
+  }
+  .tab-icon.sequence {
+    color: #f59e0b;
   }
   .tab-icon.source {
     color: var(--text-muted);
@@ -927,7 +891,7 @@
     border: 1px solid var(--border);
     color: var(--text-secondary);
     padding: 6px 14px;
-    border-radius: 20px;
+    border-radius: var(--radius-sm);
     font-size: 12px;
     font-weight: 500;
     cursor: pointer;

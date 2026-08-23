@@ -1,23 +1,16 @@
-import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/svelte';
 import ProviderPicker from './ProviderPicker.svelte';
 
-const listInstalledAcpAgentsMock = vi.fn();
-vi.mock('../../ipc/ai.ts', () => ({
-  listInstalledAcpAgents: (...args: unknown[]) =>
-    listInstalledAcpAgentsMock(...args),
-}));
-
 afterEach(cleanup);
-
-beforeEach(() => {
-  listInstalledAcpAgentsMock.mockReset();
-  listInstalledAcpAgentsMock.mockResolvedValue([]);
-});
 
 describe('ProviderPicker', () => {
   it('renders all 11 providers as radio cards across two groups', () => {
-    render(ProviderPicker, { value: 'openai', onChange: vi.fn() });
+    render(ProviderPicker, {
+      value: 'openai',
+      onChange: vi.fn(),
+      installedAgents: [],
+    });
     expect(screen.getAllByRole('radio')).toHaveLength(11);
     expect(screen.getByRole('radio', { name: 'OpenCode' })).toBeTruthy();
     expect(screen.getByText('Cloud providers')).toBeTruthy();
@@ -25,7 +18,11 @@ describe('ProviderPicker', () => {
   });
 
   it('marks the current provider as checked', () => {
-    render(ProviderPicker, { value: 'openai', onChange: vi.fn() });
+    render(ProviderPicker, {
+      value: 'openai',
+      onChange: vi.fn(),
+      installedAgents: [],
+    });
     const openai = screen.getByRole('radio', { name: 'OpenAI' });
     expect(openai.getAttribute('aria-checked')).toBe('true');
     const anthropic = screen.getByRole('radio', { name: 'Anthropic' });
@@ -34,14 +31,22 @@ describe('ProviderPicker', () => {
 
   it('calls onChange when a card is clicked', async () => {
     const onChange = vi.fn();
-    render(ProviderPicker, { value: 'openai', onChange });
+    render(ProviderPicker, {
+      value: 'openai',
+      onChange,
+      installedAgents: [],
+    });
     await fireEvent.click(screen.getByRole('radio', { name: 'Groq' }));
     expect(onChange).toHaveBeenCalledWith('groq');
   });
 
   it('selects the next provider with ArrowRight and wraps', () => {
     const onChange = vi.fn();
-    render(ProviderPicker, { value: 'openai', onChange });
+    render(ProviderPicker, {
+      value: 'openai',
+      onChange,
+      installedAgents: [],
+    });
     const cloud = screen.getAllByRole('radiogroup')[0];
 
     fireEvent.keyDown(cloud, { key: 'ArrowRight' });
@@ -56,7 +61,11 @@ describe('ProviderPicker', () => {
 
   it('moves with ArrowRight and selects the focused card with Enter', () => {
     const onChange = vi.fn();
-    render(ProviderPicker, { value: 'openai', onChange });
+    render(ProviderPicker, {
+      value: 'openai',
+      onChange,
+      installedAgents: [],
+    });
     const cloud = screen.getAllByRole('radiogroup')[0];
 
     fireEvent.keyDown(cloud, { key: 'ArrowRight' });
@@ -69,64 +78,77 @@ describe('ProviderPicker', () => {
   });
 
   it('renders brand logos inside provider cards', () => {
-    render(ProviderPicker, { value: 'openai', onChange: vi.fn() });
+    render(ProviderPicker, {
+      value: 'openai',
+      onChange: vi.fn(),
+      installedAgents: [],
+    });
     const anthropic = screen.getByRole('radio', { name: 'Anthropic' });
     expect(anthropic.querySelector('svg')).toBeTruthy();
   });
 
-  it('lists installed acp agents as providers', async () => {
-    listInstalledAcpAgentsMock.mockResolvedValue([
-      {
-        id: 'opencode',
-        version: '1.2.3',
-        launch: { cmd: 'npx', args: [], env: {} },
-      },
-      {
-        id: 'claude-acp',
-        version: '0.9.0',
-        launch: { cmd: 'npx', args: [], env: {} },
-      },
-    ]);
-    render(ProviderPicker, { value: 'openai', onChange: vi.fn() });
+  it('lists installed acp agents as providers with their display names', () => {
+    render(ProviderPicker, {
+      value: 'openai',
+      onChange: vi.fn(),
+      installedAgents: [
+        {
+          id: 'opencode',
+          version: '1.2.3',
+          launch: { cmd: 'npx', args: [], env: {} },
+          name: 'OpenCode',
+        },
+        {
+          id: 'claude-acp',
+          version: '0.9.0',
+          launch: { cmd: 'npx', args: [], env: {} },
+          name: null,
+        },
+      ],
+    });
     expect(
-      await screen.findByRole('radio', { name: 'ACP Agent — opencode' }),
+      screen.getByRole('radio', { name: 'OpenCode — opencode' }),
     ).toBeTruthy();
+    // Missing name falls back to the generic label.
     expect(
       screen.getByRole('radio', { name: 'ACP Agent — claude-acp' }),
     ).toBeTruthy();
   });
 
-  it('marks the acp provider selected when value is acp', async () => {
-    listInstalledAcpAgentsMock.mockResolvedValue([
-      {
-        id: 'opencode',
-        version: '1.2.3',
-        launch: { cmd: 'npx', args: [], env: {} },
-      },
-    ]);
+  it('marks the acp provider selected when value is acp', () => {
     render(ProviderPicker, {
       value: 'acp',
       acpAgentId: 'opencode',
       onChange: vi.fn(),
+      installedAgents: [
+        {
+          id: 'opencode',
+          version: '1.2.3',
+          launch: { cmd: 'npx', args: [], env: {} },
+          name: 'OpenCode',
+        },
+      ],
     });
-    const card = await screen.findByRole('radio', {
-      name: 'ACP Agent — opencode',
-    });
+    const card = screen.getByRole('radio', { name: 'OpenCode — opencode' });
     expect(card.getAttribute('aria-checked')).toBe('true');
   });
 
   it('emits provider id and agent id when an acp card is clicked', async () => {
-    listInstalledAcpAgentsMock.mockResolvedValue([
-      {
-        id: 'opencode',
-        version: '1.2.3',
-        launch: { cmd: 'npx', args: [], env: {} },
-      },
-    ]);
     const onChange = vi.fn();
-    render(ProviderPicker, { value: 'openai', onChange });
+    render(ProviderPicker, {
+      value: 'openai',
+      onChange,
+      installedAgents: [
+        {
+          id: 'opencode',
+          version: '1.2.3',
+          launch: { cmd: 'npx', args: [], env: {} },
+          name: 'OpenCode',
+        },
+      ],
+    });
     await fireEvent.click(
-      await screen.findByRole('radio', { name: 'ACP Agent — opencode' }),
+      screen.getByRole('radio', { name: 'OpenCode — opencode' }),
     );
     expect(onChange).toHaveBeenCalledWith('acp', 'opencode');
   });

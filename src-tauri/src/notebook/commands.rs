@@ -5,7 +5,7 @@ use lucent_protocol::{ConnectionId, QueryId};
 use tauri::State;
 use uuid::Uuid;
 
-use crate::ai::agent::{AgentSink, AgentState, ConversationState, DatabaseAgent};
+use crate::ai::agent::{AgentSink, AgentState, ConversationState};
 use crate::ai::events::{AiEvent, DmlApprovalPayload};
 use crate::ai::provider::LlmProvider;
 use crate::ai::providers::rig::RigProvider;
@@ -441,6 +441,14 @@ struct NotebookAgentSink {
     final_sql: Arc<std::sync::Mutex<Option<String>>>,
     /// Final text response from the AI.
     final_message: Arc<std::sync::Mutex<Option<String>>>,
+    /// ACP only: the state and session key needed to answer a
+    /// `session/request_permission`. A notebook cell has no approval UI, so
+    /// the request must still be *resolved* — leaving it parked would block
+    /// the agent's turn until the 300-second timeout.
+    acp: Option<(crate::ai::acp::AcpState, String)>,
+    /// Permission requests this cell refused, surfaced in the cell's error so
+    /// a user who wonders why the agent gave up can see what it asked for.
+    denied_permissions: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl AgentSink for NotebookAgentSink {
@@ -488,44 +496,74 @@ impl AgentSink for NotebookAgentSink {
                     });
                 }
             }
-            AiEvent::ToolResult { id, output, .. } => {
-                // Attach the structured result to the matching tool call so
-                // classify_ai_output can surface tables (the AI Table tab). The
-                // agent emits the query_result shape; classify expects the
-                // notebook `table` shape, so convert here.
-                if let Some(out) = output {
+            AiEvent::ToolResult {
+                id,
+                tool,
+                summary,
+                input,
+                output,
+                ..
+            } => {
+                // Everything below repairs what the agent's own report of a
+                // call cannot tell us. On the ACP CLI path the announced call
+                // is an opaque shell command with `args: null`, so the tool
+                // name, its arguments and its result are only knowable here,
+                // where the bridge reports what it actually executed.
+                if tool == "run_readonly_query" {
+                    if let Some(sql) = input
+                        .as_ref()
+                        .and_then(|i| i.get("sql"))
+                        .and_then(|v| v.as_str())
+                    {
+                        let mut fs = self.final_sql.lock().unwrap();
+                        *fs = Some(sql.to_string());
+                    }
+                }
+                {
                     let mut tc = self.tool_calls.lock().unwrap();
                     if let Some(t) = tc
                         .iter_mut()
                         .rev()
                         .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(id.as_str()))
                     {
-                        if out.get("type").and_then(|v| v.as_str()) == Some("query_result") {
-                            let cols: Vec<serde_json::Value> = out
-                                .get("columns")
-                                .and_then(|v| v.as_array())
-                                .map(|arr| {
-                                    arr.iter()
-                                        .map(|c| {
-                                            serde_json::json!({
-                                                "name": c.get("name"),
-                                                "type_name": c.get("type"),
-                                            })
-                                        })
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            t["output"] = serde_json::json!({
-                                "table": {
-                                    "columns": cols,
-                                    "rows": out.get("rows").cloned().unwrap_or_else(|| serde_json::json!([])),
-                                    "total_count": out.get("row_count").cloned(),
-                                    "is_truncated": out.get("truncated").cloned().unwrap_or(serde_json::json!(false)),
-                                }
-                            });
+                        // `classify_ai_output` keys the AI Table tab off the
+                        // tool NAME and its `sql` argument; both are missing on
+                        // the CLI path, which is why those cells produced no
+                        // table at all. Only fill what the call itself lacked.
+                        if !tool.is_empty() && !is_tool_id(&announced_name(t)) {
+                            t["name"] = serde_json::json!(tool);
+                        }
+                        if let Some(inp) = &input {
+                            if t.get("args").map(args_missing).unwrap_or(true) {
+                                t["args"] = inp.clone();
+                            }
+                        }
+                        if !summary.is_empty() {
+                            t["summary"] = serde_json::json!(summary);
+                        }
+                        if let Some(out) = &output {
+                            // Both shapes, deliberately: `type` is what the
+                            // tool card renders (the chat pane's card, reused
+                            // here), `table` is what `classify_ai_output`
+                            // converts into the cell's Table tab.
+                            let mut stored = out.clone();
+                            if out.get("type").and_then(|v| v.as_str()) == Some("query_result") {
+                                stored["table"] = query_result_as_table(out);
+                            }
+                            t["output"] = stored;
                         }
                     }
                 }
+                // Stream it: the card fills in during the run instead of
+                // staying a bare "Done" row until `cell_done` lands.
+                let _ = self.channel.send(NotebookEvent::ToolResult {
+                    cell_id: self.cell_id.clone(),
+                    id,
+                    tool,
+                    summary,
+                    input,
+                    output,
+                });
             }
             AiEvent::QueryResult { .. } => {
                 // Internal — the agent loop routes results back to the model.
@@ -549,9 +587,143 @@ impl AgentSink for NotebookAgentSink {
             self.cell_id, payload.description
         );
     }
+
+    /// An ACP agent asked to run one of its *own* tools (a shell command, a
+    /// file write). A notebook cell has no approval card, and the default
+    /// no-op would leave the request parked — the agent's turn would then
+    /// block until the 300-second timeout. So refuse it, promptly and
+    /// visibly: the agent gets a well-formed `Cancelled` outcome and can
+    /// choose another route (Lucent's database tools need no permission), and
+    /// the refusal is recorded so the cell can say what was asked for.
+    ///
+    /// Lucent's own tools are unaffected: they run behind the bridge with the
+    /// guardrails in-process, and never go through this path.
+    fn permission_request(&self, payload: crate::ai::events::AgentPermissionPayload) {
+        log::warn!(
+            "AI cell '{}': agent asked permission for '{}' — notebook cells have no approval \
+             dialog, so the request is refused.",
+            self.cell_id,
+            payload.title
+        );
+        self.denied_permissions
+            .lock()
+            .unwrap()
+            .push(payload.title.clone());
+        // Resolving is async; the sink contract is sync. The registry is
+        // keyed by ACP session, which `resolve_permission_session` looks up
+        // from the conversation key this cell's session was created under.
+        if let Some((acp, conv_key)) = self.acp.clone() {
+            let cell_id = self.cell_id.clone();
+            tokio::spawn(async move {
+                let session_id = {
+                    let sessions = acp.sessions.lock().await;
+                    sessions.get(&conv_key).map(|s| s.session_id.clone())
+                };
+                match session_id {
+                    Some(sid) => {
+                        if let Err(e) = acp.permissions.respond(&sid, false).await {
+                            log::warn!("AI cell '{cell_id}': refusing permission failed: {e}");
+                        }
+                    }
+                    None => log::warn!(
+                        "AI cell '{cell_id}': no ACP session for '{conv_key}' — permission \
+                         request left unresolved"
+                    ),
+                }
+            });
+        }
+    }
 }
 
 // ── AI cell execution ─────────────────────────────────────────────────────
+
+/// Whether a name is one of Lucent's tool ids rather than an agent's free-text
+/// title. ACP carries no tool name — a bash-first agent's "name" is the whole
+/// shell command — so this is how we tell a real name from a placeholder.
+fn is_tool_id(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Whether a call's announced arguments tell us nothing, so a result that
+/// carries some may fill them in. Null, an empty object, an empty array and a
+/// blank string all mean the same thing here.
+///
+/// The distinction matters because an ACP agent announces a call with
+/// `raw_input: {}` before its arguments are settled, not with nothing at all.
+/// A guard that only asked `is_null()` read `{}` as arguments the agent had
+/// really reported and refused the backfill — which is why notebook tool cards
+/// rendered `INPUT {}` beside an output full of rows. Falsy scalars (`0`,
+/// `false`) are values the agent chose to send, not the absence of one.
+fn args_missing(args: &serde_json::Value) -> bool {
+    match args {
+        serde_json::Value::Null => true,
+        serde_json::Value::String(s) => s.trim().is_empty(),
+        serde_json::Value::Array(a) => a.is_empty(),
+        serde_json::Value::Object(o) => o.is_empty(),
+        _ => false,
+    }
+}
+
+/// The `name` a tool call was announced under, or "" when it carried none.
+fn announced_name(call: &serde_json::Value) -> String {
+    call.get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// The tool card's `query_result` payload as the notebook's `TableOutput`
+/// shape. The two disagree on one field name (`type` vs `type_name`), and the
+/// cell's Table tab is deserialized straight from this.
+fn query_result_as_table(out: &serde_json::Value) -> serde_json::Value {
+    let cols: Vec<serde_json::Value> = out
+        .get("columns")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "name": c.get("name"),
+                        "type_name": c.get("type"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    serde_json::json!({
+        "columns": cols,
+        "rows": out.get("rows").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "total_count": out.get("row_count").cloned(),
+        "is_truncated": out.get("truncated").cloned().unwrap_or(serde_json::json!(false)),
+    })
+}
+
+/// The ACP session key for one AI-cell run. Notebook cells are stateless per
+/// run — the rig path builds a fresh `ConversationState` and starts from an
+/// empty history every time — so the key is scoped to the notebook AND the
+/// cell, and the session is dropped when the run ends. Keying on the cell
+/// alone (without the drop) would let a re-run continue the previous
+/// conversation, quietly making the same cell answer differently the second
+/// time; keying on the notebook alone would merge every cell's context.
+fn acp_cell_session_key(session_key: &str, cell_id: &str) -> String {
+    format!("notebook:{session_key}:{cell_id}")
+}
+
+/// The note appended to a cell's response when Lucent refused permission
+/// requests on its behalf. `denied` is never empty at the call site.
+fn permission_refusal_note(denied: &[String]) -> String {
+    format!(
+        "_Lucent refused {} permission request{} from the agent ({}). \
+         Notebook cells have no approval dialog — ask in the chat panel if \
+         the agent needs to run its own tools._",
+        denied.len(),
+        if denied.len() == 1 { "" } else { "s" },
+        denied.join(", ")
+    )
+}
 
 /// The error a notebook AI cell produces when its agent tries to run DML.
 /// The notebook sink cannot approve DML (its `dml_approval` is a log-only
@@ -592,21 +764,28 @@ async fn run_ai_cell(
             .as_ref()
             .map(|g| crate::ai::mschema::select_tier(g).0)
             .unwrap_or(crate::ai::mschema::ContextTier::Pull);
-        let schema_prompt = if let Some(tree) = state.schema_cache.get(&connection_id_str) {
-            let capabilities = state.capabilities().await;
+        let capabilities = state.capabilities().await;
+        let current_db = state.current_database.lock().await.clone();
+        let schema_prompt = if let Some(mut tree) = state.schema_cache.get(&connection_id_str) {
+            if let Some(db) = &current_db {
+                if tree.database_name.is_empty() || tree.database_name == connection_id_str {
+                    tree.database_name = db.clone();
+                }
+            }
             crate::ai::context::build_system_prompt(
                 &tree,
                 graph_guard.as_ref(),
                 capabilities.as_ref(),
             )
         } else if let Some(g) = graph_guard.as_ref() {
-            let db_name = connection_id_str
-                .rsplit('/')
-                .next()
-                .unwrap_or(&connection_id_str)
-                .to_string();
-            let tree = crate::ai::context::tree_from_graph(db_name, g);
-            let capabilities = state.capabilities().await;
+            let db_name = current_db
+                .unwrap_or_else(|| crate::ai::context::parse_database_name(&connection_id_str));
+            let version = state
+                .client_handle()
+                .await
+                .and_then(|c| c.server_info.map(|s| s.version))
+                .unwrap_or_default();
+            let tree = crate::ai::context::tree_from_graph_with_version(db_name, version, g);
             crate::ai::context::build_system_prompt(&tree, Some(g), capabilities.as_ref())
         } else {
             "Database context not yet loaded.".to_string()
@@ -628,28 +807,37 @@ async fn run_ai_cell(
         full_prompt.len()
     );
 
-    // ── Load API key ──────────────────────────────────────────────────────
-    log::info!("AI cell '{cell_id}': loading API key");
-    let cached = {
-        let guard = state.api_key_cache.read().await;
-        cached_api_key(&guard, &config.provider)
-    };
-    let api_key = match cached {
-        Some(k) => k,
-        None => {
-            let key = load_api_key(&config).map_err(|e| CommandError::new("ai_config", e))?;
-            *state.api_key_cache.write().await = Some((config.provider.clone(), key.clone()));
-            key
-        }
-    };
+    // ── ACP branch point ──────────────────────────────────────────────────
+    // With `acp` configured the whole rig section below is skipped: ACP
+    // agents own their auth, and `AiProvider::Acp` has no rig client to
+    // build (constructing one yielded `StubAgent`, which is what surfaced as
+    // "Provider not configured: RigAgent construction failed" on the first
+    // turn). The driver seam is the same one `ai_chat` uses.
+    let is_acp = config.acp.is_some();
 
-    // ── Create LLM provider ───────────────────────────────────────────────
-    log::info!("AI cell '{cell_id}': creating LLM provider");
-    let provider: Arc<dyn LlmProvider> = Arc::new(RigProvider::new(
-        config.provider.clone(),
-        api_key,
-        config.endpoint.clone(),
-    ));
+    let provider: Option<Arc<dyn LlmProvider>> = if is_acp {
+        None
+    } else {
+        log::info!("AI cell '{cell_id}': loading API key");
+        let cached = {
+            let guard = state.api_key_cache.read().await;
+            cached_api_key(&guard, &config.provider)
+        };
+        let api_key = match cached {
+            Some(k) => k,
+            None => {
+                let key = load_api_key(&config).map_err(|e| CommandError::new("ai_config", e))?;
+                *state.api_key_cache.write().await = Some((config.provider.clone(), key.clone()));
+                key
+            }
+        };
+        log::info!("AI cell '{cell_id}': creating LLM provider");
+        Some(Arc::new(RigProvider::new(
+            config.provider.clone(),
+            api_key,
+            config.endpoint.clone(),
+        )))
+    };
 
     // ── Create AI tool context with notebook connection ───────────────────
     let tool_ctx = AiToolContext {
@@ -695,6 +883,18 @@ async fn run_ai_cell(
         cell_id.clone(),
     )));
 
+    // The ACP driver keys its session-per-conversation map by this. Notebook
+    // cells are stateless per run — the rig path builds a fresh
+    // `ConversationState` every time and starts from an empty history — so
+    // each run gets its own ACP session, dropped on the way out. A key that
+    // included only the cell id would instead let a re-run continue the
+    // previous conversation, quietly making the same cell answer differently
+    // the second time.
+    let acp_session_key = acp_cell_session_key(session_key, &cell_id);
+    if is_acp {
+        conv.lock().await.conversation_id = Some(acp_session_key.clone());
+    }
+
     // ── Create notebook event sink ────────────────────────────────────────
     let sink_channel = channel.clone();
     let sink = Arc::new(NotebookAgentSink {
@@ -704,6 +904,8 @@ async fn run_ai_cell(
         tool_calls: Arc::new(std::sync::Mutex::new(Vec::new())),
         final_sql: Arc::new(std::sync::Mutex::new(None)),
         final_message: Arc::new(std::sync::Mutex::new(None)),
+        acp: is_acp.then(|| (state.acp.clone(), acp_session_key.clone())),
+        denied_permissions: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
 
     // Send thinking started
@@ -712,9 +914,14 @@ async fn run_ai_cell(
     });
 
     // ── Create tools and agent ────────────────────────────────────────────
-    log::info!("AI cell '{cell_id}': building agent");
-    let tools = crate::ai::tools::all_tools(tool_ctx.clone());
-    let agent = DatabaseAgent::new(provider, tools, tool_ctx);
+    log::info!("AI cell '{cell_id}': building agent (acp={is_acp})");
+    let tools = if is_acp {
+        Vec::new() // ACP tools live behind the bridge — the agent calls them over MCP or the CLI helper.
+    } else {
+        crate::ai::tools::all_tools(tool_ctx.clone())
+    };
+    let agent =
+        crate::commands::pick_driver(&config.acp, provider, tools, tool_ctx, state.acp.clone());
 
     // ── Run the agent loop (with 5-minute timeout) ────────────────────────
     log::info!("AI cell '{cell_id}': entering agent loop");
@@ -739,6 +946,13 @@ async fn run_ai_cell(
     // wiping it would silently make that run uncancellable (D3).
     if let Some(mut s) = state.notebook_sessions.get_mut(session_key) {
         clear_active_ai_cell_if_same(&mut s.active_ai_cell, &cell_id);
+    }
+
+    // Same reasoning as the per-run session key: the run is over, so the ACP
+    // session goes with it. Dropping here (before every `return` below) also
+    // keeps a notebook from accumulating one live session per AI cell.
+    if is_acp {
+        state.acp.drop_session(&acp_session_key).await;
     }
 
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -802,14 +1016,33 @@ async fn run_ai_cell(
     let tool_calls = sink.tool_calls.lock().unwrap().clone();
     let thinking_content = sink.thinking_content.lock().unwrap().clone();
     let final_sql = sink.final_sql.lock().unwrap().clone();
-    let final_message = sink.final_message.lock().unwrap().clone();
+    let mut final_message = sink.final_message.lock().unwrap().clone();
+
+    // A refused permission request usually explains a thin answer ("I wasn't
+    // able to run that"), so say what was refused rather than leaving the
+    // user to guess. Appended to the response, not raised as an error: the
+    // agent may well have answered the question by another route.
+    let denied = sink.denied_permissions.lock().unwrap().clone();
+    if !denied.is_empty() {
+        let note = permission_refusal_note(&denied);
+        final_message = Some(match final_message {
+            Some(m) if !m.is_empty() => format!("{m}\n\n{note}"),
+            _ => note,
+        });
+    }
 
     let output = classify_ai_output(&tool_calls, final_message.as_deref());
 
     let mut messages: Vec<serde_json::Value> = Vec::new();
     if !thinking_content.is_empty() {
+        // One message holding the whole run's reasoning, so `durationMs` is the
+        // run's duration. The live stream builds finer per-segment messages
+        // (each timed on its own) and the frontend keeps those; this snapshot
+        // is what a reopened notebook restores from, and without a duration its
+        // card would render as still-thinking forever.
         messages.push(serde_json::json!({
             "thinking": thinking_content,
+            "durationMs": duration_ms,
         }));
     }
 
@@ -1021,8 +1254,15 @@ pub fn classify_ai_output(
                 || trimmed.starts_with("EXPLAIN");
             if is_tabular {
                 if let Some(output) = tc.get("output") {
-                    if let Some(table) = output.get("table") {
-                        return serde_json::from_value(table.clone()).unwrap_or(CellOutput::Text(
+                    // `table` is the canonical shape. A card-shaped
+                    // `query_result` is accepted too, so a result that only
+                    // ever passed through the tool card still yields a table.
+                    let table = output.get("table").cloned().or_else(|| {
+                        (output.get("type").and_then(|v| v.as_str()) == Some("query_result"))
+                            .then(|| query_result_as_table(output))
+                    });
+                    if let Some(table) = table {
+                        return serde_json::from_value(table).unwrap_or(CellOutput::Text(
                             TextOutput {
                                 content: String::new(),
                             },
@@ -1203,5 +1443,284 @@ mod notebook_open_tests {
         let err = ai_cell_dml_refusal_error();
         assert!(err.contains("SQL cell"), "{err}");
         assert!(err.contains("DML"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod acp_cell_tests {
+    use super::*;
+    use crate::ai::events::{AgentPermissionPayload, ToolResultStatus};
+
+    fn sink(acp: Option<(crate::ai::acp::AcpState, String)>) -> NotebookAgentSink {
+        NotebookAgentSink {
+            cell_id: "cell-1".into(),
+            channel: tauri::ipc::Channel::new(|_| Ok(())),
+            thinking_content: Arc::new(std::sync::Mutex::new(String::new())),
+            tool_calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+            final_sql: Arc::new(std::sync::Mutex::new(None)),
+            final_message: Arc::new(std::sync::Mutex::new(None)),
+            acp,
+            denied_permissions: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    #[test]
+    fn session_keys_are_scoped_to_the_notebook_and_the_cell() {
+        let a = acp_cell_session_key("/nb/one.ln", "cell-1");
+        assert_ne!(
+            a,
+            acp_cell_session_key("/nb/one.ln", "cell-2"),
+            "two cells in one notebook must not share an ACP session"
+        );
+        assert_ne!(
+            a,
+            acp_cell_session_key("/nb/two.ln", "cell-1"),
+            "the same cell id in two notebooks must not collide"
+        );
+        assert!(a.contains("cell-1") && a.contains("/nb/one.ln"), "{a}");
+    }
+
+    #[tokio::test]
+    async fn a_permission_request_is_recorded_and_refused_not_left_parked() {
+        // The sink's default `permission_request` is a no-op, which would park
+        // the request forever: the agent's turn then blocks until the
+        // 300-second timeout. A notebook cell has no approval card, so the
+        // only honest answer is a prompt refusal.
+        let s = sink(None);
+        s.permission_request(AgentPermissionPayload {
+            conversation_id: "notebook:/nb.ln:cell-1".into(),
+            title: "Run shell command".into(),
+            description: "ls -la".into(),
+            options: vec![],
+        });
+        let denied = s.denied_permissions.lock().unwrap().clone();
+        assert_eq!(denied, vec!["Run shell command".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn refusing_without_an_acp_session_does_not_panic() {
+        // The rig path builds the sink with `acp: None`; a stray request there
+        // must be recorded and dropped, never unwrap a missing session.
+        let s = sink(Some((crate::ai::acp::AcpState::new(), "missing".into())));
+        s.permission_request(AgentPermissionPayload {
+            conversation_id: "missing".into(),
+            title: "Write file".into(),
+            description: String::new(),
+            options: vec![],
+        });
+        assert_eq!(s.denied_permissions.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_refusal_note_names_what_was_asked_for() {
+        let one = permission_refusal_note(&["Run shell command".into()]);
+        assert!(one.contains("1 permission request "), "singular: {one}");
+        assert!(one.contains("Run shell command"), "{one}");
+        let two = permission_refusal_note(&["Run shell command".into(), "Write file".into()]);
+        assert!(two.contains("2 permission requests"), "plural: {two}");
+        assert!(two.contains("Write file"), "{two}");
+    }
+
+    #[test]
+    fn final_sql_is_recovered_from_the_bridges_backfilled_arguments() {
+        // The CLI path announces a shell command with `args: null`, so the
+        // `ToolCalls` arm learns no SQL — the AI Table tab would stay empty.
+        // The bridge's backfilled input on the result is where it shows up.
+        let s = sink(None);
+        s.event(AiEvent::ToolCalls {
+            tools: vec![crate::ai::events::ToolCallInfo {
+                id: "tc1".into(),
+                name: "./lucent-tool run_readonly_query …".into(),
+                args: serde_json::Value::Null,
+            }],
+        });
+        assert!(
+            s.final_sql.lock().unwrap().is_none(),
+            "a shell command carries no SQL"
+        );
+        s.event(AiEvent::ToolResult {
+            id: "tc1".into(),
+            tool: "run_readonly_query".into(),
+            summary: "3 rows".into(),
+            output: None,
+            input: Some(serde_json::json!({"sql": "SELECT 1"})),
+            status: ToolResultStatus::Completed,
+        });
+        assert_eq!(
+            s.final_sql.lock().unwrap().clone(),
+            Some("SELECT 1".to_string()),
+            "the executed SQL must reach the cell's ai_state"
+        );
+    }
+
+    #[test]
+    fn a_cli_path_call_is_backfilled_with_the_real_name_and_arguments() {
+        // The cell's Table tab is classified from the tool's NAME and its
+        // `sql` argument. An ACP agent on the CLI path announces neither —
+        // its call is a shell command with `args: null` — so without this
+        // backfill those cells produced no table at all.
+        let s = sink(None);
+        s.event(AiEvent::ToolCalls {
+            tools: vec![crate::ai::events::ToolCallInfo {
+                id: "tc1".into(),
+                name: "./lucent-tool run_readonly_query 'SELECT 1'".into(),
+                args: serde_json::Value::Null,
+            }],
+        });
+        s.event(AiEvent::ToolResult {
+            id: "tc1".into(),
+            tool: "run_readonly_query".into(),
+            summary: "1 rows".into(),
+            output: Some(serde_json::json!({
+                "type": "query_result",
+                "columns": [{"name": "n", "type": "int4"}],
+                "rows": [[1]],
+                "row_count": 1,
+                "sql": "SELECT 1",
+                "execution_time_ms": 2,
+                "truncated": false,
+            })),
+            input: Some(serde_json::json!({"sql": "SELECT 1"})),
+            status: ToolResultStatus::Completed,
+        });
+
+        let calls = s.tool_calls.lock().unwrap().clone();
+        assert_eq!(calls[0]["name"], "run_readonly_query", "{:?}", calls[0]);
+        assert_eq!(calls[0]["args"]["sql"], "SELECT 1");
+        assert_eq!(calls[0]["summary"], "1 rows");
+        // Both shapes: `type` is what the tool card renders, `table` is what
+        // `classify_ai_output` turns into the cell's Table tab.
+        assert_eq!(calls[0]["output"]["type"], "query_result");
+        assert_eq!(
+            calls[0]["output"]["table"]["columns"][0]["type_name"],
+            "int4"
+        );
+
+        match classify_ai_output(&calls, Some("here you go")) {
+            CellOutput::Table(t) => assert_eq!(t.rows.len(), 1),
+            other => panic!("a backfilled query call must classify as a table: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_object_of_arguments_is_backfilled_like_a_null() {
+        // What actually reached users: an ACP agent announces the call with
+        // `raw_input: {}` — not null — before its arguments are settled. A
+        // guard that only asked `is_null()` read that as "the agent reported
+        // its arguments, and there were none" and refused the backfill, so the
+        // cell's tool card rendered `INPUT {}` next to an output full of rows.
+        let s = sink(None);
+        s.event(AiEvent::ToolCalls {
+            tools: vec![crate::ai::events::ToolCallInfo {
+                id: "tc1".into(),
+                name: "Bash".into(),
+                args: serde_json::json!({}),
+            }],
+        });
+        s.event(AiEvent::ToolResult {
+            id: "tc1".into(),
+            tool: "run_readonly_query".into(),
+            summary: "10 rows".into(),
+            output: None,
+            input: Some(serde_json::json!({"sql": "SELECT 1"})),
+            status: ToolResultStatus::Completed,
+        });
+        let calls = s.tool_calls.lock().unwrap().clone();
+        assert_eq!(
+            calls[0]["args"]["sql"], "SELECT 1",
+            "an empty object carries no arguments, so the bridge's must fill in: {:?}",
+            calls[0]
+        );
+    }
+
+    #[test]
+    fn blank_arguments_are_recognised_whatever_shape_they_arrive_in() {
+        for blank in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!([]),
+            serde_json::json!(""),
+        ] {
+            assert!(args_missing(&blank), "{blank:?} carries no arguments");
+        }
+        for present in [
+            serde_json::json!({"sql": "SELECT 1"}),
+            serde_json::json!(["a"]),
+            serde_json::json!("SELECT 1"),
+            // A value the agent chose to send, not the absence of one.
+            serde_json::json!(0),
+            serde_json::json!(false),
+        ] {
+            assert!(!args_missing(&present), "{present:?} carries arguments");
+        }
+    }
+
+    #[test]
+    fn a_genuine_tool_name_and_arguments_are_never_overwritten() {
+        // The MCP path reports both; the bridge must not clobber them.
+        let s = sink(None);
+        s.event(AiEvent::ToolCalls {
+            tools: vec![crate::ai::events::ToolCallInfo {
+                id: "tc1".into(),
+                name: "run_readonly_query".into(),
+                args: serde_json::json!({"sql": "SELECT 1"}),
+            }],
+        });
+        s.event(AiEvent::ToolResult {
+            id: "tc1".into(),
+            tool: "something_else".into(),
+            summary: "1 rows".into(),
+            output: None,
+            input: Some(serde_json::json!({"sql": "SOMETHING ELSE"})),
+            status: ToolResultStatus::Completed,
+        });
+        let calls = s.tool_calls.lock().unwrap().clone();
+        assert_eq!(calls[0]["name"], "run_readonly_query");
+        assert_eq!(calls[0]["args"]["sql"], "SELECT 1");
+    }
+
+    #[test]
+    fn classify_accepts_a_card_shaped_query_result() {
+        let calls = vec![serde_json::json!({
+            "name": "run_readonly_query",
+            "args": {"sql": "SELECT 1 AS n"},
+            "output": {
+                "type": "query_result",
+                "columns": [{"name": "n", "type": "int4"}],
+                "rows": [[1]],
+                "row_count": 1,
+                "truncated": false,
+            },
+        })];
+        match classify_ai_output(&calls, None) {
+            CellOutput::Table(t) => {
+                assert_eq!(t.columns[0].name, "n");
+                assert_eq!(t.total_count, Some(1));
+            }
+            other => panic!("expected a table: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_id_recognition_separates_names_from_shell_commands() {
+        assert!(is_tool_id("run_readonly_query"));
+        assert!(is_tool_id("search_schema"));
+        assert!(!is_tool_id("./lucent-tool run_readonly_query 'SELECT 1'"));
+        assert!(!is_tool_id("Run Readonly Query"));
+        assert!(!is_tool_id(""));
+    }
+
+    #[test]
+    fn a_non_query_tool_never_sets_final_sql() {
+        let s = sink(None);
+        s.event(AiEvent::ToolResult {
+            id: "tc1".into(),
+            tool: "search_schema".into(),
+            summary: "done".into(),
+            output: None,
+            input: Some(serde_json::json!({"query": "invoices"})),
+            status: ToolResultStatus::Completed,
+        });
+        assert!(s.final_sql.lock().unwrap().is_none());
     }
 }

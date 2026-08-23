@@ -21,6 +21,10 @@ pub struct InstalledAgent {
     pub id: String,
     pub version: String,
     pub launch: LaunchSpec,
+    /// Display name from the registry manifest. `#[serde(default)]` keeps
+    /// older installed.json files (which predate the field) parsing.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// Resolves the manifest's binary triple from the current platform, or `None`
@@ -247,6 +251,7 @@ pub async fn install(
         id: agent.id.clone(),
         version: agent.version.clone(),
         launch: LaunchSpec { cmd, args, env },
+        name: Some(agent.name.clone()),
     };
     let meta = serde_json::to_string_pretty(&installed)
         .map_err(|e| format!("serialize installed: {e}"))?;
@@ -421,6 +426,7 @@ mod tests {
                     args: vec![],
                     env: HashMap::new(),
                 },
+                name: None,
             };
             std::fs::write(
                 dir.join("installed.json"),
@@ -446,6 +452,20 @@ mod tests {
         let one = listed.iter().find(|a| a.id == "agent-one").unwrap();
         assert_eq!(one.version, "1.0.0");
         assert_eq!(one.launch.cmd, "npx");
+    }
+
+    #[test]
+    fn installed_agent_round_trips_name_with_legacy_default() {
+        // Old installed.json files lack the field — they must keep parsing.
+        let legacy =
+            r#"{"id":"opencode","version":"1.2.3","launch":{"cmd":"npx","args":[],"env":{}}}"#;
+        let agent: InstalledAgent = serde_json::from_str(legacy).unwrap();
+        assert_eq!(agent.name, None);
+        assert_eq!(agent.id, "opencode");
+
+        let with_name = r#"{"id":"opencode","version":"1.2.3","launch":{"cmd":"npx","args":[],"env":{}},"name":"OpenCode"}"#;
+        let agent: InstalledAgent = serde_json::from_str(with_name).unwrap();
+        assert_eq!(agent.name.as_deref(), Some("OpenCode"));
     }
 
     // --- Fix round 1 covering tests (archive extension dispatch + zip-slip) ---

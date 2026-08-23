@@ -1,6 +1,9 @@
 import { Channel } from '@tauri-apps/api/core';
 import * as nb from '../ipc/notebook';
 import type { NotebookModel, NotebookEvent } from './notebook.svelte.ts';
+import { appendThinkingChunk, closeOpenThinking } from './notebook-thinking.ts';
+import { mergeToolResult } from './notebook-tool-calls.ts';
+import type { CellToolCall } from './notebook-tool-calls.ts';
 
 export function createNotebookSession(model: NotebookModel) {
   return {
@@ -42,8 +45,6 @@ export function createNotebookSession(model: NotebookModel) {
       // When a tool_call arrives, thinking is finalized (streaming=false).
       // New thinking_chunk after that creates a NEW thinking message.
       let thinkingStreaming = false;
-      // Track thinking phase timing for per-card duration display.
-      let thinkingStartTime = Date.now();
 
       const outputPromise = nb.notebookRunCell(
         model.sessionKey,
@@ -58,61 +59,40 @@ export function createNotebookSession(model: NotebookModel) {
             if (cell.ai_state && cell.ai_state.messages.length === 0) {
               cell.ai_state.messages = [];
             }
-            thinkingStartTime = Date.now();
             break;
           }
           case 'thinking_chunk': {
             if (!cell.ai_state) break;
-            const msgs = [...cell.ai_state.messages];
-            const last = msgs.at(-1);
-            const lastIsThinking =
-              last &&
-              typeof last === 'object' &&
-              last !== null &&
-              'thinking' in last &&
-              typeof (last as Record<string, unknown>).thinking === 'string';
-
-            if (thinkingStreaming && lastIsThinking) {
-              msgs[msgs.length - 1] = {
-                ...(last as Record<string, string>),
-                thinking:
-                  (last as Record<string, string>).thinking +
-                  event.payload.chunk,
-              };
-            } else {
-              msgs.push({
-                thinking: event.payload.chunk,
-                _startedAt: thinkingStartTime,
-              });
-              thinkingStreaming = true;
-            }
-            cell.ai_state.messages = msgs;
+            cell.ai_state.messages = appendThinkingChunk(
+              cell.ai_state.messages,
+              event.payload.chunk,
+              thinkingStreaming,
+              Date.now(),
+            );
+            thinkingStreaming = true;
             break;
           }
           case 'thinking_done':
+            // Closes the trailing segment only. Every earlier one was already
+            // timed when its tool call interrupted it — restamping them all
+            // here is what made every card claim the whole cell's runtime.
             thinkingStreaming = false;
-            if (cell.ai_state && cell.ai_state.messages.length > 0) {
-              cell.ai_state.messages = cell.ai_state.messages.map((m) => {
-                if (
-                  typeof m === 'object' &&
-                  m !== null &&
-                  'thinking' in m &&
-                  '_startedAt' in m
-                ) {
-                  return {
-                    thinking: (m as Record<string, string>).thinking,
-                    durationMs:
-                      Date.now() -
-                      ((m as Record<string, number>)._startedAt ?? 0),
-                  };
-                }
-                return m;
-              });
+            if (cell.ai_state) {
+              cell.ai_state.messages = closeOpenThinking(
+                cell.ai_state.messages,
+                Date.now(),
+              );
             }
             break;
           case 'tool_call': {
             thinkingStreaming = false;
             if (cell.ai_state) {
+              // The reasoning that led to this call ends here, so its own
+              // duration is known now.
+              cell.ai_state.messages = closeOpenThinking(
+                cell.ai_state.messages,
+                Date.now(),
+              );
               cell.ai_state.tool_calls = [
                 ...cell.ai_state.tool_calls,
                 event.payload.tool,
@@ -122,11 +102,10 @@ export function createNotebookSession(model: NotebookModel) {
           }
           case 'tool_result': {
             if (!cell.ai_state) break;
-            const { id, summary, output } = event.payload;
-            cell.ai_state.tool_calls = cell.ai_state.tool_calls.map((tc) =>
-              (tc as Record<string, unknown>).id === id
-                ? { ...(tc as Record<string, unknown>), summary, output }
-                : tc,
+            const { id, tool, summary, input, output } = event.payload;
+            cell.ai_state.tool_calls = mergeToolResult(
+              cell.ai_state.tool_calls as CellToolCall[],
+              { id, tool, summary, input, output },
             );
             break;
           }

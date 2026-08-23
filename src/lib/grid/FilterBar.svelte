@@ -236,10 +236,10 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    height: 24px;
+    height: 22px;
     padding: 0 var(--space-2);
     border: 1px solid var(--border);
-    border-radius: var(--radius-full);
+    border-radius: var(--radius-sm);
     background: var(--bg-surface);
     color: var(--text-secondary);
     font-size: var(--text-sm);

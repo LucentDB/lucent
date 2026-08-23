@@ -6,7 +6,7 @@
 //! DML approval hold), and the `BridgeClient` used by the MCP binary's tests.
 
 use crate::ai::acp::wire;
-use crate::ai::events::{AiEvent, DmlApprovalPayload};
+use crate::ai::events::{AiEvent, DmlApprovalPayload, ToolResultStatus};
 use crate::ai::tools::{AiToolContext, LucentToolEnum, ToolError, ToolOutput};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -123,6 +123,9 @@ impl BridgeHandle {
 pub struct PendingDml {
     pub sql: String,
     pub tx: tokio::sync::oneshot::Sender<Result<DmlOutcome, String>>,
+    /// When the preview was staged — `execute_dml` refuses approvals older
+    /// than `DML_STALE_AFTER` (spec D6), mirroring the rig path's E6 guard.
+    pub staged_at: std::time::Instant,
 }
 
 /// What a user-approved DML execution produced.
@@ -164,22 +167,55 @@ pub async fn serve(
     Ok(())
 }
 
-/// Windows variant: the pipe server is created pre-bound; `connect` waits for
-/// the client.
+/// Windows variant: the pipe server is created pre-bound (first instance);
+/// every subsequent client gets a fresh instance via `ServerOptions::create`
+/// (tokio's `NamedPipeServer` is single-connection), mirroring the Unix
+/// accept loop so persistent MCP stdio processes AND sequential/parallel
+/// `lucent-tool.cmd` CLI calls all work during a session (spec D5).
 #[cfg(windows)]
 pub async fn serve(
-    listener: tokio::net::windows::named_pipe::NamedPipeServer,
+    name: String,
+    first: tokio::net::windows::named_pipe::NamedPipeServer,
     token: String,
     executor: Arc<dyn ToolExecutor>,
     sink: Arc<dyn crate::ai::agent::AgentSink>,
     handle: Arc<BridgeHandle>,
 ) -> Result<(), String> {
-    let mut server = listener;
-    if server.connect().await.is_ok() {
-        let (reader, writer) = tokio::io::split(server);
-        let _ = serve_io(reader, writer, token, executor, sink, handle).await;
+    use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+    use tokio::time::{sleep, Duration};
+
+    // ERROR_PIPE_BUSY: every instance is connected; back off and retry.
+    const ERROR_PIPE_BUSY: i32 = 231;
+
+    let mut pending: Option<NamedPipeServer> = Some(first);
+    loop {
+        let mut instance = match pending.take() {
+            Some(instance) => instance,
+            None => match ServerOptions::new().create(&name) {
+                Ok(instance) => instance,
+                Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                    sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+                Err(e) => return Err(format!("create pipe instance: {e}")),
+            },
+        };
+        match instance.connect().await {
+            Ok(()) => {
+                let (reader, writer) = tokio::io::split(instance);
+                let token = token.clone();
+                let executor = executor.clone();
+                let sink = sink.clone();
+                let handle = handle.clone();
+                tokio::spawn(async move {
+                    let _ = serve_io(reader, writer, token, executor, sink, handle).await;
+                });
+            }
+            Err(e) => {
+                log::debug!("bridge pipe connect failed: {e}");
+            }
+        }
     }
-    Ok(())
 }
 
 async fn serve_io<R, W>(
@@ -237,6 +273,10 @@ pub(crate) async fn dispatch(
     tool: &str,
     args: serde_json::Value,
 ) -> wire::BridgeResponse {
+    // The card's Input section is fed from here, not from the agent's own
+    // report: a CLI-path call arrives as an opaque shell command, so the
+    // arguments the bridge actually executed are the only real ones.
+    let input = args.clone();
     match executor.call(tool, args).await {
         Ok(ToolOutput::DmlPreview {
             sql,
@@ -256,6 +296,7 @@ pub(crate) async fn dispatch(
             *slot = Some(PendingDml {
                 sql: sql.clone(),
                 tx,
+                staged_at: std::time::Instant::now(),
             });
             drop(slot);
             sink.dml_approval(DmlApprovalPayload {
@@ -300,7 +341,13 @@ pub(crate) async fn dispatch(
             sink.event(AiEvent::ToolResult {
                 id: format!("acp-{id}"),
                 tool: tool.to_string(),
-                summary: text_summary.clone(),
+                // Short and uniform, exactly as the rig loop does it
+                // (agent.rs): the card header is a status column, not a
+                // content preview. `text_summary` — SQL echo plus a Markdown
+                // row preview — is the model's payload and rides the bridge
+                // response below; putting it here would fill the header with
+                // table pipes while the grid renders the same rows again.
+                summary: format!("{row_count} rows"),
                 output: Some(serde_json::json!({
                     "type": "query_result",
                     "columns": cols,
@@ -310,6 +357,8 @@ pub(crate) async fn dispatch(
                     "execution_time_ms": execution_time_ms,
                     "truncated": truncated,
                 })),
+                input: Some(input),
+                status: ToolResultStatus::Completed,
             });
             sink.event(AiEvent::QueryResult {
                 columns,
@@ -323,10 +372,24 @@ pub(crate) async fn dispatch(
                 output: serde_json::json!({ "text": text_summary }),
             }
         }
-        Ok(ToolOutput::Text { content }) => wire::BridgeResponse::Ok {
-            id,
-            output: serde_json::json!({ "text": content }),
-        },
+        Ok(ToolOutput::Text { content }) => {
+            // `search_schema` / `get_objects_info` land here. The rig loop
+            // gives them a card too (summary "done", structured text body);
+            // without this the ACP card fell back to the agent's own echo of
+            // the CLI output with a `null` Input.
+            sink.event(AiEvent::ToolResult {
+                id: format!("acp-{id}"),
+                tool: tool.to_string(),
+                summary: "done".into(),
+                output: Some(serde_json::json!({ "type": "text", "data": content.clone() })),
+                input: Some(input),
+                status: ToolResultStatus::Completed,
+            });
+            wire::BridgeResponse::Ok {
+                id,
+                output: serde_json::json!({ "text": content }),
+            }
+        }
         Err(e) => wire::BridgeResponse::Err {
             id,
             error: e.to_string(),
@@ -641,6 +704,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn card_summary_stays_short_and_input_is_backfilled() {
+        // A CLI-path agent reports the helper's stdout — the SQL echo plus the
+        // Markdown row preview — as its tool result. The card header is a
+        // status column, so the bridge must publish the short form and let the
+        // structured payload render those rows once, as a grid.
+        let markdown_blob = "Query: select 1\nResult: 3 rows in 1ms\n\n             **Preview (first 3 of 3 rows):**\n\n| x |\n|---|\n| 1 |\n| 2 |\n| 3 |\n";
+        let dir = tempfile::tempdir().unwrap();
+        let (listener, path) = bind_listener(&dir);
+        let token = "tok123".to_string();
+        let script = vec![(
+            "run_readonly_query".into(),
+            serde_json::json!({"sql": "select 1"}),
+            Ok(ToolOutput::QueryResult {
+                text_summary: markdown_blob.into(),
+                columns: vec![crate::ai::events::ColumnMeta {
+                    name: "x".into(),
+                    data_type: "INTEGER".into(),
+                }],
+                rows: vec![
+                    vec![serde_json::json!(1)],
+                    vec![serde_json::json!(2)],
+                    vec![serde_json::json!(3)],
+                ],
+                row_count: 3,
+                sql: "select 1".into(),
+                execution_time_ms: 1,
+                truncated: false,
+            }),
+        )];
+        let executor: Arc<dyn ToolExecutor> = Arc::new(ScriptedExecutor::new(script));
+        let sink = Arc::new(RecordingSink::new());
+        let task = tokio::spawn(serve(
+            listener,
+            token.clone(),
+            executor,
+            sink.clone(),
+            Arc::new(BridgeHandle::new("conv-1")),
+        ));
+        let mut sock = tokio::net::UnixStream::connect(&path).await.unwrap();
+        wire::write_hello(&mut sock, &token).await.unwrap();
+        wire::write_request(
+            &mut sock,
+            &wire::BridgeRequest::Call {
+                id: 7,
+                tool: "run_readonly_query".into(),
+                args: serde_json::json!({"sql": "select 1"}),
+            },
+        )
+        .await
+        .unwrap();
+        let mut reader = tokio::io::BufReader::new(sock);
+        let resp = wire::read_response(&mut reader).await.unwrap().unwrap();
+        // The model still receives the full preview — that is its payload.
+        match resp {
+            wire::BridgeResponse::Ok { output, .. } => {
+                assert_eq!(output["text"], markdown_blob)
+            }
+            wire::BridgeResponse::Err { error, .. } => panic!("expected Ok: {error}"),
+        }
+        drop(reader);
+        task.abort();
+
+        let events = sink.events.lock().unwrap();
+        let tool_result = events
+            .iter()
+            .find(|e| matches!(e, crate::ai::events::AiEvent::ToolResult { .. }))
+            .expect("structured ToolResult emitted");
+        if let crate::ai::events::AiEvent::ToolResult { summary, input, .. } = tool_result {
+            assert_eq!(summary, "3 rows", "the card header takes the short form");
+            assert!(
+                !summary.contains('|'),
+                "the Markdown preview must not reach the header: {summary}"
+            );
+            assert_eq!(
+                input.as_ref().expect("arguments backfilled")["sql"],
+                "select 1",
+                "the bridge saw the real arguments; the agent's report had none"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn text_output_also_gets_a_card() {
+        // `search_schema` / `get_objects_info` return Text. Without a
+        // structured event the card fell back to the agent's own echo with a
+        // `null` Input — the rig loop gives these a card, so the bridge does too.
+        let dir = tempfile::tempdir().unwrap();
+        let (listener, path) = bind_listener(&dir);
+        let token = "tok123".to_string();
+        let script = vec![(
+            "search_schema".into(),
+            serde_json::json!({"query": "invoices"}),
+            Ok(ToolOutput::Text {
+                content: "orders.total_amount (numeric)".into(),
+            }),
+        )];
+        let executor: Arc<dyn ToolExecutor> = Arc::new(ScriptedExecutor::new(script));
+        let sink = Arc::new(RecordingSink::new());
+        let task = tokio::spawn(serve(
+            listener,
+            token.clone(),
+            executor,
+            sink.clone(),
+            Arc::new(BridgeHandle::new("conv-1")),
+        ));
+        let mut sock = tokio::net::UnixStream::connect(&path).await.unwrap();
+        wire::write_hello(&mut sock, &token).await.unwrap();
+        wire::write_request(
+            &mut sock,
+            &wire::BridgeRequest::Call {
+                id: 2,
+                tool: "search_schema".into(),
+                args: serde_json::json!({"query": "invoices"}),
+            },
+        )
+        .await
+        .unwrap();
+        let mut reader = tokio::io::BufReader::new(sock);
+        let resp = wire::read_response(&mut reader).await.unwrap().unwrap();
+        match resp {
+            wire::BridgeResponse::Ok { output, .. } => {
+                assert_eq!(output["text"], "orders.total_amount (numeric)")
+            }
+            wire::BridgeResponse::Err { error, .. } => panic!("expected Ok: {error}"),
+        }
+        drop(reader);
+        task.abort();
+
+        let events = sink.events.lock().unwrap();
+        let tool_result = events
+            .iter()
+            .find(|e| matches!(e, crate::ai::events::AiEvent::ToolResult { .. }))
+            .expect("Text output emits a ToolResult too");
+        if let crate::ai::events::AiEvent::ToolResult {
+            tool,
+            summary,
+            output,
+            input,
+            ..
+        } = tool_result
+        {
+            assert_eq!(tool, "search_schema");
+            assert_eq!(summary, "done", "matches the rig loop's Text summary");
+            let o = output.as_ref().expect("structured text body");
+            assert_eq!(o["type"], "text");
+            assert_eq!(o["data"], "orders.total_amount (numeric)");
+            assert_eq!(input.as_ref().expect("arguments")["query"], "invoices");
+        }
+    }
+
+    #[tokio::test]
     async fn dml_hold_waits_for_approval_then_resolves() {
         let dir = tempfile::tempdir().unwrap();
         let (listener, path) = bind_listener(&dir);
@@ -814,6 +1028,7 @@ mod tests {
         *handle.pending_dml.lock().await = Some(PendingDml {
             sql: "first".into(),
             tx,
+            staged_at: std::time::Instant::now(),
         });
         let resp = dispatch(
             &executor,
@@ -1038,5 +1253,94 @@ mod tests {
         assert!(err.contains("read-only"), "err: {err}");
         drop(client);
         serve_task.abort(); // serve is a long-lived accept loop; it never returns on its own
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_serve_accepts_multiple_sequential_clients() {
+        use std::time::Duration;
+        use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+
+        let name = format!(r"\\.\pipe\lucent-bridge-test-{}", std::process::id());
+        let first = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&name)
+            .expect("first pipe instance");
+        let token = "tok-win".to_string();
+        let executor: Arc<dyn ToolExecutor> = Arc::new(ScriptedExecutor::new(vec![
+            (
+                "echo".into(),
+                serde_json::json!({}),
+                Ok(ToolOutput::Text {
+                    content: "one".into(),
+                }),
+            ),
+            (
+                "echo".into(),
+                serde_json::json!({}),
+                Ok(ToolOutput::Text {
+                    content: "two".into(),
+                }),
+            ),
+        ]));
+        let sink = Arc::new(RecordingSink::new());
+        let handle = Arc::new(BridgeHandle::new("conv-1"));
+        let serve_task = tokio::spawn(serve(
+            name.clone(),
+            first,
+            token.clone(),
+            executor,
+            sink.clone(),
+            handle.clone(),
+        ));
+
+        // Client 1: hello + one call, then close.
+        {
+            let mut client = ClientOptions::new().open(&name).expect("client 1 connects");
+            wire::write_hello(&mut client, &token).await.unwrap();
+            wire::write_request(
+                &mut client,
+                &wire::BridgeRequest::Call {
+                    id: 1,
+                    tool: "echo".into(),
+                    args: serde_json::json!({}),
+                },
+            )
+            .await
+            .unwrap();
+            let mut reader = tokio::io::BufReader::new(client);
+            let resp = wire::read_response(&mut reader).await.unwrap().unwrap();
+            match resp {
+                wire::BridgeResponse::Ok { output, .. } => {
+                    assert_eq!(output["text"], "one");
+                }
+                other => panic!("expected Ok, got {other:?}"),
+            }
+            drop(reader); // close client 1
+        }
+
+        // Client 2: the serve loop must have created a second instance.
+        let mut client = ClientOptions::new().open(&name).expect("client 2 connects");
+        wire::write_hello(&mut client, &token).await.unwrap();
+        wire::write_request(
+            &mut client,
+            &wire::BridgeRequest::Call {
+                id: 2,
+                tool: "echo".into(),
+                args: serde_json::json!({}),
+            },
+        )
+        .await
+        .unwrap();
+        let mut reader = tokio::io::BufReader::new(client);
+        let resp = wire::read_response(&mut reader).await.unwrap().unwrap();
+        match resp {
+            wire::BridgeResponse::Ok { output, .. } => {
+                assert_eq!(output["text"], "two");
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+        drop(reader);
+        serve_task.abort(); // long-lived accept loop
     }
 }

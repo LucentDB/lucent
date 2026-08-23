@@ -549,7 +549,9 @@ pub async fn connect(
         resolved.port().unwrap_or(0),
         resolved.get("database").unwrap_or(""),
     );
-    connect_impl(state, resolved).instrument(span).await
+    connect_impl(state, resolved, connection_id.as_deref())
+        .instrument(span)
+        .await
 }
 
 /// Build a driver config from a saved profile plus its keychain secret.
@@ -594,6 +596,7 @@ pub(crate) async fn cached_password(
 async fn connect_impl(
     state: State<'_, AppState>,
     resolved: ConnectionConfig,
+    profile_id: Option<&str>,
 ) -> Result<ConnectResult, CommandError> {
     log::info!(
         "Connecting to database {:?}@{}/{}",
@@ -725,11 +728,15 @@ async fn connect_impl(
             .unwrap_or(""),
         resolved.get("database").unwrap_or("")
     );
-    state
+    if let Ok(tree) = state
         .schema_cache
         .refresh(conn_id.clone(), &client, worker_conn_id)
         .await
-        .ok();
+    {
+        if let Some(pid) = profile_id {
+            state.schema_cache.set(pid.to_string(), tree);
+        }
+    }
 
     // Build semantic schema index — Tier-1 harvest inline (~5–50ms), Tier-2
     // enriched in the background by IndexingManager. Non-blocking failure,
@@ -2055,8 +2062,14 @@ async fn build_system_prompt(
         .map(|g| crate::ai::mschema::select_tier(g).0)
         .unwrap_or(crate::ai::mschema::ContextTier::Pull);
     log::info!("Tier selected: {:?}", tier);
-    let prompt = if let Some(tree) = state.schema_cache.get(connection_id) {
-        let capabilities = state.capabilities().await;
+    let capabilities = state.capabilities().await;
+    let current_db = state.current_database.lock().await.clone();
+    let prompt = if let Some(mut tree) = state.schema_cache.get(connection_id) {
+        if let Some(db) = &current_db {
+            if tree.database_name.is_empty() || tree.database_name == connection_id {
+                tree.database_name = db.clone();
+            }
+        }
         let p = crate::ai::context::build_system_prompt(
             &tree,
             graph_guard.as_ref(),
@@ -2068,13 +2081,14 @@ async fn build_system_prompt(
         log::info!(
             "Schema tree expired for {connection_id}; rendering system prompt from in-memory graph"
         );
-        let db_name = connection_id
-            .rsplit('/')
-            .next()
-            .unwrap_or(connection_id)
-            .to_string();
-        let tree = crate::ai::context::tree_from_graph(db_name, g);
-        let capabilities = state.capabilities().await;
+        let db_name =
+            current_db.unwrap_or_else(|| crate::ai::context::parse_database_name(connection_id));
+        let version = state
+            .client_handle()
+            .await
+            .and_then(|c| c.server_info.map(|s| s.version))
+            .unwrap_or_default();
+        let tree = crate::ai::context::tree_from_graph_with_version(db_name, version, g);
         crate::ai::context::build_system_prompt(&tree, Some(g), capabilities.as_ref())
     } else {
         log::warn!(
@@ -2104,7 +2118,7 @@ pub async fn ensure_reranker(state: &AppState) {
 /// set, else the rig `DatabaseAgent`. Pure so the branch is unit-testable
 /// (the D1 seam test). The `provider` is only ever built on the rig path —
 /// ACP agents own their auth.
-fn pick_driver(
+pub(crate) fn pick_driver(
     acp: &Option<crate::ai::config::AcpAgentConfig>,
     provider: Option<Arc<dyn LlmProvider>>,
     tools: Vec<crate::ai::tools::LucentToolEnum>,
@@ -2524,6 +2538,18 @@ pub async fn close_conversation(
     Ok(())
 }
 
+const DML_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The DML preview staleness window. `LUCENT_DML_STALE_AFTER_SECS` overrides
+/// for tests (a 300s sleep is not a test).
+fn dml_stale_after() -> std::time::Duration {
+    std::env::var("LUCENT_DML_STALE_AFTER_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(DML_STALE_AFTER)
+}
+
 /// Executes the staged DML on the worker (session B), returns the REAL row
 /// count, and resumes the agent on the conversation's channel so it can
 /// confirm the outcome (C1). The frontend signature stays
@@ -2555,6 +2581,15 @@ pub async fn execute_dml(
             .get(&conversation_id)
             .cloned()
             .ok_or("No pending DML for this conversation (bridge not active)")?;
+        // E6 parity (spec D6): an approval minutes after the preview may no
+        // longer match the data — refuse and clear the hold.
+        if reject_stale_acp_dml(&handle, dml_stale_after()).await {
+            return Err(
+                "The pending DML was staged more than 5 minutes ago. Ask the assistant \
+                 to re-run the preview and approve again."
+                    .into(),
+            );
+        }
         let conn_id = *state.ai_connection_id.lock().await;
         let conn_id = conn_id
             .or(*state.current_connection_id.lock().await)
@@ -2576,8 +2611,6 @@ pub async fn execute_dml(
         return Ok(serde_json::json!({ "rows_affected": rows_affected, "sql": sql }));
     }
 
-    const DML_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
-
     let (staged_sql, staged_at) = conv
         .lock()
         .await
@@ -2587,7 +2620,7 @@ pub async fn execute_dml(
     // E6: a statement staged minutes ago and approved now may no longer
     // match the data it was previewed against. Refuse (after clearing the
     // state, so the conversation is not stuck) and ask for a re-run.
-    if staged_at.elapsed() > DML_STALE_AFTER {
+    if staged_at.elapsed() > dml_stale_after() {
         return Err(
             "The pending DML was staged more than 5 minutes ago. Ask the assistant \
              to re-run the preview and approve again."
@@ -2699,9 +2732,39 @@ where
 pub(crate) async fn reject_acp_dml(
     handle: &Arc<crate::ai::acp::bridge::BridgeHandle>,
 ) -> Result<(), String> {
+    reject_acp_dml_with(handle, "DML rejected by user").await
+}
+
+pub(crate) async fn reject_acp_dml_with(
+    handle: &Arc<crate::ai::acp::bridge::BridgeHandle>,
+    reason: &str,
+) -> Result<(), String> {
     let pending = take_pending_dml(handle).await?;
-    let _ = pending.tx.send(Err("DML rejected by user".into()));
+    let _ = pending.tx.send(Err(reason.into()));
     Ok(())
+}
+
+/// Rejects the held ACP DML when its preview is older than `stale_after`
+/// (spec D6 — parity with the rig path's E6 guard). Returns true when the
+/// hold was rejected; the caller surfaces the staleness error.
+pub(crate) async fn reject_stale_acp_dml(
+    handle: &Arc<crate::ai::acp::bridge::BridgeHandle>,
+    stale_after: std::time::Duration,
+) -> bool {
+    let stale = {
+        let slot = handle.pending_dml.lock().await;
+        slot.as_ref()
+            .map(|p| p.staged_at.elapsed() > stale_after)
+            .unwrap_or(false)
+    };
+    if stale {
+        let _ = reject_acp_dml_with(
+            handle,
+            "DML rejected: the preview is stale (over 5 minutes old) — ask the assistant to re-run the preview and approve again.",
+        )
+        .await;
+    }
+    stale
 }
 
 /// The conversation's ACP session id (the permission FIFO is keyed by
@@ -3349,6 +3412,7 @@ mod acp_dml_branch_tests {
         handle.pending_dml.lock().await.replace(PendingDml {
             sql: "UPDATE t SET a = 1".into(),
             tx,
+            staged_at: std::time::Instant::now(),
         });
         let conv = Arc::new(Mutex::new(ConversationState::new("conn-1".into())));
 
@@ -3387,6 +3451,7 @@ mod acp_dml_branch_tests {
         handle.pending_dml.lock().await.replace(PendingDml {
             sql: "UPDATE t SET a = 1".into(),
             tx,
+            staged_at: std::time::Instant::now(),
         });
 
         reject_acp_dml(&handle).await.expect("reject succeeds");
@@ -3403,14 +3468,52 @@ mod acp_dml_branch_tests {
     }
 
     #[tokio::test]
+    async fn stale_acp_dml_is_rejected_before_execution() {
+        let handle = Arc::new(crate::ai::acp::bridge::BridgeHandle::new("conv-1"));
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        // Staged ten minutes ago.
+        *handle.pending_dml.lock().await = Some(crate::ai::acp::bridge::PendingDml {
+            sql: "insert into t values (1)".into(),
+            tx,
+            staged_at: std::time::Instant::now() - std::time::Duration::from_secs(600),
+        });
+        let rejected = reject_stale_acp_dml(&handle, std::time::Duration::from_secs(300)).await;
+        assert!(rejected, "a stale hold is rejected");
+        assert!(
+            handle.pending_dml.lock().await.is_none(),
+            "the slot clears after the stale rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_acp_dml_is_not_rejected() {
+        let handle = Arc::new(crate::ai::acp::bridge::BridgeHandle::new("conv-1"));
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        *handle.pending_dml.lock().await = Some(crate::ai::acp::bridge::PendingDml {
+            sql: "insert into t values (1)".into(),
+            tx,
+            staged_at: std::time::Instant::now(),
+        });
+        let rejected = reject_stale_acp_dml(&handle, std::time::Duration::from_secs(300)).await;
+        assert!(!rejected, "a fresh hold executes");
+        assert!(
+            handle.pending_dml.lock().await.is_some(),
+            "the hold stays for the user's decision"
+        );
+    }
+
+    #[tokio::test]
     async fn respond_agent_permission_resolves_via_conversation_session() {
         let state = AppState::new();
         let entry = Arc::new(SessionEntry {
+            agent_id: "stub".into(),
+            generation: 0,
             session_id: "s1".into(),
             bridge: Arc::new(BridgeHandle::new("conv-1")),
             tools: Arc::new(crate::ai::acp::bridge::BridgeConnection::default()),
             first_prompt: std::sync::atomic::AtomicBool::new(false),
             tools_notice: std::sync::atomic::AtomicBool::new(false),
+            correlator: Arc::new(crate::ai::acp::correlator::CorrelatorState::default()),
             _endpoint_dir: None,
         });
         state

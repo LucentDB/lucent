@@ -16,6 +16,20 @@ pub enum NotebookEvent {
         cell_id: String,
         tool: serde_json::Value,
     },
+    /// One tool call finished. Streamed so an AI cell's tool card fills in
+    /// live — the same four-state model the chat pane uses — instead of
+    /// staying a bare "Done" row until `cell_done` lands. `input` carries the
+    /// arguments the tool really ran with, which is the only source when the
+    /// agent announced a shell command (the ACP CLI path).
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        cell_id: String,
+        id: String,
+        tool: String,
+        summary: String,
+        input: Option<serde_json::Value>,
+        output: Option<serde_json::Value>,
+    },
     #[serde(rename = "cell_done")]
     CellDone {
         cell_id: String,

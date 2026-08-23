@@ -7,6 +7,7 @@
   import Icon from '../icons/Icon.svelte';
   import { aiConfig } from '../../stores/ai-config.svelte.ts';
   import { history } from '../../stores/history.svelte.ts';
+  import { historyQuery } from '../../queries/history.ts';
   import { schemaSummary } from '../../stores/schema-summary.svelte.ts';
   import { buildSuggestions, CAPABILITIES } from './suggestions.ts';
   import {
@@ -45,12 +46,16 @@
     ),
   );
 
+  // The query mounts with the landing and shares the cache with HistoryPanel,
+  // so no manual lazy-fetch is needed here any more.
+  const entries = historyQuery(() => history.filter);
+
   // Browsing a table re-runs the same statement per page, so raw history is
   // often one query repeated — deduped before slicing, or the list would be
   // three identical rows.
   const recents = $derived(
-    connected && !history.error
-      ? dedupeBySql(history.entries).slice(0, RECENT_LIMIT)
+    connected && !entries.error
+      ? dedupeBySql(entries.data ?? []).slice(0, RECENT_LIMIT)
       : [],
   );
 
@@ -60,19 +65,6 @@
     if (connectionName) parts.push(connectionName);
     if (database && database !== connectionName) parts.push(database);
     return parts;
-  });
-
-  // HistoryPanel loads history in every other path, so fetch here only when
-  // the landing is the first thing a user sees. The guard is a plain boolean,
-  // not $state: a successful load that returns zero rows would otherwise
-  // re-satisfy this condition and loop forever.
-  let historyRequested = false;
-  $effect(() => {
-    if (!connected || historyRequested) return;
-    if (!history.loading && history.entries.length === 0) {
-      historyRequested = true;
-      history.loadHistory();
-    }
   });
 </script>
 
@@ -114,23 +106,19 @@
       {/if}
     </div>
 
-    <div class="hero" style="--i: 1">
-      <div class="mark-wrap">
-        <div class="mark"><Icon name="sparkle" size={22} /></div>
-      </div>
-      <h1>AI Copilot</h1>
+    <!-- No mark and no title. This panel is resizable down to 280px, where a
+         42px badge, an h1 and a centred two-line subtitle pushed the input
+         and every suggestion below the fold. The input is the thing you came
+         for, so it goes first, and one line says what it will do. -->
+    <p class="intro" style="--i: 1">
       {#if connected}
-        <p>
-          Ask about {#if database}<strong>{database}</strong>{:else}your
-            database{/if} in plain English — it reads your schema and writes the SQL.
-        </p>
+        Ask about {#if database}<strong>{database}</strong>{:else}your database{/if}.
+        Lucent reads the schema and writes the SQL.
       {:else}
-        <p>
-          Connect a database and the copilot will read your schema, write the
-          SQL, and run it for you.
-        </p>
+        Connect a database and Lucent will read your schema, write the SQL, and
+        run it for you.
       {/if}
-    </div>
+    </p>
 
     <div class="composer" style="--i: 2">
       <ChatInput
@@ -146,17 +134,15 @@
       />
     </div>
 
-    <div class="columns" style="--i: 3">
+    <div class="columns" class:single={recents.length === 0} style="--i: 3">
       <section class="col">
         <h2 class="col-label">
-          <span>{connected ? 'Try asking' : 'What it can do'}</span>
-          <span class="rule" aria-hidden="true"></span>
+          {connected ? 'Try asking' : 'What it can do'}
         </h2>
         <div class="items">
           {#if connected}
             {#each suggestions as s (s.prompt)}
               <button class="item chip" onclick={() => onSend(s.prompt)}>
-                <span class="tile"><Icon name={s.icon} size={13} /></span>
                 <span class="item-label">{s.label}</span>
                 <span class="go" aria-hidden="true">
                   <Icon name="arrow" size={13} />
@@ -166,7 +152,6 @@
           {:else}
             {#each CAPABILITIES as c (c.text)}
               <div class="item capability">
-                <span class="tile"><Icon name={c.icon} size={13} /></span>
                 <span class="item-label wrap">{c.text}</span>
               </div>
             {/each}
@@ -176,10 +161,7 @@
 
       {#if recents.length > 0}
         <section class="col recents">
-          <h2 class="col-label">
-            <span>Recent queries</span>
-            <span class="rule" aria-hidden="true"></span>
-          </h2>
+          <h2 class="col-label">Recent queries</h2>
           <div class="items">
             {#each recents as entry (entry.id)}
               {@const parts = splitExcerpt(excerptSql(entry.sql))}
@@ -189,7 +171,6 @@
                 onclick={() => onSend(explainPrompt(entry))}
                 title={entry.sql}
               >
-                <span class="tile"><Icon name="replay" size={13} /></span>
                 <span class="recent-text">
                   <span class="sql">
                     {#if parts.verb}<span class="verb">{parts.verb}</span>{/if}
@@ -290,8 +271,8 @@
     font-family: var(--font-mono);
     font-size: 10px;
     color: var(--text-muted);
-    padding: 2px 6px;
-    border-radius: var(--radius-full);
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
     background: var(--bg-subtle);
     white-space: nowrap;
     overflow: hidden;
@@ -316,55 +297,18 @@
     color: var(--text);
   }
 
-  /* ── Hero ── */
-  .hero {
-    text-align: center;
-  }
-  /* A faint accent bloom gives the mark presence without a heavy container. */
-  .mark-wrap {
-    display: flex;
-    justify-content: center;
-    margin-bottom: 12px;
-    background: radial-gradient(
-      circle at center,
-      var(--accent-soft) 0%,
-      transparent 68%
-    );
-    padding: 10px 0;
-  }
-  .mark {
-    width: 42px;
-    height: 42px;
-    border-radius: 13px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #fff;
-    background: linear-gradient(
-      145deg,
-      var(--accent) 0%,
-      var(--accent-hover) 100%
-    );
-    box-shadow:
-      var(--shadow-md),
-      inset 0 1px 0 rgba(255, 255, 255, 0.3);
-  }
-  .hero h1 {
-    font-size: var(--text-xl);
-    font-weight: var(--weight-bold);
-    letter-spacing: -0.02em;
-    margin: 0 0 5px;
-    color: var(--text);
-  }
-  .hero p {
+  /* ── Intro ── */
+  /* One line, left aligned, at body size. It orients without competing with
+     the input directly beneath it. */
+  .intro {
+    margin: 0;
     color: var(--text-secondary);
-    font-size: var(--text-sm);
-    line-height: 1.55;
-    margin: 0 auto;
-    max-width: 44ch;
+    font-size: var(--text-base);
+    line-height: 1.5;
+    max-width: 52ch;
     text-wrap: pretty;
   }
-  .hero strong {
+  .intro strong {
     color: var(--text);
     font-weight: var(--weight-semibold);
   }
@@ -379,23 +323,11 @@
   .col {
     min-width: 0;
   }
-  /* Label plus hairline: an editorial divider that separates sections without
-     boxing them in. */
   .col-label {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 10px;
+    font-size: var(--text-xs);
     color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.07em;
-    font-weight: var(--weight-semibold);
-    margin: 0 0 9px;
-  }
-  .col-label .rule {
-    flex: 1;
-    height: 1px;
-    background: var(--border);
+    font-weight: var(--weight-medium);
+    margin: 0 0 6px;
   }
   .items {
     display: flex;
@@ -408,11 +340,10 @@
     align-items: center;
     gap: 9px;
     width: 100%;
-    padding: 9px 10px;
-    border-radius: 10px;
+    padding: 7px 10px;
+    border-radius: var(--radius-sm);
     border: 1px solid var(--border);
-    background: var(--bg-surface);
-    box-shadow: var(--shadow-sm);
+    background: var(--bg-elevated);
     font-size: var(--text-sm);
     color: var(--text-secondary);
     text-align: left;
@@ -428,37 +359,18 @@
   .item.recent:hover {
     border-color: var(--accent);
     color: var(--text);
-    box-shadow: var(--shadow-md);
-    transform: translateY(-1px);
+    background: var(--bg-hover);
   }
   .item.chip:active,
   .item.recent:active {
-    transform: none;
-    box-shadow: var(--shadow-sm);
+    background: var(--bg-subtle);
   }
-  /* Capabilities are informational, not actionable — no shadow, no lift. */
+  /* Capabilities are informational, not actionable. */
   .item.capability {
     background: transparent;
     border-color: var(--border-light);
-    box-shadow: none;
     cursor: default;
     align-items: flex-start;
-  }
-
-  .tile {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 22px;
-    height: 22px;
-    flex-shrink: 0;
-    border-radius: 7px;
-    background: var(--accent-soft);
-    color: var(--accent);
-  }
-  .item.recent.failed .tile {
-    background: var(--danger-bg);
-    color: var(--danger);
   }
 
   .item-label {
@@ -546,22 +458,16 @@
       grid-template-columns: 1fr 1fr;
       gap: 28px;
     }
-    .mark {
-      width: 46px;
-      height: 46px;
-      border-radius: 14px;
-    }
-    .hero h1 {
-      font-size: var(--text-2xl);
-    }
-    .hero p {
-      font-size: var(--text-md);
+    /* Nothing to sit beside: the suggestions take the whole width rather
+       than leaving a column of dead space. */
+    .columns.single {
+      grid-template-columns: 1fr;
     }
   }
 
   /* ── Entry motion ── */
   .context,
-  .hero,
+  .intro,
   .composer,
   .columns {
     animation: rise 200ms ease-out backwards;
@@ -579,7 +485,7 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .context,
-    .hero,
+    .intro,
     .composer,
     .columns {
       animation: none;

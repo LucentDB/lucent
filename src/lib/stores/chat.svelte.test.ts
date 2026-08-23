@@ -15,6 +15,7 @@ import {
   demoteContentToNote,
   addToolCallSegments,
   updateToolResult,
+  markStoppedToolCalls,
   finalizeSession,
   setSessionExpanded,
 } from './chat.svelte.ts';
@@ -192,6 +193,99 @@ describe('addToolCallSegments and updateToolResult', () => {
     expect(seg1.call.summary).toBeNull();
     expect(seg2.call.summary).toBe('4 rows');
   });
+
+  it('backfills args when the call reported none, and never overwrites real ones', () => {
+    const conv = seedMessage('m1');
+    // ACP's CLI path: the agent announced a shell command, so the card has no
+    // structured input — the bridge, which executed the call, supplies it.
+    addToolCallSegments(conv.id, 'm1', [
+      { id: 'tc1', name: './lucent-tool run_readonly_query …', args: null },
+      { id: 'tc2', name: 'search_schema', args: {} },
+      { id: 'tc3', name: 'run_readonly_query', args: { sql: 'select 1' } },
+    ]);
+    updateToolResult(conv.id, 'm1', 'tc1', {
+      summary: '3 rows',
+      args: { sql: 'select 3' },
+    });
+    updateToolResult(conv.id, 'm1', 'tc2', {
+      summary: 'done',
+      args: { query: 'invoices' },
+    });
+    // The agent's own arguments win: a backfill must not rewrite them.
+    updateToolResult(conv.id, 'm1', 'tc3', {
+      summary: '1 row',
+      args: { sql: 'SOMETHING ELSE' },
+    });
+    const segs = getConv(conv.id).messages[0].session!.segments;
+    const args = (i: number) =>
+      (segs[i] as { type: 'tool_call'; call: { args: unknown } }).call.args;
+    expect(args(0)).toEqual({ sql: 'select 3' });
+    expect(args(1)).toEqual({ query: 'invoices' });
+    expect(args(2)).toEqual({ sql: 'select 1' });
+  });
+
+  it('leaves args alone when no backfill is offered', () => {
+    const conv = seedMessage('m1');
+    addToolCallSegments(conv.id, 'm1', [
+      { id: 'tc1', name: 'run_readonly_query', args: { sql: 'select 1' } },
+    ]);
+    updateToolResult(conv.id, 'm1', 'tc1', { summary: '1 row' });
+    const seg = getConv(conv.id).messages[0].session!.segments[0];
+    if (seg.type === 'tool_call')
+      expect(seg.call.args).toEqual({ sql: 'select 1' });
+  });
+
+  it('updateToolResult applies the explicit status', () => {
+    const conv = seedMessage('m1');
+    addToolCallSegments(conv.id, 'm1', [
+      { id: 'tc1', name: 'run_readonly_query', args: {} },
+    ]);
+    updateToolResult(conv.id, 'm1', 'tc1', {
+      summary: 'read-only guard refused',
+      status: 'failed',
+    });
+    const seg = getConv(conv.id).messages[0].session!.segments[0];
+    expect(seg.type).toBe('tool_call');
+    if (seg.type === 'tool_call') {
+      expect(seg.call.status).toBe('failed');
+      expect(seg.call.summary).toBe('read-only guard refused');
+    }
+  });
+
+  it('updateToolResult falls back to the error-prefix convention', () => {
+    const conv = seedMessage('m1');
+    addToolCallSegments(conv.id, 'm1', [{ id: 'tc1', name: 'x', args: {} }]);
+    updateToolResult(conv.id, 'm1', 'tc1', { summary: 'error: boom' });
+    const seg = getConv(conv.id).messages[0].session!.segments[0];
+    if (seg.type === 'tool_call') expect(seg.call.status).toBe('failed');
+  });
+
+  it('markStoppedToolCalls only touches unresolved calls', () => {
+    const conv = seedMessage('m1');
+    addToolCallSegments(conv.id, 'm1', [
+      { id: 'tc1', name: 'a', args: {} },
+      { id: 'tc2', name: 'b', args: {} },
+      { id: 'tc3', name: 'c', args: {} },
+    ]);
+    updateToolResult(conv.id, 'm1', 'tc1', {
+      summary: 'ok',
+      status: 'completed',
+    });
+    updateToolResult(conv.id, 'm1', 'tc2', {
+      summary: 'bad',
+      status: 'failed',
+    });
+    markStoppedToolCalls(conv.id, 'm1');
+    const segs = getConv(conv.id).messages[0].session!.segments;
+    const byId = Object.fromEntries(
+      segs.map((s) =>
+        s.type === 'tool_call' ? [s.call.id, s.call.status] : [],
+      ),
+    );
+    expect(byId['tc1']).toBe('completed');
+    expect(byId['tc2']).toBe('failed');
+    expect(byId['tc3']).toBe('stopped');
+  });
 });
 
 describe('finalizeSession', () => {
@@ -268,5 +362,14 @@ describe('setSessionExpanded', () => {
   it('is a no-op if there is no session', () => {
     const conv = seedMessage('m1');
     expect(() => setSessionExpanded(conv.id, 'm1', true)).not.toThrow();
+  });
+});
+
+describe('createConversation', () => {
+  it('conversations carry a per-conversation error field', () => {
+    const conv = createConversation('conn-1');
+    expect(conv.error).toBeNull();
+    conv.error = 'boom';
+    expect(conv.error).toBe('boom');
   });
 });

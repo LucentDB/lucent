@@ -54,6 +54,7 @@
         >
       </div>
     {/if}
+    <div class="dml-wait">Awaiting your decision</div>
     <div class="dml-actions">
       <button class="btn-cancel" onclick={onCancel}>Cancel</button>
       <button class="btn-run" onclick={onRun}>Execute</button>
@@ -135,6 +136,14 @@
   }
   .blast-icon {
     font-size: 14px;
+  }
+  .dml-wait {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 6px;
   }
   .dml-actions {
     display: flex;

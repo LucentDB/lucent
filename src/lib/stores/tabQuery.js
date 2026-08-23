@@ -1,7 +1,28 @@
-import { applyable, needsValue } from '../components/grid/filters.js';
+import { applyable, needsValue } from '../grid/filters.js';
 
+/**
+ * The wire `sort` value. An array from here on: phase ③ makes it multi-key,
+ * and shipping the array shape now means the payload type changes once.
+ */
 export function sortSpecFor(tab) {
-  return tab.sortCol ? { column: tab.sortCol, direction: tab.sortDir } : null;
+  return tab.sorting ?? [];
+}
+
+/**
+ * The ONE id→name mapper from engine SortState to the IPC SortSpec shape.
+ * Sorting entries carry positional column ids; Rust's SortSpec needs
+ * {column, direction}. Every IPC boundary resolves through this — do not
+ * inline a second copy.
+ * @typedef {{ column: string, direction: 'asc' | 'desc' }} WireSort
+ * @param {{ id: string, desc: boolean }[] | undefined} sorting
+ * @param {{ name: string }[]} columns
+ * @returns {WireSort[]}
+ */
+export function wireSortFor(sorting, columns) {
+  return (sorting ?? []).map((s) => ({
+    column: columns[Number(s.id)]?.name ?? s.id,
+    direction: s.desc ? 'desc' : 'asc',
+  }));
 }
 
 export function filterSpecFor(tab) {

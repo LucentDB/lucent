@@ -136,7 +136,11 @@ export type NotebookEvent =
       payload: {
         cell_id: string;
         id: string;
+        /** The tool that really ran — the announced call may name only a shell command. */
+        tool: string;
         summary: string;
+        /** Arguments the tool really ran with, when the call reported none. */
+        input: unknown;
         output: ToolOutputPayload | null;
       };
     }

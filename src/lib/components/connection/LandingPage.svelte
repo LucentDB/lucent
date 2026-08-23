@@ -3,6 +3,13 @@
     connections,
     type ConnectionProfile,
   } from '../../stores/connections.svelte';
+  import {
+    connectionsQuery,
+    saveConnectionMutation,
+    deleteConnectionMutation,
+    duplicateConnectionMutation,
+  } from '../../queries/connections.ts';
+  import { groupProfiles } from '../../queries/connection-groups.ts';
   import ConnectionList from './ConnectionList.svelte';
   import ConnectionForm from './ConnectionForm.svelte';
   import { addRecentConnection } from '../../stores/recent.js';
@@ -26,6 +33,14 @@
   let view = $state<ViewState>({ mode: 'list' });
   let selectedId = $state<string | null>(null);
 
+  // Saved profiles live in the connections query; the store keeps session
+  // state. Mutations invalidate the list on success.
+  const profiles = connectionsQuery();
+  const grouped = $derived(groupProfiles(profiles.data ?? []));
+  const save = saveConnectionMutation();
+  const del = deleteConnectionMutation();
+  const dup = duplicateConnectionMutation();
+
   // ─── Actions ──────────────────────────────────────────────────────────
 
   function handleSelect(id: string) {
@@ -33,7 +48,7 @@
     connections
       .connectToProfile(id)
       .then(() => {
-        const profile = connections.profiles.find((p) => p.id === id);
+        const profile = (profiles.data ?? []).find((p) => p.id === id);
         if (profile) {
           onConnect?.({
             connectionId: id,
@@ -64,8 +79,8 @@
   }
 
   function handleSaveProfile(profile: ConnectionProfile, password?: string) {
-    connections
-      .saveProfile(profile, password)
+    save
+      .mutateAsync({ profile, password })
       .then(() => {
         view = { mode: 'list' };
       })
@@ -76,12 +91,12 @@
 
   function handleDeleteProfile(id: string) {
     if (confirm('Delete this connection profile?')) {
-      connections.deleteProfile(id);
+      del.mutateAsync({ id });
     }
   }
 
   function handleDuplicateProfile(id: string) {
-    connections.duplicateProfile(id);
+    dup.mutateAsync({ id });
   }
 
   function handleTestProfile(id: string) {
@@ -141,9 +156,9 @@
     <!-- Connection List -->
     <div class="manager-body">
       <ConnectionList
-        profiles={connections.profiles}
-        groupedProfiles={connections.groupedProfiles}
-        loading={connections.loading}
+        profiles={profiles.data ?? []}
+        groupedProfiles={grouped}
+        loading={profiles.isPending}
         activeProfileId={connections.activeProfileId}
         testingIds={connections.testingIds}
         onSelect={handleSelect}
@@ -297,7 +312,6 @@
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
-    letter-spacing: -0.04em;
     margin: 0;
     line-height: 1.1;
   }
@@ -330,7 +344,6 @@
     font-weight: 600;
     color: var(--text);
     margin: 0;
-    letter-spacing: -0.02em;
   }
   .back-btn {
     display: flex;
@@ -394,7 +407,6 @@
   }
   .dismiss-btn:hover {
     background: color-mix(in srgb, var(--error) 15%, transparent);
-    transform: scale(1.1);
   }
   .quick-connect-container {
     margin-top: 28px;

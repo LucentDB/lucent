@@ -1,5 +1,5 @@
 <script lang="ts">
-  import ResultsGrid from '../grid/ResultsGrid.svelte';
+  import ResultsGrid from '../../grid/ResultsGrid.svelte';
   import CellGutter from './CellGutter.svelte';
   import CellToolbar from './CellToolbar.svelte';
   import { CELL_PAGE_SIZES } from '../../stores/notebook-view.ts';
@@ -245,12 +245,10 @@
               pageSize={view.pageSize}
               tabId={cell.id}
               initFilters={view.filters}
-              initSortCol={view.sortCol}
-              initSortDir={view.sortDir}
+              initSorting={view.sorting}
               onStateChange={(s: {
                 filters: FilterSpec[];
-                sortCol: string | null;
-                sortDir: 'asc' | 'desc';
+                sorting: { id: string; desc: boolean }[];
               }) => model.cellView.applyState(cell.id, s)}
               onNeedMore={() => model.cellView.fetchMore(cell.id)}
               onCountAll={() => model.cellView.countAll(cell.id)}
@@ -343,18 +341,18 @@
   .cell-input-card {
     position: relative;
     border: 1px solid var(--border);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-sm);
     background: var(--bg-elevated);
-    box-shadow: var(--shadow-sm);
     transition:
-      border-color 0.15s,
-      box-shadow 0.15s;
+      border-color var(--transition-normal),
+      background var(--transition-normal);
   }
+  /* Selection is a border, not a glow. The 3px accent halo this replaces was
+     the loudest single thing on screen and the clearest sign the app was a
+     web page: native surfaces mark the active one with a hairline. */
   .cell-input-card.focused,
   .cell.selected .cell-input-card {
     border-color: var(--accent);
-    box-shadow:
-      var(--ring-focus, 0 0 0 2px rgba(129, 140, 248, 0.35)), var(--shadow-md);
   }
   .cell.running .cell-input-card {
     border-color: var(--accent);
@@ -426,7 +424,7 @@
     gap: 8px;
     padding: 8px 12px;
     margin-top: 4px;
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-sm);
     background: color-mix(in srgb, var(--danger) 8%, transparent);
     border: 1px solid color-mix(in srgb, var(--danger) 25%, transparent);
     font-size: var(--text-xs);
@@ -449,7 +447,7 @@
   .cell-output {
     margin-top: 6px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-sm);
     overflow: hidden;
     background: var(--bg-surface);
   }

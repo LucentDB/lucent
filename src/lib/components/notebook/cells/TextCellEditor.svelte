@@ -8,6 +8,7 @@
     renderMode = 'markdown' as 'markdown' | 'auto',
     showToolbar = false,
     editing = false,
+    liveWhenIdle = false,
     onSourceChange,
     onRun,
     onRunAndAdvance,
@@ -20,6 +21,14 @@
     renderMode?: 'markdown' | 'auto';
     showToolbar?: boolean;
     editing?: boolean;
+    /**
+     * Keep the textarea mounted even outside edit mode, so a click lands the
+     * caret where the user aimed instead of first having to swap the rendered
+     * text for an input. This is what makes a SQL cell feel immediate — its
+     * CodeMirror instance is already mounted for the selected cell — and
+     * without it an AI cell needs two clicks before it accepts typing.
+     */
+    liveWhenIdle?: boolean;
     onSourceChange?: (v: string) => void;
     onRun?: () => void;
     onRunAndAdvance?: () => void;
@@ -40,6 +49,17 @@
       textareaEl.setSelectionRange(end, end);
     }
   });
+
+  // Leaving edit mode has to give up focus too. Notebook's command keymap
+  // ignores keys whose target is a textarea, so a cell that stays focused
+  // after Escape kills J/K navigation until the user clicks elsewhere. The SQL
+  // cell does the same with its CodeMirror instance.
+  $effect(() => {
+    if (editing || !textareaEl) return;
+    if (document.activeElement === textareaEl) textareaEl.blur();
+  });
+
+  let showInput = $derived(editing || liveWhenIdle);
 
   // 'auto' renders markdown only when the text actually looks like markdown, so a
   // plain AI prompt displays as the user typed it.
@@ -84,7 +104,7 @@
 </script>
 
 <div class="text-cell">
-  {#if editing}
+  {#if showInput}
     {#if showToolbar}
       <div class="toolbar" role="toolbar" aria-label="Formatting">
         <button
@@ -137,6 +157,7 @@
       value={source}
       oninput={(e) => onSourceChange?.((e.target as HTMLTextAreaElement).value)}
       onkeydown={handleKeydown}
+      onfocus={() => onEnterEdit?.()}
       onblur={() => onExitEdit?.()}
       {placeholder}
       spellcheck="false"></textarea>

@@ -35,6 +35,20 @@ fn stub_binary() -> String {
     );
 }
 
+struct EnvVarGuard<'a>(&'a str, Option<String>);
+impl Drop for EnvVarGuard<'_> {
+    fn drop(&mut self) {
+        match &self.1 {
+            Some(v) => std::env::set_var(self.0, v),
+            None => std::env::remove_var(self.0),
+        }
+    }
+}
+fn env_var_guard(name: &'static str) -> EnvVarGuard<'static> {
+    let prior = std::env::var(name).ok();
+    EnvVarGuard(name, prior)
+}
+
 #[tokio::test]
 async fn full_turn_through_run_agent_turn_with_stub_agent() {
     // Hermetic sandbox + scripted stub behavior (thought chunk → message
@@ -44,6 +58,8 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
         "LUCENT_ACP_WORKSPACE",
         _ws.path().to_string_lossy().into_owned(),
     );
+    let _gate_guard = env_var_guard("LUCENT_ACP_TOOLS_GATE_MS");
+    std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "50");
     let script_dir = tempfile::tempdir().unwrap();
     let script_path = script_dir.path().join("script.json");
     std::fs::write(
@@ -106,8 +122,12 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
     .expect("the full ACP turn completes");
 
     // The exact event sequence the rig path would emit for this script
-    // (Thinking + Text + Done).
+    // (Thinking + Text + Done), excluding the honest Notice when no bridge connects.
     let events = received.lock().unwrap().clone();
+    let events: Vec<_> = events
+        .into_iter()
+        .filter(|e| !matches!(e, AiEvent::Notice { .. }))
+        .collect();
     assert_eq!(events.len(), 3, "Thinking + Text + Done: {events:?}");
     assert!(matches!(&events[0], AiEvent::Thinking { content } if content == "thinking…"));
     assert!(matches!(&events[1], AiEvent::Text { content } if content == "Hello"));
@@ -115,6 +135,7 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
         AiEvent::Done {
             conversation_id,
             final_message,
+            cancelled,
             ..
         } => {
             // Mirrors the rig path: `DatabaseAgent::chat` keys the Done
@@ -122,6 +143,7 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
             // keeps the same contract.
             assert_eq!(conversation_id, "conn-1");
             assert_eq!(final_message, "Hello");
+            assert!(!cancelled, "successful turn is not cancelled");
         }
         other => panic!("expected Done, got {other:?}"),
     }

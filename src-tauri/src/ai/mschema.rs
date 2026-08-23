@@ -31,10 +31,25 @@ pub fn estimate_tokens(text: &str) -> usize {
     text.len() / 4
 }
 
+/// How a table's cardinality is stated. The estimate comes from the planner's
+/// statistics (`pg_class.reltuples` and equivalents), which read 0 until the
+/// table has been analyzed — so a freshly loaded database reports every table
+/// as empty. Rendering that as "~0 rows" invites the model to answer "this
+/// table has no data"; saying the count is unknown sends it to `count(*)`.
+fn row_count_phrase(estimate: i64) -> String {
+    if estimate <= 0 {
+        "row count unknown (not analyzed — use count(*) if it matters)".to_string()
+    } else {
+        format!("~{estimate} rows")
+    }
+}
+
 fn header(t: &crate::ai::schema_graph::TableEntry) -> String {
     let mut h = format!(
-        "# Table: {}.{} — ~{} rows",
-        t.schema, t.name, t.row_count_estimate
+        "# Table: {}.{} — {}",
+        t.schema,
+        t.name,
+        row_count_phrase(t.row_count_estimate)
     );
     if let Some(p) = &t.partition_info {
         h.push_str(&format!(" [{p}]"));
@@ -147,10 +162,15 @@ pub fn render_compact_index(graph: &SchemaGraph) -> String {
             })
             .collect();
         let mut line = format!(
-            "{}.{} — ~{} rows, {} cols",
+            "{}.{} — {}, {} cols",
             t.schema,
             t.name,
-            t.row_count_estimate,
+            // The index form stays terse — the full phrase is for table headers.
+            if t.row_count_estimate <= 0 {
+                "rows unknown".to_string()
+            } else {
+                format!("~{} rows", t.row_count_estimate)
+            },
             col_ids.len()
         );
         if !keys.is_empty() {
@@ -302,6 +322,28 @@ mod tests {
         assert!(out.contains("(flight_id: integer, PK)"));
         assert!(out.contains("(route_no: character, FK \u{2192} routes.route_no)"));
         assert!(out.contains("(status: text, examples: Arrived, Cancelled, Delayed)"));
+    }
+
+    #[test]
+    fn unanalyzed_tables_report_an_unknown_count_not_zero() {
+        // `reltuples` (and its equivalents) read 0 until the table is
+        // analyzed, so a freshly loaded database reports every table as empty.
+        // "~0 rows" reads as a fact and invites "this table has no data";
+        // naming it unknown sends the model to count(*) instead.
+        let mut g = small_graph();
+        g.tables[0].row_count_estimate = 0;
+        let out = render_m_schema(&g);
+        assert!(
+            out.contains("row count unknown"),
+            "an unanalyzed table must not be described as empty: {out}"
+        );
+        assert!(!out.contains("~0 rows"), "{out}");
+        assert!(
+            out.contains("count(*)"),
+            "point at the way to get the real number: {out}"
+        );
+        // A real estimate still reads as an estimate.
+        assert!(render_m_schema(&small_graph()).contains("~214867 rows"));
     }
 
     #[test]

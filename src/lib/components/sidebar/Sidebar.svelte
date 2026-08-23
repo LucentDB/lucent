@@ -1,33 +1,80 @@
 <script>
-  import { onMount } from 'svelte';
-  import {
-    getDatabases,
-    getSchemas,
-    getSchemaObjects,
-  } from '../../ipc/client.js';
+  import { useQueryClient } from '@tanstack/svelte-query';
   import { connections } from '../../stores/connections.svelte';
+  import { connectionsQuery } from '../../queries/connections.ts';
+  import {
+    databasesQuery,
+    schemasQuery,
+    refreshExplorer as invalidateExplorer,
+  } from '../../queries/explorer.ts';
   import { connectionEndpoint } from '../../connection-format';
   import { dbMatches, schemaMatches, objectMatches } from './sidebar-search.ts';
-  import { fetchExplorerSnapshot } from './sidebar-refresh.ts';
+  import SchemaBranch from './SchemaBranch.svelte';
+  import DbIcon from '../icons/DbIcon.svelte';
 
   let { onObjectClick, onDisconnect, onOpenLogs } = $props();
 
+  // Saved profiles live in the connections query now; the store keeps only
+  // session state. Resolved here for the switcher.
+  const profiles = connectionsQuery();
+  let activeProfile = $derived(
+    (profiles.data ?? []).find((p) => p.id === connections.activeProfileId) ??
+      null,
+  );
+
   let switcherOpen = $state(false);
 
-  let databases = $state([]);
-  let loading = $state(true);
-  let refreshing = $state(false);
-  let catalogGeneration = 0;
-  let refreshSequence = 0;
-  let error = $state(null);
   let expandedDbs = $state(new Set());
-  let schemasByDb = $state({});
-  let objectsBySchema = $state({});
-  let loadingSchemas = $state(new Set());
-  let loadingObjects = $state(new Set());
   let expandedSchemas = $state(new Set());
   let expandedGroups = $state(new Set());
   let activeObject = $state(null);
+
+  const queryClient = useQueryClient();
+  const conn = $derived(connections.activeProfileId ?? 'inline');
+
+  const dbs = databasesQuery(() => conn);
+  const schemas = schemasQuery(
+    () => conn,
+    () => expandedDbs.size > 0,
+  );
+
+  let databases = $derived(dbs.data ?? []);
+  let loading = $derived(dbs.isPending);
+  let error = $derived(dbs.error ?? schemas.error ?? null);
+  let schemasByDb = $derived(
+    Object.fromEntries([...expandedDbs].map((db) => [db, schemas.data ?? []])),
+  );
+  let isRefreshing = $derived(dbs.isFetching || schemas.isFetching);
+
+  // Objects for mounted schema branches, keyed by name. Search filtering and
+  // the match badge read this; the branches themselves own the queries.
+  let loadedObjects = $state({});
+  function handleObjectsLoaded(name, objects) {
+    // Safe against update loops: SchemaBranch reports each data array once,
+    // so this runs once per fetch cycle, not per observer notification.
+    if (loadedObjects[name] === objects) return;
+    loadedObjects = { ...loadedObjects, [name]: objects };
+    // Opening a schema reveals its object groups directly — the explorer
+    // behaviour test asserts objects are visible one click after expanding.
+    // Refresh re-seeds, so a refresh never collapses what was being explored.
+    const kinds = new Set(expandedGroups);
+    for (const o of objects) kinds.add(`${name}|${o.kind}`);
+    expandedGroups = kinds;
+  }
+
+  // Open the tree on the current database once the catalog arrives — the old
+  // loadDatabases seeded expandedDbs the same way. Seed-once: collapsing every
+  // database afterwards must stick.
+  let expandedSeeded = false;
+  $effect(() => {
+    const names = (dbs.data ?? [])
+      .filter((d) => d.is_current)
+      .map((d) => d.name);
+    if (!expandedSeeded && names.length > 0) {
+      expandedSeeded = true;
+      expandedDbs = new Set(names);
+    }
+  });
 
   let searchQuery = $state('');
   let searchQueryLower = $derived(searchQuery.toLowerCase());
@@ -51,143 +98,17 @@
     onDisconnect?.();
   }
 
-  function init() {
-    loadDatabases();
-  }
-
-  async function loadDatabases() {
-    const generation = ++catalogGeneration;
-    error = null;
-    loading = true;
-    try {
-      const nextDatabases = await getDatabases();
-      if (generation !== catalogGeneration) return;
-
-      databases = nextDatabases;
-      const currentDbs = databases
-        .filter((d) => d.is_current)
-        .map((d) => d.name);
-      expandedDbs = new Set(currentDbs);
-      for (const db of currentDbs) loadSchemasForDb(db, generation);
-    } catch (e) {
-      if (generation === catalogGeneration) {
-        error =
-          typeof e === 'string' ? e : (e.message ?? 'Failed to load databases');
-      }
-    } finally {
-      if (generation === catalogGeneration) loading = false;
-    }
-  }
-
-  async function refreshExplorer(event) {
-    event.stopPropagation();
-    if (refreshing) return;
-
-    const generation = ++catalogGeneration;
-    const refreshId = ++refreshSequence;
-    refreshing = true;
-    error = null;
-    loadingSchemas = new Set();
-    loadingObjects = new Set();
-    try {
-      const snapshot = await fetchExplorerSnapshot({
-        getDatabases,
-        getSchemas,
-        getSchemaObjects,
-      });
-      if (generation !== catalogGeneration) return;
-
-      // Commit only after every catalog request succeeds. Expansion sets stay
-      // untouched, so refresh never collapses the branch being explored.
-      databases = snapshot.databases;
-      schemasByDb = snapshot.schemasByDb;
-      objectsBySchema = snapshot.objectsBySchema;
-    } catch (e) {
-      if (generation === catalogGeneration) {
-        error =
-          typeof e === 'string'
-            ? e
-            : (e.message ?? 'Failed to refresh explorer');
-      }
-    } finally {
-      if (generation === catalogGeneration) {
-        // Invalidate child loads that began while this full snapshot was in
-        // flight. They must not overwrite the committed snapshot afterward.
-        catalogGeneration += 1;
-        loadingSchemas = new Set();
-        loadingObjects = new Set();
-      }
-      if (refreshId === refreshSequence) refreshing = false;
-    }
-  }
-
-  async function loadSchemasForDb(dbName, generation = catalogGeneration) {
-    loadingSchemas = new Set([...loadingSchemas, dbName]);
-    try {
-      const schemas = await getSchemas();
-      if (generation === catalogGeneration && !refreshing) {
-        schemasByDb = { ...schemasByDb, [dbName]: schemas };
-      }
-    } catch (e) {
-      if (generation === catalogGeneration && !refreshing) {
-        error =
-          typeof e === 'object' && e !== null && 'message' in e
-            ? e.message
-            : String(e);
-      }
-    } finally {
-      if (generation === catalogGeneration && !refreshing) {
-        const next = new Set(loadingSchemas);
-        next.delete(dbName);
-        loadingSchemas = next;
-      }
-    }
-  }
-
-  async function loadObjectsForSchema(schema, generation = catalogGeneration) {
-    loadingObjects = new Set([...loadingObjects, schema.name]);
-    try {
-      // List by the namespace PATH — the dotted display name would be
-      // misread as a single segment by multi-segment drivers (DuckDB).
-      const result = await getSchemaObjects(schema.path);
-      if (generation === catalogGeneration && !refreshing) {
-        objectsBySchema = { ...objectsBySchema, [schema.name]: result.objects };
-      }
-    } catch (e) {
-      if (generation === catalogGeneration && !refreshing) {
-        error =
-          typeof e === 'object' && e !== null && 'message' in e
-            ? e.message
-            : String(e);
-      }
-    } finally {
-      if (generation === catalogGeneration && !refreshing) {
-        const next = new Set(loadingObjects);
-        next.delete(schema.name);
-        loadingObjects = next;
-      }
-    }
-  }
-
   function toggleDb(name) {
     const next = new Set(expandedDbs);
-    if (next.has(name)) {
-      next.delete(name);
-    } else {
-      next.add(name);
-      if (!schemasByDb[name]) loadSchemasForDb(name);
-    }
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
     expandedDbs = next;
   }
 
   function toggleSchema(schema) {
     const next = new Set(expandedSchemas);
-    if (next.has(schema.name)) {
-      next.delete(schema.name);
-    } else {
-      next.add(schema.name);
-      if (!objectsBySchema[schema.name]) loadObjectsForSchema(schema);
-    }
+    if (next.has(schema.name)) next.delete(schema.name);
+    else next.add(schema.name);
     expandedSchemas = next;
   }
 
@@ -226,14 +147,15 @@
       .map((k) => ({ kind: k, label: objectLabels[k], items: groups[k] }));
   }
 
-  onMount(() => {
-    init();
-  });
+  async function handleRefresh(event) {
+    event.stopPropagation();
+    await invalidateExplorer(queryClient, conn);
+  }
 </script>
 
 <div class="sidebar">
   <!-- Connection Switcher -->
-  {#if connections.profiles.length > 0}
+  {#if (profiles.data ?? []).length > 0}
     <div class="connection-switcher">
       <button
         class="switcher-btn"
@@ -241,23 +163,10 @@
       >
         <!-- Database icon -->
         <span class="switcher-db-icon">
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <ellipse cx="12" cy="5" rx="9" ry="3" />
-            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
-            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
-          </svg>
+          <DbIcon kind="database" size={13} strokeWidth={1.6} />
         </span>
         <span class="switcher-name">
-          {connections.activeProfile?.name ?? 'Select connection'}
+          {activeProfile?.name ?? 'Select connection'}
         </span>
         <svg
           width="12"
@@ -276,7 +185,7 @@
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="switcher-dropdown" onclick={() => (switcherOpen = false)}>
-          {#each connections.profiles as p}
+          {#each profiles.data ?? [] as p}
             <button
               class="switcher-item"
               class:active={p.id === connections.activeProfileId}
@@ -357,7 +266,7 @@
     {:else if databases.length === 0}
       <div class="empty-root">Connect to a database to explore</div>
     {:else}
-      {#each databases.filter( (d) => dbMatches(d.name, schemasByDb[d.name], objectsBySchema, searchQueryLower) ) as db}
+      {#each databases.filter( (d) => dbMatches(d.name, schemasByDb[d.name], loadedObjects, searchQueryLower) ) as db}
         <div class="tree-node">
           <div class="db-row-wrap">
             <button class="node-row db-row" onclick={() => toggleDb(db.name)}>
@@ -378,20 +287,7 @@
                 />
               </svg>
               <span class="node-icon db-icon">
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                >
-                  <ellipse cx="12" cy="5" rx="9" ry="3" />
-                  <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
-                  <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
-                </svg>
+                <DbIcon kind="database" size={13} strokeWidth={1.6} />
               </span>
               <span class="node-name" class:current={db.is_current}
                 >{db.name}</span
@@ -400,9 +296,9 @@
             {#if db.is_current}
               <button
                 class="refresh-btn"
-                class:spinning={refreshing}
-                onclick={refreshExplorer}
-                disabled={refreshing}
+                class:spinning={isRefreshing}
+                onclick={handleRefresh}
+                disabled={isRefreshing}
                 title="Refresh explorer"
                 aria-label="Refresh explorer"
                 type="button"
@@ -427,10 +323,10 @@
 
           {#if expandedDbs.has(db.name)}
             <div class="children">
-              {#if loadingSchemas.has(db.name)}
+              {#if schemas.isPending}
                 <div class="loading-line">Loading…</div>
               {:else if schemasByDb[db.name]}
-                {#each schemasByDb[db.name].filter( (s) => schemaMatches(s, objectsBySchema[s.name], searchQueryLower) ) as schema}
+                {#each schemasByDb[db.name].filter( (s) => schemaMatches(s, loadedObjects[s.name], searchQueryLower) ) as schema}
                   <div class="schema-node">
                     <button
                       class="node-row schema-row"
@@ -453,28 +349,17 @@
                           stroke-linejoin="round"
                         />
                       </svg>
-                      <!-- Folder icon for schema -->
-                      <svg
+                      <DbIcon
+                        kind="schema"
+                        size={13}
+                        strokeWidth={1.6}
                         class="node-icon schema-icon"
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                      >
-                        <path
-                          d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
-                        />
-                      </svg>
+                        open={expandedSchemas.has(schema.name) || !!searchQuery}
+                      />
                       <span class="schema-name">{schema.name}</span>
-                      {#if searchQuery && objectsBySchema[schema.name]}
-                        {@const matchCount = objectsBySchema[
-                          schema.name
-                        ].filter((o) =>
-                          objectMatches(o.name, searchQueryLower),
+                      {#if searchQuery && loadedObjects[schema.name]}
+                        {@const matchCount = loadedObjects[schema.name].filter(
+                          (o) => objectMatches(o.name, searchQueryLower),
                         ).length}
                         <span class="count-badge" class:match={matchCount > 0}
                           >{matchCount}</span
@@ -484,161 +369,73 @@
 
                     {#if expandedSchemas.has(schema.name) || searchQuery}
                       <div class="children">
-                        {#if loadingObjects.has(schema.name)}
-                          <div class="loading-line">Loading…</div>
-                        {:else if objectsBySchema[schema.name]}
-                          {#each groupObjects(objectsBySchema[schema.name])
-                            .map( (g) => ({ ...g, items: g.items.filter( (o) => objectMatches(o.name, searchQueryLower) ) }) )
-                            .filter((g) => g.items.length > 0) as group}
-                            <div class="group-node">
-                              <button
-                                class="group-header"
-                                class:open={expandedGroups.has(
-                                  `${schema.name}|${group.kind}`,
-                                ) || !!searchQuery}
-                                onclick={() =>
-                                  toggleGroup(schema.name, group.kind)}
-                              >
-                                <svg
-                                  class="chevron"
+                        <SchemaBranch
+                          {conn}
+                          {schema}
+                          expanded={expandedSchemas.has(schema.name) ||
+                            !!searchQuery}
+                          ondata={handleObjectsLoaded}
+                        >
+                          {#snippet children(objects)}
+                            {#each groupObjects(objects)
+                              .map( (g) => ({ ...g, items: g.items.filter( (o) => objectMatches(o.name, searchQueryLower) ) }) )
+                              .filter((g) => g.items.length > 0) as group}
+                              <div class="group-node">
+                                <button
+                                  class="group-header"
                                   class:open={expandedGroups.has(
                                     `${schema.name}|${group.kind}`,
                                   ) || !!searchQuery}
-                                  width="12"
-                                  height="12"
-                                  viewBox="0 0 16 16"
-                                  fill="none"
+                                  onclick={() =>
+                                    toggleGroup(schema.name, group.kind)}
                                 >
-                                  <path
-                                    d="M6 4l4 4-4 4"
-                                    stroke="currentColor"
-                                    stroke-width="1.5"
-                                    stroke-linecap="round"
-                                    stroke-linejoin="round"
-                                  />
-                                </svg>
-                                <span class="group-label">{group.label}</span>
-                                <span class="group-count"
-                                  >{group.items.length}</span
-                                >
-                              </button>
-                              {#if expandedGroups.has(`${schema.name}|${group.kind}`) || searchQuery}
-                                {#each group.items as obj}
-                                  <button
-                                    class="object-item"
-                                    class:active={activeObject ===
-                                      `${schema.name}.${obj.name}`}
-                                    onclick={() =>
-                                      handleObjectClick(schema, obj)}
+                                  <svg
+                                    class="chevron"
+                                    class:open={expandedGroups.has(
+                                      `${schema.name}|${group.kind}`,
+                                    ) || !!searchQuery}
+                                    width="12"
+                                    height="12"
+                                    viewBox="0 0 16 16"
+                                    fill="none"
                                   >
-                                    {#if obj.kind === 'table'}
-                                      <!-- Table: clean grid icon -->
-                                      <svg
-                                        class="obj-icon table"
-                                        width="13"
-                                        height="13"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        stroke-width="2"
-                                        stroke-linecap="round"
-                                        stroke-linejoin="round"
+                                    <path
+                                      d="M6 4l4 4-4 4"
+                                      stroke="currentColor"
+                                      stroke-width="1.5"
+                                      stroke-linecap="round"
+                                      stroke-linejoin="round"
+                                    />
+                                  </svg>
+                                  <span class="group-label">{group.label}</span>
+                                  <span class="group-count"
+                                    >{group.items.length}</span
+                                  >
+                                </button>
+                                {#if expandedGroups.has(`${schema.name}|${group.kind}`) || searchQuery}
+                                  {#each group.items as obj}
+                                    <button
+                                      class="object-item"
+                                      class:active={activeObject ===
+                                        `${schema.name}.${obj.name}`}
+                                      onclick={() =>
+                                        handleObjectClick(schema, obj)}
+                                    >
+                                      <DbIcon kind={obj.kind} size={12} strokeWidth={1.6} class="obj-icon {obj.kind}" />
+                                      <span class="object-name">{obj.name}</span
                                       >
-                                        <rect
-                                          x="3"
-                                          y="3"
-                                          width="18"
-                                          height="18"
-                                          rx="2"
-                                        />
-                                        <path d="M3 9h18M3 15h18M9 3v18" />
-                                      </svg>
-                                    {:else if obj.kind === 'matview'}
-                                      <!-- Materialized view: layered stacks (precomputed from a query) -->
-                                      <svg
-                                        class="obj-icon matview"
-                                        width="13"
-                                        height="13"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        stroke-width="2"
-                                        stroke-linecap="round"
-                                        stroke-linejoin="round"
-                                      >
-                                        <path d="M12 2 2 7l10 5 10-5-10-5z" />
-                                        <path d="m2 17 10 5 10-5" />
-                                        <path d="m2 12 10 5 10-5" />
-                                      </svg>
-                                    {:else if obj.kind === 'view'}
-                                      <!-- View: eye with sparkle dot -->
-                                      <svg
-                                        class="obj-icon view"
-                                        width="13"
-                                        height="13"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        stroke-width="2"
-                                        stroke-linecap="round"
-                                        stroke-linejoin="round"
-                                      >
-                                        <path
-                                          d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7z"
-                                        />
-                                        <circle cx="12" cy="12" r="2.5" />
-                                      </svg>
-                                    {:else if obj.kind === 'function'}
-                                      <!-- Function: curly braces {} -->
-                                      <svg
-                                        class="obj-icon function"
-                                        width="13"
-                                        height="13"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        stroke-width="2"
-                                        stroke-linecap="round"
-                                        stroke-linejoin="round"
-                                      >
-                                        <path
-                                          d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1"
-                                        />
-                                        <path
-                                          d="M16 3h1a2 2 0 0 1 2 2v5a2 2 0 0 0 2 2 2 2 0 0 0-2 2v5a2 2 0 0 1-2 2h-1"
-                                        />
-                                      </svg>
-                                    {:else if obj.kind === 'sequence'}
-                                      <!-- Sequence: hash / ordered list -->
-                                      <svg
-                                        class="obj-icon sequence"
-                                        width="13"
-                                        height="13"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        stroke-width="2"
-                                        stroke-linecap="round"
-                                        stroke-linejoin="round"
-                                      >
-                                        <line x1="4" y1="9" x2="20" y2="9" />
-                                        <line x1="4" y1="15" x2="20" y2="15" />
-                                        <line x1="10" y1="3" x2="8" y2="21" />
-                                        <line x1="16" y1="3" x2="14" y2="21" />
-                                      </svg>
-                                    {/if}
-                                    <span class="object-name">{obj.name}</span>
-                                    {#if obj.row_count !== null && obj.row_count > 0}
-                                      <span class="row-badge"
-                                        >{formatCount(obj.row_count)}</span
-                                      >
-                                    {/if}
-                                  </button>
-                                {/each}
-                              {/if}
-                            </div>
-                          {/each}
-                        {/if}
+                                      {#if obj.row_count !== null && obj.row_count > 0}
+                                        <span class="row-badge"
+                                          >{formatCount(obj.row_count)}</span
+                                        >
+                                      {/if}
+                                    </button>
+                                  {/each}
+                                {/if}
+                              </div>
+                            {/each}
+                          {/snippet}
+                        </SchemaBranch>
                       </div>
                     {/if}
                   </div>
@@ -1030,7 +827,7 @@
     padding: 3px;
     box-sizing: border-box;
   }
-  .schema-icon {
+  .schema-row :global(.schema-icon) {
     color: #f59e0b;
   }
 
@@ -1158,29 +955,32 @@
   .object-item.active::before {
     background: var(--accent);
   }
-  .object-item.active .obj-icon {
+  .object-item.active :global(.obj-icon) {
     opacity: 1;
   }
 
   /* ── Object icons ──────────────────────────────────── */
-  .obj-icon {
+  /* Applied on child Lucide <svg> via DbIcon class prop */
+  .object-item :global(.obj-icon) {
     flex-shrink: 0;
+    width: 13px;
+    height: 13px;
     opacity: 0.85;
     transition: opacity var(--transition-fast);
   }
-  .obj-icon.table {
+  .object-item :global(.obj-icon.table) {
     color: #10b981;
   } /* emerald */
-  .obj-icon.view {
+  .object-item :global(.obj-icon.view) {
     color: #6366f1;
   } /* indigo  */
-  .obj-icon.matview {
+  .object-item :global(.obj-icon.matview) {
     color: #0ea5e9;
   } /* sky */
-  .obj-icon.function {
+  .object-item :global(.obj-icon.function) {
     color: #a855f7;
   } /* purple */
-  .obj-icon.sequence {
+  .object-item :global(.obj-icon.sequence) {
     color: #f59e0b;
   } /* amber  */
 
@@ -1191,7 +991,6 @@
     white-space: nowrap;
     font-family: var(--font-mono);
     font-size: 11.5px;
-    letter-spacing: -0.01em;
   }
   .object-item.active .object-name {
     color: var(--accent);

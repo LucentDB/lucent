@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod connection;
+pub mod correlator;
 pub mod driver;
 pub mod install;
 pub mod manager;
@@ -18,7 +19,7 @@ use install::InstalledAgent;
 use registry::Registry;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use uuid::Uuid;
@@ -38,6 +39,9 @@ pub struct AcpState {
     /// FIFO queues of pending `session/request_permission` decisions, keyed
     /// by session id (spec §4.5).
     pub permissions: Arc<PermissionRegistry>,
+    /// Monotonic connection generation counter — sessions record which
+    /// connection created them so a crash can evict exactly its own.
+    pub next_generation: Arc<AtomicU64>,
     /// agent_id -> running connection task state (one per agent process).
     pub connections: Arc<Mutex<HashMap<String, Arc<ConnectionEntry>>>>,
     /// conversation_id -> the conversation's ACP session (multi-turn reuse).
@@ -50,6 +54,7 @@ impl AcpState {
             manager: Arc::new(crate::ai::acp::manager::AcpManager::new()),
             bridges: Arc::new(Mutex::new(HashMap::new())),
             permissions: Arc::new(PermissionRegistry::new()),
+            next_generation: Arc::new(AtomicU64::new(0)),
             connections: Arc::new(Mutex::new(HashMap::new())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -81,6 +86,7 @@ impl AcpState {
                 // budget-allowed crash is reaped and restarted.
                 self.manager.record_crash(process)?;
                 map.remove(&process.agent_id);
+                self.evict_sessions_for(&process.agent_id).await;
                 log::warn!(
                     "agent '{}' connection task ended — restarting (budget permitting)",
                     process.agent_id
@@ -89,6 +95,11 @@ impl AcpState {
                 return Ok(entry.clone());
             }
         }
+        self.manager
+            .processes
+            .lock()
+            .unwrap()
+            .insert(process.agent_id.clone(), process.clone());
         let (cmds_tx, cmds_rx) = mpsc::channel(16);
         let (ev_tx, ev_rx) = mpsc::channel(256);
         let (bcast_tx, _) = broadcast::channel(256);
@@ -104,14 +115,49 @@ impl AcpState {
                 let _ = fwd_tx.send(ev);
             }
         });
+        let generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
         let task = tokio::spawn(run_connection(process.clone(), cmds_rx, ev_tx, perms));
         let entry = Arc::new(ConnectionEntry {
             cmds: cmds_tx,
             events: bcast_tx,
             task,
+            generation,
         });
         map.insert(process.agent_id.clone(), entry.clone());
         Ok(entry)
+    }
+
+    /// Removes every session entry belonging to `agent_id` — a crashed or
+    /// killed connection's session ids are meaningless to the restarted
+    /// process. Called from the reap path and `kill_agent`; the next
+    /// `session_for` on those conversations transparently recreates them.
+    async fn evict_sessions_for(&self, agent_id: &str) {
+        let mut map = self.sessions.lock().await;
+        map.retain(|_, s| s.agent_id != agent_id);
+    }
+
+    /// Real kill for the cancel-timeout fallback (spec D1/E2): abort the
+    /// connection task (the crate's `Client` drops → stdio closes → the agent
+    /// exits on EOF), charge the crash budget so repeated no-cancel agents get
+    /// blocked, and evict the agent's sessions. The next use restarts the
+    /// process (budget permitting).
+    pub async fn kill_agent(&self, agent_id: &str) {
+        let process = self
+            .manager
+            .processes
+            .lock()
+            .unwrap()
+            .get(agent_id)
+            .cloned();
+        let mut map = self.connections.lock().await;
+        if let Some(entry) = map.remove(agent_id) {
+            if let Some(process) = process {
+                let _ = self.manager.record_crash(&process);
+            }
+            self.evict_sessions_for(agent_id).await;
+            entry.task.abort();
+            log::warn!("agent '{agent_id}' killed (cancel timeout)");
+        }
     }
 
     /// Get-or-create the ACP session for a conversation. On first use it
@@ -127,8 +173,21 @@ impl AcpState {
         tool_ctx: &AiToolContext,
         sink: &Arc<dyn AgentSink>,
     ) -> Result<Arc<SessionEntry>, String> {
-        if let Some(session) = self.sessions.lock().await.get(conversation_id).cloned() {
-            return Ok(session);
+        // The session's connection may have died since creation — a stale session
+        // id is worthless to the restarted process. Evict and recreate.
+        let cached = self.sessions.lock().await.get(conversation_id).cloned();
+        if let Some(session) = cached {
+            let alive = self
+                .connections
+                .lock()
+                .await
+                .get(&session.agent_id)
+                .map(|e| !e.task.is_finished())
+                .unwrap_or(false);
+            if alive {
+                return Ok(session);
+            }
+            self.sessions.lock().await.remove(conversation_id);
         }
         let conn = self.ensure_connection(process).await?;
 
@@ -141,10 +200,23 @@ impl AcpState {
         let handle = Arc::new(BridgeHandle::new(conversation_id));
         let tools = handle.connection();
         let executor: Arc<dyn ToolExecutor> = Arc::new(ContextToolExecutor::new(tool_ctx.clone()));
-        let serve_sink = sink.clone();
+        let correlator = Arc::new(crate::ai::acp::correlator::CorrelatorState::default());
+        let serve_sink: Arc<dyn AgentSink> = Arc::new(
+            crate::ai::acp::correlator::CorrelatingSink::new(sink.clone(), correlator.clone()),
+        );
         let serve_handle = handle.clone();
         let serve_token = token.clone();
+        #[cfg(unix)]
         tokio::spawn(bridge::serve(
+            listener,
+            serve_token,
+            executor,
+            serve_sink,
+            serve_handle,
+        ));
+        #[cfg(windows)]
+        tokio::spawn(bridge::serve(
+            endpoint.clone(),
             listener,
             serve_token,
             executor,
@@ -205,15 +277,7 @@ impl AcpState {
             let _ = std::fs::write(vscode_dir.join("mcp.json"), &mcp_json);
         }
 
-        // 5. Update global ~/.pi/agent/mcp.json if ~/.pi exists
-        if let Ok(home) = std::env::var("HOME") {
-            let global_pi = std::path::PathBuf::from(home).join(".pi").join("agent");
-            if global_pi.exists() {
-                let _ = std::fs::write(global_pi.join("mcp.json"), &mcp_json);
-            }
-        }
-
-        // 3. Write executable lucent-tool helper script for terminal/bash-based agents (e.g. pi-acp)
+        // 5. Write executable lucent-tool helper script for terminal/bash-based agents (e.g. pi-acp)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -267,11 +331,14 @@ impl AcpState {
             })?;
 
         let entry = Arc::new(SessionEntry {
+            agent_id: process.agent_id.clone(),
+            generation: conn.generation,
             session_id,
             bridge: handle.clone(),
             tools,
             first_prompt: AtomicBool::new(true),
             tools_notice: AtomicBool::new(false),
+            correlator,
             _endpoint_dir: dir,
         });
         self.sessions
@@ -313,6 +380,7 @@ pub struct ConnectionEntry {
     pub cmds: mpsc::Sender<AgentCommand>,
     pub events: broadcast::Sender<AgentEvent>,
     pub task: tokio::task::JoinHandle<Result<(), String>>,
+    pub generation: u64,
 }
 
 /// A conversation's ACP session. `first_prompt` gates the system preamble:
@@ -322,6 +390,11 @@ pub struct ConnectionEntry {
 /// `mcpServers`); `tools_notice` makes sure the UI hears about a missing
 /// tool connection exactly once per session.
 pub struct SessionEntry {
+    /// The agent process that owns this session (eviction key on crash).
+    pub agent_id: String,
+    /// The connection generation that created this session. A crashed
+    /// connection's sessions are stale for the restarted process.
+    pub generation: u64,
     pub session_id: String,
     pub bridge: Arc<BridgeHandle>,
     /// Live connectivity of the DB-tools bridge: set the moment the agent's
@@ -331,6 +404,9 @@ pub struct SessionEntry {
     /// Whether the "DB tools unavailable" notice was already emitted for
     /// this session (exactly-once per session).
     pub tools_notice: AtomicBool,
+    /// Bridge tool-result buffer (spec D3): the bridge's sink wrapper fills
+    /// it; the driver pops it when the agent's `ToolCallUpdate` arrives.
+    pub correlator: Arc<crate::ai::acp::correlator::CorrelatorState>,
     /// Keeps the bridge socket file alive for the connection's lifetime.
     pub(crate) _endpoint_dir: Option<tempfile::TempDir>,
 }
@@ -367,6 +443,24 @@ fn create_bridge_endpoint(token: &str) -> (BridgeListener, String, Option<tempfi
     }
 }
 
+/// Probes the bridge-binary candidate names next to `parent`, probing the
+/// `.exe` suffix on Windows (the packaged sidecar is
+/// `lucent-db-tools-mcp.exe` there; `Path::exists` does NOT auto-append
+/// extensions). Returns the first existing path (spec D5).
+fn probe_bridge_candidates(parent: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    let triple = env!("TAURI_ENV_TARGET_TRIPLE");
+    #[cfg(windows)]
+    let candidates = [
+        parent.join(name),
+        parent.join(format!("{name}.exe")),
+        parent.join(format!("{name}-{triple}")),
+        parent.join(format!("{name}-{triple}.exe")),
+    ];
+    #[cfg(not(windows))]
+    let candidates = [parent.join(name), parent.join(format!("{name}-{triple}"))];
+    candidates.into_iter().find(|c| c.exists())
+}
+
 /// Absolute path to the `lucent-db-tools-mcp` binary, which the AGENT spawns
 /// itself (spec §3 D2 / §4.6). Resolution order:
 /// 1. `LUCENT_BRIDGE_BIN` env override — wins verbatim (power-user / test
@@ -384,27 +478,12 @@ pub fn bridge_binary_path() -> Result<String, String> {
     }
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let parent = exe.parent().ok_or("current executable has no parent dir")?;
-    // "" = packaged (the sidecar sits next to the app executable); "../" =
-    // dev/test (unit tests run from target/<profile>/deps/, the bin lives in
-    // target/<profile>/).
-    //
-    // Packaged name: tauri-build copies the sidecar into the target dir with
-    // the target triple stripped, but the bundler's name inside the .app is
-    // version-dependent — probe the plain name AND the triple-suffixed
-    // sidecar name (the triple is baked in by tauri-build via
-    // TAURI_ENV_TARGET_TRIPLE), so packaged resolution works under either
-    // bundler behavior.
-    for candidate in [
-        parent.join(name),
-        parent.join(format!("{name}-{}", env!("TAURI_ENV_TARGET_TRIPLE"))),
-    ] {
-        if candidate.exists() {
-            return Ok(candidate.to_string_lossy().into_owned());
-        }
+    if let Some(candidate) = probe_bridge_candidates(parent, name) {
+        return Ok(candidate.to_string_lossy().into_owned());
     }
-    let dev = parent.join("../").join(name);
-    if dev.exists() {
-        return Ok(dev.to_string_lossy().into_owned());
+    let dev = parent.join("../");
+    if let Some(candidate) = probe_bridge_candidates(&dev, name) {
+        return Ok(candidate.to_string_lossy().into_owned());
     }
     Err(format!(
         "{name} binary not found next to the app — run `cargo build --bin {name}` (dev) or rebuild the bundle (release)"
@@ -505,6 +584,7 @@ mod tests {
                 args: Vec::new(),
                 env: HashMap::new(),
             },
+            name: None,
         }
     }
 
@@ -689,6 +769,45 @@ mod tests {
         assert!(!Arc::ptr_eq(&s1, &s2), "distinct entries");
     }
 
+    #[tokio::test]
+    async fn session_for_never_touches_a_global_pi_mcp_config() {
+        let _ws = hermetic_workspace();
+        // Plant a fake user ~/.pi/agent/mcp.json with a sentinel, then point
+        // HOME at it — session_for must leave it byte-identical (spec D13).
+        let home = tempfile::tempdir().unwrap();
+        let global_pi = home.path().join(".pi").join("agent");
+        std::fs::create_dir_all(&global_pi).unwrap();
+        let sentinel = r#"{"mcpServers":{"user-server":{"command":"keep"}}}"#;
+        std::fs::write(global_pi.join("mcp.json"), sentinel).unwrap();
+
+        let prior = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home.path());
+        let _guard = EnvVarGuard("HOME", prior);
+
+        let acp = AcpState::new();
+        let process = stub_process();
+        let sink = sink();
+        acp.session_for("conv-1", &process, &tool_ctx(), &sink)
+            .await
+            .expect("session/new round-trips");
+
+        let after = std::fs::read_to_string(global_pi.join("mcp.json")).unwrap();
+        assert_eq!(
+            after, sentinel,
+            "the user's global pi config is never overwritten"
+        );
+    }
+
+    struct EnvVarGuard<'a>(&'a str, Option<String>);
+    impl Drop for EnvVarGuard<'_> {
+        fn drop(&mut self) {
+            match &self.1 {
+                Some(v) => std::env::set_var(self.0, v),
+                None => std::env::remove_var(self.0),
+            }
+        }
+    }
+
     // ── Bridge binary resolution (F3) ────────────────────────────────────
 
     #[test]
@@ -696,15 +815,6 @@ mod tests {
         // Restores `var` to its prior state on drop — a panic between the
         // set and the assertions must not leak the override to parallel
         // tests (the capstone would spawn the test exe as the MCP binary).
-        struct EnvVarGuard<'a>(&'a str, Option<String>);
-        impl Drop for EnvVarGuard<'_> {
-            fn drop(&mut self) {
-                match &self.1 {
-                    Some(v) => std::env::set_var(self.0, v),
-                    None => std::env::remove_var(self.0),
-                }
-            }
-        }
 
         // Env override wins verbatim (packaged installs / power users point
         // at a custom sidecar location). Use the test binary as the override
@@ -743,6 +853,56 @@ mod tests {
             // integration-tier capstone pins the walk.
             Ok(_) | Err(_) => {}
         }
+    }
+
+    #[test]
+    fn probe_bridge_candidates_finds_plain_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lucent-db-tools-mcp"), b"x").unwrap();
+        let found = probe_bridge_candidates(dir.path(), "lucent-db-tools-mcp")
+            .expect("plain candidate is probed");
+        assert_eq!(
+            found.file_name().unwrap().to_string_lossy(),
+            "lucent-db-tools-mcp"
+        );
+    }
+
+    #[test]
+    fn probe_bridge_candidates_finds_triple_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let triple_name = format!("lucent-db-tools-mcp-{}", env!("TAURI_ENV_TARGET_TRIPLE"));
+        std::fs::write(dir.path().join(&triple_name), b"x").unwrap();
+        let found = probe_bridge_candidates(dir.path(), "lucent-db-tools-mcp")
+            .expect("triple candidate is probed");
+        assert_eq!(found.file_name().unwrap().to_string_lossy(), triple_name);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn probe_bridge_candidates_finds_the_exe_suffix() {
+        use std::os::windows::fs::FileTimesExt; // no-op import guard; keep minimal
+        let dir = tempfile::tempdir().unwrap();
+        // Only the .exe variant exists (the real Windows sidecar name).
+        std::fs::write(dir.path().join("lucent-db-tools-mcp.exe"), b"x").unwrap();
+        let found = probe_bridge_candidates(dir.path(), "lucent-db-tools-mcp")
+            .expect("the .exe candidate is probed");
+        assert_eq!(
+            found.file_name().unwrap().to_string_lossy(),
+            "lucent-db-tools-mcp.exe"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn probe_bridge_candidates_prefers_plain_name_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lucent-db-tools-mcp"), b"x").unwrap();
+        std::fs::write(dir.path().join("lucent-db-tools-mcp.exe"), b"x").unwrap();
+        let found = probe_bridge_candidates(dir.path(), "lucent-db-tools-mcp").unwrap();
+        assert_eq!(
+            found.file_name().unwrap().to_string_lossy(),
+            "lucent-db-tools-mcp"
+        );
     }
 
     #[tokio::test]
@@ -787,5 +947,80 @@ mod tests {
             ),
             "teardown auto-rejects with Cancelled: {outcome:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn crash_reaps_and_evicts_sessions_for_the_agent() {
+        let _ws = hermetic_workspace();
+        let acp = AcpState::new();
+        let process = stub_process();
+        let sink = sink();
+
+        let s1 = acp
+            .session_for("conv-1", &process, &tool_ctx(), &sink)
+            .await
+            .expect("first session");
+        // A crash: the connection task dies (abort simulates the transport EOF).
+        let entry = acp
+            .connections
+            .lock()
+            .await
+            .get("stub")
+            .expect("connection entry")
+            .clone();
+        entry.task.abort();
+        while !entry.task.is_finished() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // The stale session must not survive: session_for evicts it and creates
+        // a fresh one on the restarted connection.
+        let s2 = acp
+            .session_for("conv-1", &process, &tool_ctx(), &sink)
+            .await
+            .expect("recreated session");
+        assert_ne!(
+            s1.session_id, s2.session_id,
+            "a dead process's session id is never reused"
+        );
+        assert!(
+            acp.sessions.lock().await.get("conv-1").unwrap().generation > s1.generation,
+            "the new session belongs to a newer connection generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn kill_agent_aborts_evicts_and_charges_the_budget() {
+        let _ws = hermetic_workspace();
+        let acp = AcpState::new();
+        let process = stub_process();
+        let sink = sink();
+
+        acp.session_for("conv-1", &process, &tool_ctx(), &sink)
+            .await
+            .expect("session");
+
+        acp.kill_agent("stub").await;
+
+        assert!(
+            acp.connections.lock().await.get("stub").is_none(),
+            "the connection entry is removed"
+        );
+        assert!(
+            acp.sessions.lock().await.is_empty(),
+            "the agent's sessions are evicted"
+        );
+        assert_eq!(
+            process.spawns.lock().unwrap().len(),
+            1,
+            "the kill is charged against the restart budget"
+        );
+
+        // Budget permits one more restart: the next use comes back up.
+        let s = acp
+            .session_for("conv-1", &process, &tool_ctx(), &sink)
+            .await
+            .expect("restart after kill");
+        assert!(s.session_id.starts_with("stub-sess-"));
     }
 }

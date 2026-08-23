@@ -1,5 +1,6 @@
 import * as nb from '../ipc/notebook';
-import type { FilterSpec, SortSpec } from '../ipc/notebook';
+import type { FilterSpec } from '../ipc/notebook';
+import { wireSortFor } from './tabQuery.js';
 import type {
   ColumnMeta,
   NotebookModel,
@@ -11,8 +12,7 @@ export const DEFAULT_CELL_PAGE_SIZE = 10;
 
 export interface CellViewState {
   filters: FilterSpec[];
-  sortCol: string | null;
-  sortDir: 'asc' | 'desc';
+  sorting: { id: string; desc: boolean }[];
   pageSize: number;
   columns: ColumnMeta[];
   rows: unknown[][];
@@ -29,8 +29,7 @@ export function defaultViewState(
 ): CellViewState {
   return {
     filters: [],
-    sortCol: null,
-    sortDir: 'asc',
+    sorting: [],
     pageSize,
     columns: [],
     rows: [],
@@ -44,12 +43,6 @@ export function defaultViewState(
 
 function isTable(o: unknown): o is TableOutput {
   return !!o && typeof o === 'object' && 'columns' in o;
-}
-
-function sortSpec(state: CellViewState): SortSpec | null {
-  return state.sortCol
-    ? { column: state.sortCol, direction: state.sortDir }
-    : null;
 }
 
 /**
@@ -101,7 +94,8 @@ export function createCellView(model: NotebookModel) {
         model.cells,
         state.pageSize,
         offset,
-        sortSpec(state),
+        // The wire takes one key until phase ③ widens SortSpec to a list.
+        wireSortFor(state.sorting, state.columns)[0] ?? null,
         state.filters,
       );
       const rows = offset === 0 ? out.rows : [...state.rows, ...out.rows];
@@ -128,15 +122,13 @@ export function createCellView(model: NotebookModel) {
       cellId: string,
       s: {
         filters: FilterSpec[];
-        sortCol: string | null;
-        sortDir: 'asc' | 'desc';
+        sorting: { id: string; desc: boolean }[];
       },
     ) {
       const next: CellViewState = {
         ...stateFor(cellId),
         filters: s.filters,
-        sortCol: s.sortCol,
-        sortDir: s.sortDir,
+        sorting: s.sorting,
         totalCount: null, // a filter change invalidates any previous count
       };
       await refetch(cellId, next, 0);

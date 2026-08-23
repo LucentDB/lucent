@@ -9,6 +9,7 @@ import {
   addNote,
   addToolCallSegments,
   updateToolResult,
+  markStoppedToolCalls,
   finalizeSession,
   updateLast,
   clearRejectedDml,
@@ -46,12 +47,18 @@ export type AiChannelEvent =
       id: string;
       tool: string;
       summary: string;
+      status?: 'completed' | 'failed';
       output: ToolOutputPayload | null;
+      /** Arguments the tool actually ran with, when the call itself reported
+       *  none (an ACP agent reaching the DB tools through the `lucent-tool`
+       *  CLI reports a shell command with no structured input). */
+      input?: unknown;
     }
   | {
       type: 'done';
       conversation_id: string;
       final_message: string;
+      cancelled: boolean;
       usage: {
         prompt_tokens: number;
         completion_tokens: number;
@@ -85,6 +92,8 @@ export interface InstalledAcpAgent {
   id: string;
   version: string;
   launch: { cmd: string; args: string[]; env: Record<string, string> };
+  /** Display name from the registry manifest (older installs lack it). */
+  name?: string | null;
 }
 
 /** ACP provider selection block — `AiConfig.acp` on the backend (camelCase). */
@@ -142,12 +151,15 @@ export function handleAiEvent(conversationId: string, e: AiChannelEvent) {
     case 'tool_result':
       updateToolResult(conversationId, messageId, e.id, {
         summary: e.summary,
+        status: e.status,
         output: e.output ?? undefined,
+        args: e.input,
       });
       break;
     case 'done':
       chat.isStreaming = false;
       finalizeSession(conversationId, messageId);
+      if (e.cancelled) markStoppedToolCalls(conversationId, messageId);
       updateLast(conversationId, {
         usage: {
           promptTokens: e.usage.prompt_tokens,
@@ -212,6 +224,8 @@ export function createAiSession(conversationId: string) {
     }) => {
       unlisteners.push(
         await listen<DmlApprovalPayload>('ai:dml_approval', (e) => {
+          // Events are global; only this conversation's payloads may pause it.
+          if (e.payload.conversation_id !== conversationId) return;
           handlers.onDmlApproval(e.payload);
           chat.isStreaming = false;
           finalizeLastMessageSession(conversationId);
@@ -219,6 +233,7 @@ export function createAiSession(conversationId: string) {
       );
       unlisteners.push(
         await listen<AgentPermissionPayload>('ai:agent_permission', (e) => {
+          if (e.payload.conversationId !== conversationId) return;
           handlers.onAgentPermission(e.payload);
           chat.isStreaming = false;
           finalizeLastMessageSession(conversationId);
@@ -238,9 +253,9 @@ export function createAiSession(conversationId: string) {
         await listen<{ conversation_id: string; message: string }>(
           'ai:error',
           (e) => {
+            if (e.payload.conversation_id !== conversationId) return;
             handlers.onError(e.payload);
             chat.isStreaming = false;
-            chat.error = e.payload.message;
             finalizeLastMessageSession(conversationId);
           },
         ),
@@ -257,6 +272,7 @@ export async function sendMessage(
   channel: Channel<AiChannelEvent>,
   conversationId: string,
   connectionId: string,
+  profileId?: string | null,
 ) {
   chat.isStreaming = true;
   chat.error = null;
@@ -266,6 +282,7 @@ export async function sendMessage(
       channel,
       conversationId,
       connectionId,
+      profileId: profileId ?? null,
     });
   } catch (e) {
     chat.isStreaming = false;

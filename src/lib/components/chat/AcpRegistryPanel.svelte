@@ -51,10 +51,10 @@
               </span>
             {:else if agent.dbTools === 'unsupported'}
               <span
-                class="acp-badge acp-badge-tools-unsupported"
-                title="Known limitation: this agent silently ignores the MCP servers Lucent passes in session/new, so Lucent's database tools can't reach its model. Chat still works; you can run SQL yourself in the query editor."
+                class="acp-badge acp-badge-tools-cli"
+                title="This agent silently ignores the MCP servers Lucent passes in session/new, so Lucent hands it the same four database tools as a CLI helper in its workspace instead. Same database, same guardrails — it just runs them as shell commands."
               >
-                No DB tools
+                DB tools via CLI
               </span>
             {/if}
             <span class="acp-license">{agent.license}</span>
@@ -160,7 +160,6 @@
   .acp-name {
     font-size: 14px;
     font-weight: 600;
-    letter-spacing: -0.01em;
   }
   .acp-version {
     font-size: 12px;
@@ -195,7 +194,7 @@
     background: color-mix(in srgb, #22c55e 12%, transparent);
     border-color: color-mix(in srgb, #22c55e 35%, transparent);
   }
-  .acp-badge-tools-unsupported {
+  .acp-badge-tools-cli {
     color: #b45309;
     background: color-mix(in srgb, #f59e0b 12%, transparent);
     border-color: color-mix(in srgb, #f59e0b 35%, transparent);
