@@ -120,7 +120,7 @@ describe('refreshExplorer', () => {
     await refreshExplorer(c, CONN);
     await c.fetchQuery(databasesOptions(CONN)).catch(() => {});
 
-    // This is what fetchExplorerSnapshot's atomic commit existed to guarantee.
+    // This is what the old snapshot path's atomic commit existed to guarantee.
     // Query gives it per branch: failed refetch, previous data retained.
     expect(c.getQueryData(['explorer', CONN, 'databases'])).toEqual(before);
   });
