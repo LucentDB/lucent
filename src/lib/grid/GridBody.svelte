@@ -13,6 +13,8 @@
     selectedRows = new Set(),
     onSelectRow,
     onCellContextMenu,
+    onCellMouseDown = () => {},
+    onCellMouseEnter = () => {},
   } = $props();
 
   // Paging is manual (spec D3), so the table's row model holds the whole
@@ -42,24 +44,29 @@
         />
       </td>
       {#each tableRow?.getStartVisibleCells() ?? [] as cell, ci (cell.id)}
-        {@render bodyCell(cell, row, ci === startCount - 1 ? 'cell-start pinned-edge' : 'cell-start')}
+        {@render bodyCell(cell, row, ci === startCount - 1 ? 'cell-start pinned-edge' : 'cell-start', absolute)}
       {/each}
       {#each tableRow?.getCenterVisibleCells() ?? [] as cell (cell.id)}
-        {@render bodyCell(cell, row, 'cell-center')}
+        {@render bodyCell(cell, row, 'cell-center', absolute)}
       {/each}
       {#each tableRow?.getEndVisibleCells() ?? [] as cell, ci (cell.id)}
-        {@render bodyCell(cell, row, ci === 0 ? 'cell-end pinned-edge' : 'cell-end')}
+        {@render bodyCell(cell, row, ci === 0 ? 'cell-end pinned-edge' : 'cell-end', absolute)}
       {/each}
     </tr>
   {/each}
 </tbody>
 
-{#snippet bodyCell(cell, row, extraClass)}
+{#snippet bodyCell(cell, row, extraClass, rowIndex)}
   {@const index = cell.column.columnDef.meta?.index ?? 0}
   {@const value = row[index]}
   <td
     class="{cellClass(value)} {extraClass}"
+    data-selected={cell.getIsSelected() ? 'true' : 'false'}
+    class:focused={cell.getIsFocused()}
+    tabindex={cell.getTabIndex()}
     style="width: {widthOf(index)}px; min-width: 80px;"
+    onmousedown={(e) => onCellMouseDown(rowIndex, cell.column.id, e)}
+    onmouseenter={() => onCellMouseEnter(rowIndex, cell.column.id)}
     oncontextmenu={(e) => onCellContextMenu(e, index, value)}
   >
     {#if typeof value === 'boolean'}
@@ -132,6 +139,22 @@
   }
   td.pinned-edge {
     box-shadow: 2px 0 6px -2px rgba(0, 0, 0, 0.55);
+  }
+
+  /* Cell-range selection. The tint is re-asserted at the zebra and hover
+     tiers below: their selectors are more specific than a bare attribute
+     selector, and an unpainted-on-striped-rows selection is invisible. */
+  td[data-selected='true'],
+  tr.even td[data-selected='true'] {
+    background: var(--accent-soft, rgba(120, 140, 255, 0.18));
+  }
+  tr:hover td[data-selected='true'] {
+    background: var(--accent-soft-strong, rgba(120, 140, 255, 0.28));
+  }
+
+  td.focused {
+    outline: 2px solid var(--accent, #6b7cff);
+    outline-offset: -2px;
   }
 
   /* Boolean badges */

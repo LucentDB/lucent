@@ -45,6 +45,8 @@
   let pickerOpen = $state(false);
   let resizing = $state(null);
   let resizeGuide = $state(null);
+  /** True while a cell-range drag is in flight; mouseenter extends only then. */
+  let dragging = $state(false);
   let tableWrapperEl = $state(null);
   let columnMenu = $state(null);
   let cellMenu = $state(null);
@@ -121,6 +123,7 @@
     untrack(() => {
       filters = normalize(initFilters);
       engine.clearRowSelection();
+      engine.clearCellSelection();
       barOpen = false;
       pickerOpen = false;
       restoringTabState = true;
@@ -140,6 +143,9 @@
     if (restoringTabState) return; // a tab switch restores state, it does not change it
     stream.reset();
     engine.clearRowSelection();
+    // A committed sort/filter refetches with new order or rows; positional
+    // cell ranges would point at different values afterwards.
+    engine.clearCellSelection();
     onStateChange?.({ filters, sorting: engine.sorting });
   }
 
@@ -157,6 +163,55 @@
 
   function sortDirectionOf(columnId) {
     return engine.table.getColumn(columnId)?.getIsSorted() ?? false;
+  }
+
+  function onCellMouseDown(rowIndex, columnId, event) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    dragging = true;
+    if (event.shiftKey) engine.extendCellSelection({ rowIndex, columnId });
+    else engine.startCellSelection({ rowIndex, columnId });
+    // A drag can end anywhere, including outside the window.
+    const stop = () => {
+      dragging = false;
+      window.removeEventListener('mouseup', stop);
+    };
+    window.addEventListener('mouseup', stop);
+    activeDragCleanup = stop;
+  }
+
+  function onCellMouseEnter(rowIndex, columnId) {
+    if (!dragging) return;
+    engine.extendCellSelection({ rowIndex, columnId });
+  }
+
+  const ARROWS = {
+    ArrowUp: 'up',
+    ArrowDown: 'down',
+    ArrowLeft: 'left',
+    ArrowRight: 'right',
+  };
+
+  function handleGridKeydown(e) {
+    if (ARROWS[e.key]) {
+      e.preventDefault();
+      engine.moveCellSelection(ARROWS[e.key], e.shiftKey);
+      // Keep the focused cell on screen when arrowing past the viewport edge.
+      queueMicrotask(() => {
+        tableWrapperEl
+          ?.querySelector('td.focused')
+          ?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+      });
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
+      e.preventDefault();
+      engine.selectAllCells();
+      return;
+    }
+    if (e.key === 'Escape') {
+      engine.clearCellSelection();
+    }
   }
 
   /** Absolute indices of gutter-selected rows, for cell styling and copy. */
@@ -594,6 +649,7 @@
       class:loading
       bind:this={tableWrapperEl}
       bind:clientWidth={wrapperWidth}
+      onkeydown={handleGridKeydown}
     >
       {#if loading}
         <div class="refetch-bar" role="status" aria-label="Refreshing rows">
@@ -628,6 +684,8 @@
           {selectedRows}
           onSelectRow={selectRow}
           onCellContextMenu={openCellMenu}
+          {onCellMouseDown}
+          {onCellMouseEnter}
         />
       </table>
     </div>

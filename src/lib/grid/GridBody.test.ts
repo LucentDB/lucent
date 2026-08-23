@@ -135,3 +135,38 @@ describe('pinned layout', () => {
     expect(firstRowStart[1].textContent?.trim()).toBe('1');
   });
 });
+
+describe('cell selection rendering', () => {
+  /** Selection state crosses table atoms synced on the microtask queue. */
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it('marks selected cells', async () => {
+    const { container } = renderBody({ selectCell: { rowIndex: 0, columnId: '0' } });
+    await settle();
+    expect(container.querySelector('td[data-selected="true"]')).toBeTruthy();
+  });
+
+  it('starts a range on mousedown', async () => {
+    const onCellMouseDown = vi.fn();
+    const { container } = renderBody({ onCellMouseDown });
+    const cell = container.querySelectorAll('tbody td')[1];
+    await fireEvent.mouseDown(cell);
+    expect(onCellMouseDown).toHaveBeenCalledWith(0, '0', expect.anything());
+  });
+
+  it('extends the range on mouseenter while dragging', async () => {
+    const onCellMouseEnter = vi.fn();
+    const { container } = renderBody({ onCellMouseEnter });
+    await fireEvent.mouseEnter(container.querySelectorAll('tbody td')[2]);
+    expect(onCellMouseEnter).toHaveBeenCalledWith(0, '1');
+  });
+
+  it('gives exactly one cell a tabindex of 0 so tab reaches the grid once', async () => {
+    const { container } = renderBody({ selectCell: { rowIndex: 0, columnId: '0' } });
+    await settle();
+    const focusable = [...container.querySelectorAll('tbody td')].filter(
+      (td) => td.getAttribute('tabindex') === '0',
+    );
+    expect(focusable).toHaveLength(1);
+  });
+});

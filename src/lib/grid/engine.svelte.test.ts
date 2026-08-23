@@ -290,8 +290,8 @@ describe('GRID_FEATURES', () => {
     }
   });
 
-  it('does not yet include cellSelectionFeature — phase 3 adds it with its UI', () => {
-    expect(Object.keys(GRID_FEATURES)).not.toContain('cellSelectionFeature');
+  it('includes cellSelectionFeature', () => {
+    expect(Object.keys(GRID_FEATURES)).toContain('cellSelectionFeature');
   });
 });
 
@@ -337,6 +337,98 @@ describe('column pinning', () => {
     await h.flush();
     expect(h.engine().table.getColumn('0')?.getIsPinned()).toBe('start') /* library's logical region for left */;
     expect(h.engine().sortingForWire()).toEqual([{ column: 'id', direction: 'desc' }]);
+    h.dispose();
+  });
+});
+
+describe('cell-range selection', () => {
+  it('starts with no cells selected', () => {
+    const h = harness();
+    expect(h.engine().selectedCellRangesData()).toEqual([]);
+    h.dispose();
+  });
+
+  it('selects a single cell', async () => {
+    const h = harness();
+    h.engine().startCellSelection({ rowIndex: 0, columnId: '1' });
+    await h.flush();
+    expect(h.engine().selectedCellRangesData()).toEqual([['a@x.com']]);
+    h.dispose();
+  });
+
+  it('extends into a rectangle, row-major', async () => {
+    const h = harness();
+    h.engine().startCellSelection({ rowIndex: 0, columnId: '0' });
+    h.engine().extendCellSelection({ rowIndex: 1, columnId: '1' });
+    await h.flush();
+    expect(h.engine().selectedCellRangesData()).toEqual([
+      [1, 'a@x.com'],
+      [2, 'b@x.com'],
+    ]);
+    h.dispose();
+  });
+
+  it('extends backwards to the same rectangle', async () => {
+    const h = harness();
+    h.engine().startCellSelection({ rowIndex: 1, columnId: '1' });
+    h.engine().extendCellSelection({ rowIndex: 0, columnId: '0' });
+    await h.flush();
+    expect(h.engine().selectedCellRangesData()).toEqual([
+      [1, 'a@x.com'],
+      [2, 'b@x.com'],
+    ]);
+    h.dispose();
+  });
+
+  it('selects every cell', async () => {
+    const h = harness();
+    h.engine().selectAllCells();
+    await h.flush();
+    expect(h.engine().selectedCellRangesData()).toHaveLength(2);
+    h.dispose();
+  });
+
+  it('clears', async () => {
+    const h = harness();
+    h.engine().startCellSelection({ rowIndex: 0, columnId: '0' });
+    await h.flush();
+    h.engine().clearCellSelection();
+    await h.flush();
+    expect(h.engine().selectedCellRangesData()).toEqual([]);
+    h.dispose();
+  });
+
+  it('moves the focused cell with arrow semantics', async () => {
+    const h = harness();
+    h.engine().startCellSelection({ rowIndex: 0, columnId: '0' });
+    // The library's move/extend statics read the table atom, which the svelte
+    // adapter syncs on the microtask queue; a keypress is its own task, so
+    // real usage always sees settled atoms. The flush mirrors that timing.
+    await h.flush();
+    h.engine().moveCellSelection('right', false);
+    await h.flush();
+    expect(h.engine().selectedCellRangesData()).toEqual([['a@x.com']]);
+    h.dispose();
+  });
+
+  it('shift-arrow grows the range instead of moving it', async () => {
+    const h = harness();
+    h.engine().startCellSelection({ rowIndex: 0, columnId: '0' });
+    await h.flush();
+    h.engine().moveCellSelection('right', true);
+    await h.flush();
+    expect(h.engine().selectedCellRangesData()).toEqual([[1, 'a@x.com']]);
+    h.dispose();
+  });
+
+  it('leaves row selection alone', async () => {
+    const h = harness();
+    h.engine().selectRow(0, { extend: false, toggle: false });
+    h.engine().startCellSelection({ rowIndex: 1, columnId: '0' });
+    await h.flush();
+    // The two selection models are independent: cells for copy, rows for
+    // row-scoped actions. Spec §4.3.
+    expect(h.engine().selectedRowIndices()).toEqual([0]);
     h.dispose();
   });
 });

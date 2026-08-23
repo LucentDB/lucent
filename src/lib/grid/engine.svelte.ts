@@ -11,6 +11,7 @@
 // '@tanstack/table-core'`), so features and row models come from here too —
 // which is why table-core is not a direct dependency. Spec §9.
 import {
+  cellSelectionFeature,
   columnFilteringFeature,
   columnPinningFeature,
   columnResizingFeature,
@@ -61,7 +62,20 @@ export const GRID_FEATURES = {
   columnVisibilityFeature,
   columnPinningFeature,
   rowSelectionFeature,
+  cellSelectionFeature,
 };
+
+/**
+ * v9 stores a selection as ordered rectangle operations keyed by flat row and
+ * column ids (CellSelectionState). Structural type — the engine never imports
+ * table-core types directly (spec §3.4 routes every type through LucentTable).
+ */
+interface CellSelectionRangeState {
+  anchorRowId: string;
+  anchorColumnId: string;
+  focusRowId: string;
+  focusColumnId: string;
+}
 
 export function createGridEngine(config: GridConfig) {
   let sorting = $state<SortState[]>([...config.initialSorting]);
@@ -80,6 +94,8 @@ export function createGridEngine(config: GridConfig) {
     start: [],
     end: [],
   });
+
+  let cellSelection = $state<CellSelectionRangeState[]>([]);
 
   /**
    * All three manual flags are pinned per spec D3 even though
@@ -140,6 +156,11 @@ export function createGridEngine(config: GridConfig) {
     maxMultiSortColCount: config.maxSortKeys ?? 3,
     isMultiSortEvent: (e: unknown) =>
       (e as { shiftKey?: boolean } | undefined)?.shiftKey === true,
+    // The library default wipes cellSelection whenever the data identity
+    // changes — and every fetch-more append replaces the accumulated array.
+    // Lucent owns the lifecycle instead: emitChange clears explicitly when a
+    // refetch actually reorders/replaces rows.
+    autoResetCellSelection: false,
     // Rows are positional arrays with no natural key. Index over the
     // accumulated buffer is the absolute row number, which is also the
     // row-selection key: selection survives page changes by construction.
@@ -159,6 +180,9 @@ export function createGridEngine(config: GridConfig) {
       },
       get rowSelection() {
         return rowSelection;
+      },
+      get cellSelection() {
+        return cellSelection;
       },
     },
     onSortingChange: (updater: unknown) => {
@@ -191,6 +215,14 @@ export function createGridEngine(config: GridConfig) {
         typeof updater === 'function'
           ? (updater as (p: typeof rowSelection) => typeof rowSelection)(rowSelection)
           : (updater as typeof rowSelection);
+    },
+    onCellSelectionChange: (updater: unknown) => {
+      cellSelection =
+        typeof updater === 'function'
+          ? (updater as (
+              p: typeof cellSelection,
+            ) => typeof cellSelection)(cellSelection)
+          : (updater as typeof cellSelection);
     },
   });
 
@@ -264,6 +296,77 @@ export function createGridEngine(config: GridConfig) {
       ?.pin(side === false ? false : side === 'left' ? 'start' : 'end');
   }
 
+  // ---- Cell-range selection (phase ③). Wrappers over v9's
+  // cellSelectionFeature statics — wrapped, never re-implemented.
+  // Reconciled against the SHIPPED types
+  // (table-core/dist/features/cell-selection/cellSelectionFeature.types.d.ts),
+  // which differ from the shapes sketched when this task was planned:
+  //   setFocusedCell(rowId, columnId) is positional, not object-taking;
+  //   selectCellRange takes {anchorRowId, anchorColumnId, focusRowId,
+  //   focusColumnId} corners, not {start, end}; extendCellSelection takes a
+  //   DIRECTION, not a target cell; moveCellSelection takes no extend flag.
+
+  /**
+   * Row-major values for the selected rectangles, ready to serialise. The
+   * library returns one grid per region ([region][row][col]); replace-mode
+   * selections have exactly one region, and multi-region selections (future
+   * cmd-click additive ranges) concatenate their grids row-wise.
+   */
+  function selectedCellRangesData(): unknown[][] {
+    return table.getSelectedCellRangesData().flat();
+  }
+
+  function startCellSelection(target: { rowIndex: number; columnId: string }) {
+    const rowId = String(target.rowIndex);
+    table.setFocusedCell(rowId, target.columnId);
+    table.selectCellRange({
+      anchorRowId: rowId,
+      anchorColumnId: target.columnId,
+      focusRowId: rowId,
+      focusColumnId: target.columnId,
+    });
+  }
+
+  function extendCellSelection(target: { rowIndex: number; columnId: string }) {
+    // v9 has no target-based extend — reproduce drag semantics by re-selecting
+    // from the current anchor to the target. The anchor comes from THIS
+    // engine's synchronous state, not table.getFocusedCell(): the svelte
+    // adapter syncs table atoms on the microtask queue, so the library's
+    // atom-backed getter can lag one turn behind a just-made selection.
+    // With nothing selected yet, this degrades to starting at the target.
+    const active = cellSelection[cellSelection.length - 1];
+    table.selectCellRange({
+      anchorRowId: active?.anchorRowId ?? String(target.rowIndex),
+      anchorColumnId: active?.anchorColumnId ?? target.columnId,
+      focusRowId: String(target.rowIndex),
+      focusColumnId: target.columnId,
+    });
+  }
+
+  function moveCellSelection(
+    direction: 'up' | 'down' | 'left' | 'right',
+    extend: boolean,
+  ) {
+    if (extend) {
+      // Shift-arrow keeps the anchor and grows the range one step.
+      table.extendCellSelection(direction);
+      return;
+    }
+    // Plain arrow collapses the selection onto the neighbouring cell.
+    table.moveCellSelection(direction);
+  }
+
+  function selectAllCells() {
+    table.selectAllCells();
+  }
+
+  function clearCellSelection() {
+    // Explicit empty reset regardless of initial state. Note the library also
+    // auto-resets when `data` changes (autoResetCellSelection defaults true):
+    // a refetch clears stale ranges for free.
+    table.resetCellSelection(true);
+  }
+
   return {
     table,
     get sorting() {
@@ -281,6 +384,15 @@ export function createGridEngine(config: GridConfig) {
     pinColumn,
     sortIndexOf,
     sortingForWire,
+    get cellSelection() {
+      return cellSelection;
+    },
+    selectedCellRangesData,
+    startCellSelection,
+    extendCellSelection,
+    moveCellSelection,
+    selectAllCells,
+    clearCellSelection,
   };
 }
 

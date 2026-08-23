@@ -14,10 +14,14 @@
     selectedRows = new Set(),
     onSelectRow = () => {},
     onCellContextMenu = () => {},
+    onCellMouseDown = () => {},
+    onCellMouseEnter = () => {},
     /** Column ids to pin left before first render — drives group layout. */
     pinLeft = [],
     /** Column ids to pin right before first render — drives group layout. */
     pinRight = [],
+    /** Cell to select before first render — drives selection rendering. */
+    selectCell = null,
   }: {
     columns?: { name: string; type_name: string }[];
     rows?: unknown[][];
@@ -30,8 +34,11 @@
       opts: { extend: boolean; toggle: boolean },
     ) => void;
     onCellContextMenu?: (e: MouseEvent, columnIndex: number, value: unknown) => void;
+    onCellMouseDown?: (rowIndex: number, columnId: string, e: MouseEvent) => void;
+    onCellMouseEnter?: (rowIndex: number, columnId: string) => void;
     pinLeft?: string[];
     pinRight?: string[];
+    selectCell?: { rowIndex: number; columnId: string } | null;
   } = $props();
 
   const engine = createGridEngine({
@@ -44,6 +51,7 @@
   // group layout is settled when the test's first assertions run.
   for (const id of pinLeft) engine.pinColumn(id, 'left');
   for (const id of pinRight) engine.pinColumn(id, 'right');
+  if (selectCell) engine.startCellSelection(selectCell);
 </script>
 
 <table>
@@ -55,5 +63,7 @@
     {selectedRows}
     {onSelectRow}
     {onCellContextMenu}
+    {onCellMouseDown}
+    {onCellMouseEnter}
   />
 </table>
