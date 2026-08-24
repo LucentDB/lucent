@@ -4,7 +4,11 @@ import DmlApprovalCard from './DmlApprovalCard.svelte';
 
 afterEach(cleanup);
 
-const dml = { sql: 'delete from t', description: 'Remove stale rows', estimatedRowsAffected: 12 };
+const dml = {
+  sql: 'delete from t',
+  description: 'Remove stale rows',
+  estimatedRowsAffected: 12,
+};
 
 describe('DmlApprovalCard states', () => {
   it('shows the awaiting caption while waiting for the decision', () => {
@@ -14,13 +18,25 @@ describe('DmlApprovalCard states', () => {
   });
 
   it('shows the executed state when a result arrived', () => {
-    const { container } = render(DmlApprovalCard, { dml, result: 3, onRun: vi.fn(), onCancel: vi.fn() });
+    const { container } = render(DmlApprovalCard, {
+      dml,
+      result: 3,
+      onRun: vi.fn(),
+      onCancel: vi.fn(),
+    });
     expect(screen.getByText('DML Executed')).toBeTruthy();
-    expect(container.querySelector('.dml-result')?.textContent).toMatch(/3\s+rows affected/);
+    expect(container.querySelector('.dml-result')?.textContent).toMatch(
+      /3\s+rows affected/,
+    );
   });
 
   it('shows the error state when execution failed', () => {
-    render(DmlApprovalCard, { dml, error: 'stale preview', onRun: vi.fn(), onCancel: vi.fn() });
+    render(DmlApprovalCard, {
+      dml,
+      error: 'stale preview',
+      onRun: vi.fn(),
+      onCancel: vi.fn(),
+    });
     expect(screen.getByText('stale preview')).toBeTruthy();
     expect(screen.queryByText('Awaiting your decision')).toBeNull();
   });

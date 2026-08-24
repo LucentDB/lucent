@@ -273,6 +273,10 @@ pub(crate) async fn dispatch(
     tool: &str,
     args: serde_json::Value,
 ) -> wire::BridgeResponse {
+    // The card's Input section is fed from here, not from the agent's own
+    // report: a CLI-path call arrives as an opaque shell command, so the
+    // arguments the bridge actually executed are the only real ones.
+    let input = args.clone();
     match executor.call(tool, args).await {
         Ok(ToolOutput::DmlPreview {
             sql,
@@ -337,7 +341,13 @@ pub(crate) async fn dispatch(
             sink.event(AiEvent::ToolResult {
                 id: format!("acp-{id}"),
                 tool: tool.to_string(),
-                summary: text_summary.clone(),
+                // Short and uniform, exactly as the rig loop does it
+                // (agent.rs): the card header is a status column, not a
+                // content preview. `text_summary` — SQL echo plus a Markdown
+                // row preview — is the model's payload and rides the bridge
+                // response below; putting it here would fill the header with
+                // table pipes while the grid renders the same rows again.
+                summary: format!("{row_count} rows"),
                 output: Some(serde_json::json!({
                     "type": "query_result",
                     "columns": cols,
@@ -347,6 +357,7 @@ pub(crate) async fn dispatch(
                     "execution_time_ms": execution_time_ms,
                     "truncated": truncated,
                 })),
+                input: Some(input),
                 status: ToolResultStatus::Completed,
             });
             sink.event(AiEvent::QueryResult {
@@ -361,10 +372,24 @@ pub(crate) async fn dispatch(
                 output: serde_json::json!({ "text": text_summary }),
             }
         }
-        Ok(ToolOutput::Text { content }) => wire::BridgeResponse::Ok {
-            id,
-            output: serde_json::json!({ "text": content }),
-        },
+        Ok(ToolOutput::Text { content }) => {
+            // `search_schema` / `get_objects_info` land here. The rig loop
+            // gives them a card too (summary "done", structured text body);
+            // without this the ACP card fell back to the agent's own echo of
+            // the CLI output with a `null` Input.
+            sink.event(AiEvent::ToolResult {
+                id: format!("acp-{id}"),
+                tool: tool.to_string(),
+                summary: "done".into(),
+                output: Some(serde_json::json!({ "type": "text", "data": content.clone() })),
+                input: Some(input),
+                status: ToolResultStatus::Completed,
+            });
+            wire::BridgeResponse::Ok {
+                id,
+                output: serde_json::json!({ "text": content }),
+            }
+        }
         Err(e) => wire::BridgeResponse::Err {
             id,
             error: e.to_string(),
@@ -675,6 +700,157 @@ mod tests {
             assert_eq!(o["row_count"], 1);
             assert_eq!(o["truncated"], false);
             assert_eq!(o["sql"], "select 1");
+        }
+    }
+
+    #[tokio::test]
+    async fn card_summary_stays_short_and_input_is_backfilled() {
+        // A CLI-path agent reports the helper's stdout — the SQL echo plus the
+        // Markdown row preview — as its tool result. The card header is a
+        // status column, so the bridge must publish the short form and let the
+        // structured payload render those rows once, as a grid.
+        let markdown_blob = "Query: select 1\nResult: 3 rows in 1ms\n\n             **Preview (first 3 of 3 rows):**\n\n| x |\n|---|\n| 1 |\n| 2 |\n| 3 |\n";
+        let dir = tempfile::tempdir().unwrap();
+        let (listener, path) = bind_listener(&dir);
+        let token = "tok123".to_string();
+        let script = vec![(
+            "run_readonly_query".into(),
+            serde_json::json!({"sql": "select 1"}),
+            Ok(ToolOutput::QueryResult {
+                text_summary: markdown_blob.into(),
+                columns: vec![crate::ai::events::ColumnMeta {
+                    name: "x".into(),
+                    data_type: "INTEGER".into(),
+                }],
+                rows: vec![
+                    vec![serde_json::json!(1)],
+                    vec![serde_json::json!(2)],
+                    vec![serde_json::json!(3)],
+                ],
+                row_count: 3,
+                sql: "select 1".into(),
+                execution_time_ms: 1,
+                truncated: false,
+            }),
+        )];
+        let executor: Arc<dyn ToolExecutor> = Arc::new(ScriptedExecutor::new(script));
+        let sink = Arc::new(RecordingSink::new());
+        let task = tokio::spawn(serve(
+            listener,
+            token.clone(),
+            executor,
+            sink.clone(),
+            Arc::new(BridgeHandle::new("conv-1")),
+        ));
+        let mut sock = tokio::net::UnixStream::connect(&path).await.unwrap();
+        wire::write_hello(&mut sock, &token).await.unwrap();
+        wire::write_request(
+            &mut sock,
+            &wire::BridgeRequest::Call {
+                id: 7,
+                tool: "run_readonly_query".into(),
+                args: serde_json::json!({"sql": "select 1"}),
+            },
+        )
+        .await
+        .unwrap();
+        let mut reader = tokio::io::BufReader::new(sock);
+        let resp = wire::read_response(&mut reader).await.unwrap().unwrap();
+        // The model still receives the full preview — that is its payload.
+        match resp {
+            wire::BridgeResponse::Ok { output, .. } => {
+                assert_eq!(output["text"], markdown_blob)
+            }
+            wire::BridgeResponse::Err { error, .. } => panic!("expected Ok: {error}"),
+        }
+        drop(reader);
+        task.abort();
+
+        let events = sink.events.lock().unwrap();
+        let tool_result = events
+            .iter()
+            .find(|e| matches!(e, crate::ai::events::AiEvent::ToolResult { .. }))
+            .expect("structured ToolResult emitted");
+        if let crate::ai::events::AiEvent::ToolResult { summary, input, .. } = tool_result {
+            assert_eq!(summary, "3 rows", "the card header takes the short form");
+            assert!(
+                !summary.contains('|'),
+                "the Markdown preview must not reach the header: {summary}"
+            );
+            assert_eq!(
+                input.as_ref().expect("arguments backfilled")["sql"],
+                "select 1",
+                "the bridge saw the real arguments; the agent's report had none"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn text_output_also_gets_a_card() {
+        // `search_schema` / `get_objects_info` return Text. Without a
+        // structured event the card fell back to the agent's own echo with a
+        // `null` Input — the rig loop gives these a card, so the bridge does too.
+        let dir = tempfile::tempdir().unwrap();
+        let (listener, path) = bind_listener(&dir);
+        let token = "tok123".to_string();
+        let script = vec![(
+            "search_schema".into(),
+            serde_json::json!({"query": "invoices"}),
+            Ok(ToolOutput::Text {
+                content: "orders.total_amount (numeric)".into(),
+            }),
+        )];
+        let executor: Arc<dyn ToolExecutor> = Arc::new(ScriptedExecutor::new(script));
+        let sink = Arc::new(RecordingSink::new());
+        let task = tokio::spawn(serve(
+            listener,
+            token.clone(),
+            executor,
+            sink.clone(),
+            Arc::new(BridgeHandle::new("conv-1")),
+        ));
+        let mut sock = tokio::net::UnixStream::connect(&path).await.unwrap();
+        wire::write_hello(&mut sock, &token).await.unwrap();
+        wire::write_request(
+            &mut sock,
+            &wire::BridgeRequest::Call {
+                id: 2,
+                tool: "search_schema".into(),
+                args: serde_json::json!({"query": "invoices"}),
+            },
+        )
+        .await
+        .unwrap();
+        let mut reader = tokio::io::BufReader::new(sock);
+        let resp = wire::read_response(&mut reader).await.unwrap().unwrap();
+        match resp {
+            wire::BridgeResponse::Ok { output, .. } => {
+                assert_eq!(output["text"], "orders.total_amount (numeric)")
+            }
+            wire::BridgeResponse::Err { error, .. } => panic!("expected Ok: {error}"),
+        }
+        drop(reader);
+        task.abort();
+
+        let events = sink.events.lock().unwrap();
+        let tool_result = events
+            .iter()
+            .find(|e| matches!(e, crate::ai::events::AiEvent::ToolResult { .. }))
+            .expect("Text output emits a ToolResult too");
+        if let crate::ai::events::AiEvent::ToolResult {
+            tool,
+            summary,
+            output,
+            input,
+            ..
+        } = tool_result
+        {
+            assert_eq!(tool, "search_schema");
+            assert_eq!(summary, "done", "matches the rig loop's Text summary");
+            let o = output.as_ref().expect("structured text body");
+            assert_eq!(o["type"], "text");
+            assert_eq!(o["data"], "orders.total_amount (numeric)");
+            assert_eq!(input.as_ref().expect("arguments")["query"], "invoices");
         }
     }
 

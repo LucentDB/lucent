@@ -24,10 +24,18 @@
   } = $props();
 
   const engine = createGridEngine({
-    get columns() { return columns; },
-    get rows() { return rows; },
-    get initialSorting() { return []; },
-    get initialFilters() { return []; },
+    get columns() {
+      return columns;
+    },
+    get rows() {
+      return rows;
+    },
+    get initialSorting() {
+      return [];
+    },
+    get initialFilters() {
+      return [];
+    },
   });
   for (const id of pinLeft) engine.pinColumn(id, 'left');
   for (const id of pinRight) engine.pinColumn(id, 'right');

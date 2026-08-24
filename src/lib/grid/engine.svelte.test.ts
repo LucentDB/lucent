@@ -23,7 +23,11 @@ const ROWS: unknown[][] = [
  * the reactivity cases below would fail inertly, and un-settled mount effects
  * would race the first interaction. Assertions stay verbatim.
  */
-function harness(init?: { columns?: typeof COLUMNS; rows?: unknown[][]; onSortingChange?: (s: unknown) => void }) {
+function harness(init?: {
+  columns?: typeof COLUMNS;
+  rows?: unknown[][];
+  onSortingChange?: (s: unknown) => void;
+}) {
   const state = $state({
     columns: init?.columns ?? COLUMNS,
     rows: init?.rows ?? ROWS,
@@ -33,10 +37,18 @@ function harness(init?: { columns?: typeof COLUMNS; rows?: unknown[][]; onSortin
   let engine!: ReturnType<typeof createGridEngine>;
   const dispose = $effect.root(() => {
     engine = createGridEngine({
-      get columns() { return state.columns; },
-      get rows() { return state.rows; },
-      get initialSorting() { return state.initialSorting; },
-      get initialFilters() { return state.initialFilters; },
+      get columns() {
+        return state.columns;
+      },
+      get rows() {
+        return state.rows;
+      },
+      get initialSorting() {
+        return state.initialSorting;
+      },
+      get initialFilters() {
+        return state.initialFilters;
+      },
       onSortingChange: init?.onSortingChange,
     });
     flushSync();
@@ -68,7 +80,11 @@ describe('manual mode — the D3 correctness guards', () => {
     ]) {
       expect(f).toHaveProperty(required);
     }
-    for (const banned of ['sortedRowModel', 'filteredRowModel', 'paginatedRowModel']) {
+    for (const banned of [
+      'sortedRowModel',
+      'filteredRowModel',
+      'paginatedRowModel',
+    ]) {
       expect(f).not.toHaveProperty(banned);
     }
     // And the runtime cache holds real factories only where core registered
@@ -76,8 +92,7 @@ describe('manual mode — the D3 correctness guards', () => {
     // getter is consulted, so filter to defined values.
     h.engine().table.getRowModel();
     const cached = Reflect.get(h.engine().table, '_rowModels') as
-      | unknown
-      | undefined;
+      unknown | undefined;
     const materialized = Object.entries(
       (cached ?? {}) as Record<string, unknown>,
     )
@@ -102,7 +117,10 @@ describe('manual mode — the D3 correctness guards', () => {
     const h = harness();
     h.engine().table.setSorting([{ id: '0', desc: true }]);
     await h.flush();
-    const rendered = h.engine().table.getRowModel().rows.map((r) => r.original);
+    const rendered = h
+      .engine()
+      .table.getRowModel()
+      .rows.map((r) => r.original);
     // Backend order is authoritative; the row model must be untouched.
     expect(rendered).toEqual(ROWS);
     h.dispose();
@@ -127,12 +145,16 @@ describe('manual mode — the D3 correctness guards', () => {
 
     h.engine().table.getColumn('0')!.toggleSorting();
     await h.flush();
-    expect(h.engine().table.atoms.sorting.get()).toEqual([{ id: '0', desc: true }]);
+    expect(h.engine().table.atoms.sorting.get()).toEqual([
+      { id: '0', desc: true },
+    ]);
 
     h.engine().table.getColumn('0')!.toggleSorting();
     await h.flush();
     // Back to ascending — NOT removed/undefined.
-    expect(h.engine().table.atoms.sorting.get()).toEqual([{ id: '0', desc: false }]);
+    expect(h.engine().table.atoms.sorting.get()).toEqual([
+      { id: '0', desc: false },
+    ]);
     h.dispose();
   });
 });
@@ -140,8 +162,16 @@ describe('manual mode — the D3 correctness guards', () => {
 describe('column defs', () => {
   it('ids columns by index so duplicate names stay distinct', () => {
     // SELECT a, a is legal SQL and yields two columns named 'a'.
-    const h = harness({ columns: [{ name: 'a', type_name: 'int4' }, { name: 'a', type_name: 'text' }] });
-    const ids = h.engine().table.getAllLeafColumns().map((c) => c.id);
+    const h = harness({
+      columns: [
+        { name: 'a', type_name: 'int4' },
+        { name: 'a', type_name: 'text' },
+      ],
+    });
+    const ids = h
+      .engine()
+      .table.getAllLeafColumns()
+      .map((c) => c.id);
     expect(ids).toEqual(['0', '1']);
     h.dispose();
   });
@@ -149,7 +179,10 @@ describe('column defs', () => {
   it('carries the display name and type in column meta', () => {
     const h = harness();
     const col = h.engine().table.getColumn('1');
-    expect(col?.columnDef.meta).toMatchObject({ name: 'email', typeName: 'text' });
+    expect(col?.columnDef.meta).toMatchObject({
+      name: 'email',
+      typeName: 'text',
+    });
     h.dispose();
   });
 

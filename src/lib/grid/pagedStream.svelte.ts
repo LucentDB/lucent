@@ -111,14 +111,30 @@ export function createPagedStream(config: PagedStreamConfig) {
   }
 
   return {
-    get page() { return page; },
-    get pageRows() { return pageRows; },
-    get maxPage() { return maxPage; },
-    get canGoNext() { return canGoNext; },
-    get fitsOnePage() { return fitsOnePage; },
-    get isFetchingMore() { return isFetchingMore; },
-    get firstRowNumber() { return firstRowNumber; },
-    get lastRowNumber() { return lastRowNumber; },
+    get page() {
+      return page;
+    },
+    get pageRows() {
+      return pageRows;
+    },
+    get maxPage() {
+      return maxPage;
+    },
+    get canGoNext() {
+      return canGoNext;
+    },
+    get fitsOnePage() {
+      return fitsOnePage;
+    },
+    get isFetchingMore() {
+      return isFetchingMore;
+    },
+    get firstRowNumber() {
+      return firstRowNumber;
+    },
+    get lastRowNumber() {
+      return lastRowNumber;
+    },
     goNext,
     goPrev,
     reset,

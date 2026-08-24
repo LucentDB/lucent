@@ -2126,7 +2126,7 @@ pub async fn ensure_reranker(state: &AppState) {
 /// set, else the rig `DatabaseAgent`. Pure so the branch is unit-testable
 /// (the D1 seam test). The `provider` is only ever built on the rig path —
 /// ACP agents own their auth.
-fn pick_driver(
+pub(crate) fn pick_driver(
     acp: &Option<crate::ai::config::AcpAgentConfig>,
     provider: Option<Arc<dyn LlmProvider>>,
     tools: Vec<crate::ai::tools::LucentToolEnum>,

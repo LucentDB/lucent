@@ -59,7 +59,10 @@ describe('wireSortFor', () => {
   it('maps positional ids back to column names, in order', () => {
     expect(
       wireSortFor(
-        [{ id: '1', desc: true }, { id: '0', desc: false }],
+        [
+          { id: '1', desc: true },
+          { id: '0', desc: false },
+        ],
         WIRE_COLUMNS,
       ),
     ).toEqual([

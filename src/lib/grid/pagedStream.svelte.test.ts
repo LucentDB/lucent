@@ -37,12 +37,24 @@ function harness(init: {
   let stream!: ReturnType<typeof createPagedStream>;
   const dispose = $effect.root(() => {
     stream = createPagedStream({
-      get rows() { return state.rows; },
-      get fetchedCount() { return state.fetchedCount; },
-      get isEnd() { return state.isEnd; },
-      get totalCount() { return state.totalCount; },
-      get pageSize() { return state.pageSize; },
-      get tabId() { return state.tabId; },
+      get rows() {
+        return state.rows;
+      },
+      get fetchedCount() {
+        return state.fetchedCount;
+      },
+      get isEnd() {
+        return state.isEnd;
+      },
+      get totalCount() {
+        return state.totalCount;
+      },
+      get pageSize() {
+        return state.pageSize;
+      },
+      get tabId() {
+        return state.tabId;
+      },
       onNeedMore: init.onNeedMore,
     });
   });
@@ -65,7 +77,12 @@ describe('page slicing', () => {
   });
 
   it('gives the last page only its remaining rows', async () => {
-    const h = harness({ rows: rowsOf(450), fetchedCount: 450, isEnd: true, pageSize: 200 });
+    const h = harness({
+      rows: rowsOf(450),
+      fetchedCount: 450,
+      isEnd: true,
+      pageSize: 200,
+    });
     await h.stream().goNext();
     await h.stream().goNext();
     expect(h.stream().page).toBe(2);
@@ -142,11 +159,16 @@ describe('goNext', () => {
   it('ignores a second click while a fetch is in flight', async () => {
     let calls = 0;
     let release!: () => void;
-    const gate = new Promise<void>((r) => { release = r; });
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
     const h = harness({
       rows: rowsOf(200),
       fetchedCount: 200,
-      onNeedMore: async () => { calls += 1; await gate; },
+      onNeedMore: async () => {
+        calls += 1;
+        await gate;
+      },
     });
     const first = h.stream().goNext();
     const second = h.stream().goNext();

@@ -365,7 +365,19 @@ fn handle_msg(
                         .and_then(|b| b.get("text"))
                         .and_then(|t| t.as_str())
                         .unwrap_or("");
-                    let shown: String = text.chars().take(2000).collect();
+                    // Both ends, not the first 2000 chars: the client's
+                    // 2 KB stderr tail is what tests read, so a long prompt
+                    // would push its own head (the system preamble) out of
+                    // the window and only the tail would be assertable.
+                    let total = text.chars().count();
+                    const END: usize = 600;
+                    let shown: String = if total > END * 2 {
+                        let head: String = text.chars().take(END).collect();
+                        let tail: String = text.chars().skip(total - END).collect();
+                        format!("{head}…[{} chars omitted]…{tail}", total - END * 2)
+                    } else {
+                        text.to_string()
+                    };
                     eprintln!("STUB prompt text: {shown}");
                     eprintln!("STUB session/prompt session={session_id}");
                     *prompt = Some(PromptState {
