@@ -20,7 +20,13 @@ const ROWS: unknown[][] = [
 
 function renderBody(overrides: Record<string, unknown> = {}) {
   return render(BodyHarness, {
-    props: { columns: COLUMNS, rows: ROWS, pageRows: ROWS, pageOffset: 0, ...overrides },
+    props: {
+      columns: COLUMNS,
+      rows: ROWS,
+      pageRows: ROWS,
+      pageOffset: 0,
+      ...overrides,
+    },
   });
 }
 
@@ -39,7 +45,9 @@ describe('GridBody', () => {
 
   it('renders a null cell as empty with the null class', () => {
     const { container } = renderBody();
-    const nullCell = container.querySelectorAll('tbody tr')[2].querySelectorAll('td')[1];
+    const nullCell = container
+      .querySelectorAll('tbody tr')[2]
+      .querySelectorAll('td')[1];
     expect(nullCell.className).toContain('cell-null');
     expect(nullCell.textContent?.trim()).toBe('');
   });
@@ -54,11 +62,17 @@ describe('GridBody', () => {
     // Page 2 of a 200-row page size: local row 0 is absolute row 200.
     const { container } = renderBody({ pageOffset: 200, onSelectRow });
     await fireEvent.click(container.querySelectorAll('.gutter')[0]);
-    expect(onSelectRow).toHaveBeenCalledWith(200, { extend: false, toggle: false });
+    expect(onSelectRow).toHaveBeenCalledWith(200, {
+      extend: false,
+      toggle: false,
+    });
   });
 
   it('reflects selection from the absolute index set', () => {
-    const { container } = renderBody({ pageOffset: 200, selectedRows: new Set([201]) });
+    const { container } = renderBody({
+      pageOffset: 200,
+      selectedRows: new Set([201]),
+    });
     const gutters = container.querySelectorAll('.gutter');
     expect(gutters[0].className).not.toContain('selected');
     expect(gutters[1].className).toContain('selected');
@@ -66,13 +80,17 @@ describe('GridBody', () => {
 
   it('numbers rows absolutely, so page 2 starts at 201', () => {
     const { container } = renderBody({ pageOffset: 200 });
-    expect(container.querySelectorAll('.gutter')[0].textContent?.trim()).toBe('201');
+    expect(container.querySelectorAll('.gutter')[0].textContent?.trim()).toBe(
+      '201',
+    );
   });
 
   it('passes the column index and value to the context menu handler', async () => {
     const onCellContextMenu = vi.fn();
     const { container } = renderBody({ onCellContextMenu });
-    const cell = container.querySelectorAll('tbody tr')[0].querySelectorAll('td')[1];
+    const cell = container
+      .querySelectorAll('tbody tr')[0]
+      .querySelectorAll('td')[1];
     await fireEvent.contextMenu(cell);
     expect(onCellContextMenu).toHaveBeenCalledWith(expect.anything(), 0, 1);
   });
@@ -141,7 +159,9 @@ describe('cell selection rendering', () => {
   const settle = () => new Promise((r) => setTimeout(r, 0));
 
   it('marks selected cells', async () => {
-    const { container } = renderBody({ selectCell: { rowIndex: 0, columnId: '0' } });
+    const { container } = renderBody({
+      selectCell: { rowIndex: 0, columnId: '0' },
+    });
     await settle();
     expect(container.querySelector('td[data-selected="true"]')).toBeTruthy();
   });
@@ -162,7 +182,9 @@ describe('cell selection rendering', () => {
   });
 
   it('gives exactly one cell a tabindex of 0 so tab reaches the grid once', async () => {
-    const { container } = renderBody({ selectCell: { rowIndex: 0, columnId: '0' } });
+    const { container } = renderBody({
+      selectCell: { rowIndex: 0, columnId: '0' },
+    });
     await settle();
     const focusable = [...container.querySelectorAll('tbody td')].filter(
       (td) => td.getAttribute('tabindex') === '0',
@@ -178,13 +200,14 @@ describe('pinned cell offsets', () => {
     const startCells = firstRow.querySelectorAll('.cell-start');
     // [gutter, first data column]: gutter pins at 0, data clears it.
     expect(startCells[0].getAttribute('style')).toContain('left: 0');
-    expect(startCells[1].getAttribute('style')).toContain('left: 44px');
+    expect(startCells[1].getAttribute('style')).toContain('left: 34px');
   });
 
   it('gives stacked right-pinned cells cumulative insets', () => {
     const { container } = renderBody({ pinRight: ['1', '0'] });
-    const endCells =
-      container.querySelectorAll('tbody tr')[0].querySelectorAll('.cell-end');
+    const endCells = container
+      .querySelectorAll('tbody tr')[0]
+      .querySelectorAll('.cell-end');
     const rights = [...endCells].map((td) =>
       Number(td.getAttribute('style')?.match(/right: ([\d.]+)px/)?.[1]),
     );

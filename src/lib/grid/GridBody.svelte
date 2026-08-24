@@ -96,11 +96,12 @@
   tr:hover td {
     background: var(--bg-hover);
   }
-  tr:hover td:first-child {
-    box-shadow: inset 3px 0 0 var(--accent);
-  }
   td {
-    padding: var(--space-2) var(--space-3);
+    /* ~24px rows. The old 8px/12px padding gave 36px, which wasted a third of
+       the vertical space in a tool whose whole job is showing many rows. */
+    padding: 3px 8px;
+    font-size: var(--text-sm);
+    height: var(--grid-row-h);
     border-bottom: 1px solid var(--grid-line);
     border-right: 1px solid var(--grid-line);
     white-space: nowrap;
@@ -110,8 +111,8 @@
   }
   td.row-num {
     text-align: center;
-    padding: var(--space-2) 4px;
-    width: 44px;
+    padding: 3px 4px;
+    width: 34px;
     border-right: 1px solid var(--grid-line);
   }
   td.cell-null {

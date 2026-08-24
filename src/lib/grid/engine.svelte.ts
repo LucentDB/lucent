@@ -29,7 +29,7 @@ import {
  * model, so every pinned-column offset must include it or the first pinned
  * data column slides under the gutter.
  */
-export const GUTTER_WIDTH = 44;
+export const GUTTER_WIDTH = 34;
 
 export interface GridColumn {
   name: string;
@@ -211,9 +211,11 @@ export function createGridEngine(config: GridConfig) {
     onColumnSizingChange: (updater: unknown) => {
       columnSizing =
         typeof updater === 'function'
-          ? (updater as (
-              prev: Record<string, number>,
-            ) => Record<string, number>)(columnSizing)
+          ? (
+              updater as (
+                prev: Record<string, number>,
+              ) => Record<string, number>
+            )(columnSizing)
           : (updater as Record<string, number>);
     },
     onColumnPinningChange: (updater: unknown) => {
@@ -227,7 +229,7 @@ export function createGridEngine(config: GridConfig) {
                 start?: string[];
                 end?: string[];
               }
- )({ ...pinning })
+            )({ ...pinning })
           : (updater as { start?: string[]; end?: string[] });
       pinning = {
         start: next?.start ?? [],
@@ -237,15 +239,17 @@ export function createGridEngine(config: GridConfig) {
     onRowSelectionChange: (updater: unknown) => {
       rowSelection =
         typeof updater === 'function'
-          ? (updater as (p: typeof rowSelection) => typeof rowSelection)(rowSelection)
+          ? (updater as (p: typeof rowSelection) => typeof rowSelection)(
+              rowSelection,
+            )
           : (updater as typeof rowSelection);
     },
     onCellSelectionChange: (updater: unknown) => {
       cellSelection =
         typeof updater === 'function'
-          ? (updater as (
-              p: typeof cellSelection,
-            ) => typeof cellSelection)(cellSelection)
+          ? (updater as (p: typeof cellSelection) => typeof cellSelection)(
+              cellSelection,
+            )
           : (updater as typeof cellSelection);
     },
   });

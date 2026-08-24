@@ -271,9 +271,9 @@ describe('multi-sort', () => {
     // The same path a shift-click takes in the header: getToggleSortingHandler
     // applies isMultiSortEvent and appends a key — until the cap.
     for (const id of ['0', '1', '2', '3']) {
-      h.engine()
-        .table.getColumn(id)
-        ?.getToggleSortingHandler()?.({ shiftKey: true });
+      h.engine().table.getColumn(id)?.getToggleSortingHandler()?.({
+        shiftKey: true,
+      });
     }
     await h.flush();
     expect(h.engine().sorting).toHaveLength(3);
@@ -302,7 +302,12 @@ describe('multi-sort', () => {
     ]);
     await h.flush();
     // Manual mode holds regardless of how many keys are set. Spec D3.
-    expect(h.engine().table.getRowModel().rows.map((r) => r.original)).toEqual(ROWS);
+    expect(
+      h
+        .engine()
+        .table.getRowModel()
+        .rows.map((r) => r.original),
+    ).toEqual(ROWS);
     h.dispose();
   });
 });
@@ -339,8 +344,18 @@ describe('column pinning', () => {
     const h = harness();
     h.engine().pinColumn('0', 'left');
     await h.flush();
-    expect(h.engine().table.getStartVisibleLeafColumns().map((c) => c.id)).toEqual(['0']);
-    expect(h.engine().table.getCenterVisibleLeafColumns().map((c) => c.id)).toEqual(['1']);
+    expect(
+      h
+        .engine()
+        .table.getStartVisibleLeafColumns()
+        .map((c) => c.id),
+    ).toEqual(['0']);
+    expect(
+      h
+        .engine()
+        .table.getCenterVisibleLeafColumns()
+        .map((c) => c.id),
+    ).toEqual(['1']);
     h.dispose();
   });
 
@@ -359,7 +374,9 @@ describe('column pinning', () => {
     const h = harness();
     h.engine().pinColumn('1', 'right');
     await h.flush();
-    expect(h.engine().table.getColumn('1')?.getIsPinned()).toBe('end') /* library's logical region for right */;
+    expect(h.engine().table.getColumn('1')?.getIsPinned()).toBe(
+      'end',
+    ); /* library's logical region for right */
     h.dispose();
   });
 
@@ -368,8 +385,12 @@ describe('column pinning', () => {
     h.engine().pinColumn('0', 'left');
     h.engine().table.setSorting([{ id: '0', desc: true }]);
     await h.flush();
-    expect(h.engine().table.getColumn('0')?.getIsPinned()).toBe('start') /* library's logical region for left */;
-    expect(h.engine().sortingForWire()).toEqual([{ column: 'id', direction: 'desc' }]);
+    expect(h.engine().table.getColumn('0')?.getIsPinned()).toBe(
+      'start',
+    ); /* library's logical region for left */
+    expect(h.engine().sortingForWire()).toEqual([
+      { column: 'id', direction: 'desc' },
+    ]);
     h.dispose();
   });
 });
@@ -474,7 +495,13 @@ describe('row selection', () => {
   });
 
   it('selects one row, replacing any previous selection', async () => {
-    const h = harness({ rows: [[1, 'a'], [2, 'b'], [3, 'c']] });
+    const h = harness({
+      rows: [
+        [1, 'a'],
+        [2, 'b'],
+        [3, 'c'],
+      ],
+    });
     h.engine().selectRow(0, { extend: false, toggle: false });
     await h.flush();
     h.engine().selectRow(2, { extend: false, toggle: false });
@@ -484,7 +511,13 @@ describe('row selection', () => {
   });
 
   it('cmd-click toggles a row into the selection', async () => {
-    const h = harness({ rows: [[1, 'a'], [2, 'b'], [3, 'c']] });
+    const h = harness({
+      rows: [
+        [1, 'a'],
+        [2, 'b'],
+        [3, 'c'],
+      ],
+    });
     h.engine().selectRow(0, { extend: false, toggle: false });
     h.engine().selectRow(2, { extend: false, toggle: true });
     await h.flush();
@@ -493,7 +526,14 @@ describe('row selection', () => {
   });
 
   it('shift-click extends from the anchor to the clicked row', async () => {
-    const h = harness({ rows: [[1, 'a'], [2, 'b'], [3, 'c'], [4, 'd']] });
+    const h = harness({
+      rows: [
+        [1, 'a'],
+        [2, 'b'],
+        [3, 'c'],
+        [4, 'd'],
+      ],
+    });
     h.engine().selectRow(1, { extend: false, toggle: false });
     h.engine().selectRow(3, { extend: true, toggle: false });
     await h.flush();
@@ -502,7 +542,14 @@ describe('row selection', () => {
   });
 
   it('extends backwards too', async () => {
-    const h = harness({ rows: [[1, 'a'], [2, 'b'], [3, 'c'], [4, 'd']] });
+    const h = harness({
+      rows: [
+        [1, 'a'],
+        [2, 'b'],
+        [3, 'c'],
+        [4, 'd'],
+      ],
+    });
     h.engine().selectRow(3, { extend: false, toggle: false });
     h.engine().selectRow(1, { extend: true, toggle: false });
     await h.flush();

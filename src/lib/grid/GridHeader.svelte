@@ -254,9 +254,9 @@
     width: 100%;
   }
   th.row-num {
-    width: 44px;
+    width: 34px;
     text-align: center;
-    padding: var(--space-2) 4px;
+    padding: 3px 4px;
     border-right: 1px solid var(--grid-line);
   }
   th.row-num input {

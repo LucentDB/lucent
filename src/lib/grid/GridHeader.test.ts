@@ -5,8 +5,6 @@ import { render, fireEvent, cleanup } from '@testing-library/svelte';
 // Vitest globals are off in this repo, so @testing-library's auto-cleanup
 // never registers itself — every component test here cleans up explicitly.
 afterEach(cleanup);
-import GridHeader from './GridHeader.svelte';
-import { createGridEngine } from './engine.svelte.ts';
 
 const COLUMNS = [
   { name: 'id', type_name: 'int4' },
@@ -64,7 +62,6 @@ describe('GridHeader', () => {
     const first = container.querySelectorAll('thead th')[1] as HTMLElement;
     expect(first.style.width).toBe('250px');
   });
-
 });
 
 describe('sort affordances', () => {
@@ -86,7 +83,9 @@ describe('sort affordances', () => {
       sortDirectionOf: (id: string) => (id === '0' ? 'asc' : 'desc'),
       sortIndexOf: (id: string) => (id === '0' ? 0 : 1),
     });
-    const badges = [...container.querySelectorAll('.sort-badge')].map((b) => b.textContent?.trim());
+    const badges = [...container.querySelectorAll('.sort-badge')].map((b) =>
+      b.textContent?.trim(),
+    );
     expect(badges).toEqual(['1', '2']);
   });
 
@@ -104,7 +103,10 @@ describe('sort affordances', () => {
     const onToggleSort = vi.fn();
     const { getByLabelText } = renderHeader({ onToggleSort });
     await fireEvent.click(getByLabelText(/Sort by email/), { shiftKey: true });
-    expect(onToggleSort).toHaveBeenCalledWith('1', expect.objectContaining({ shiftKey: true }));
+    expect(onToggleSort).toHaveBeenCalledWith(
+      '1',
+      expect.objectContaining({ shiftKey: true }),
+    );
   });
 
   it('marks a sorted header for styling', () => {
@@ -172,7 +174,7 @@ describe('pinned offsets', () => {
     );
     // getStart('start') alone reports 0 inside the region; the gutter th
     // renders before every start cell, so the inset must include its width.
-    expect(idTh?.getAttribute('style')).toContain('left: 44px');
+    expect(idTh?.getAttribute('style')).toContain('left: 34px');
   });
 
   it('keeps the gutter header itself pinned at left 0', () => {
@@ -202,9 +204,10 @@ describe('pinned offsets', () => {
           !el.className.includes('row-num') &&
           el.textContent?.includes('email'),
       );
-    expect(secondStart()?.getAttribute('style')).toContain('left: 194px');
+    // 34px gutter + first column's default 150px.
+    expect(secondStart()?.getAttribute('style')).toContain('left: 184px');
     result.component.resizeTo('0', 250);
     await settle();
-    expect(secondStart()?.getAttribute('style')).toContain('left: 294px');
+    expect(secondStart()?.getAttribute('style')).toContain('left: 284px');
   });
 });
