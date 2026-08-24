@@ -41,18 +41,17 @@ describe('sortSpecFor with multiple keys', () => {
     ]);
   });
 
-  it('is what fetchMoreOptions forwards, untruncated', () => {
+  it('does not embed a raw sort field — callers map through wireSortFor', () => {
     const tab = {
       fetchedCount: 200,
       filters: [],
-      sorting: [
-        { column: 'a', direction: 'asc' },
-        { column: 'b', direction: 'desc' },
-      ],
+      sorting: [{ id: 'a', desc: false }],
     };
-    // The regression this guards: phase ② sent sort[0] because the wire took
-    // one key. If that truncation survives, the second key silently vanishes.
-    expect(fetchMoreOptions(tab, 200).sort).toHaveLength(2);
+    // Regression guard (final review): these helpers once embedded raw engine
+    // state as `sort`, which is wrong for the IPC wire — one future caller
+    // away from a serde rejection.
+    expect(fetchMoreOptions(tab, 200)).not.toHaveProperty('sort');
+    expect(refetchOptions(tab, 200)).not.toHaveProperty('sort');
   });
 });
 
@@ -171,12 +170,11 @@ describe('fetchMoreOptions', () => {
     expect(fetchMoreOptions(tab, 200)).toEqual({
       limit: 200,
       offset: 400,
-      sort: [],
       filters: [],
     });
   });
 
-  it("carries the tab's current sort and filters forward unchanged", () => {
+  it('carries filters forward and leaves sort to the caller', () => {
     const tab = {
       fetchedCount: 200,
       sorting: [{ id: '1', desc: true }],
@@ -185,8 +183,6 @@ describe('fetchMoreOptions', () => {
     expect(fetchMoreOptions(tab, 200)).toEqual({
       limit: 200,
       offset: 200,
-      // Raw engine state — App.svelte resolves it through wireSortFor before invoke().
-      sort: [{ id: '1', desc: true }],
       filters: [{ column: 'active', operator: 'eq', value: 'true' }],
     });
   });
@@ -202,7 +198,6 @@ describe('refetchOptions', () => {
     expect(refetchOptions(tab, 200)).toEqual({
       limit: 200,
       offset: 0,
-      sort: [{ id: '0', desc: false }],
       filters: [],
     });
   });
