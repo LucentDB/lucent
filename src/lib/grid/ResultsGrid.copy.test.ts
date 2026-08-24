@@ -111,3 +111,36 @@ describe('focus follows selection (WebKit never focuses buttons on click)', () =
     );
   });
 });
+
+describe('pagination stability while fetching a new page', () => {
+  it('keeps the current page and footer stable during the fetch window', async () => {
+    const rows = Array.from({ length: 3000 }, (_, i) => [i + 1, `u${i}@x.com`]);
+    let resolveFetch: () => void = () => {};
+    const onNeedMore = vi.fn(
+      () =>
+        new Promise<void>((r) => {
+          resolveFetch = r;
+        }),
+    );
+    const { container } = render(ResultsGrid, {
+      props: { ...props, rows, fetchedCount: 3000, isEnd: false, onNeedMore },
+    });
+    // Walk to the last fully-fetched page (14 cached clicks).
+    const nextBtn = () => container.querySelector('[aria-label="Next page"]')!;
+    for (let i = 0; i < 14; i += 1) {
+      await fireEvent.click(nextBtn());
+      await Promise.resolve();
+    }
+    expect(container.textContent).toContain('2,801–3,000');
+    // Click Next into unfetched territory — the fetch is now in flight.
+    await fireEvent.click(nextBtn());
+    // MID-AWAIT: the viewport must still show the old page, not page 1.
+    expect(onNeedMore).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('2,801–3,000');
+    expect(container.textContent).not.toContain('1–200 of');
+    // Resolve the fetch; only then may the footer advance.
+    resolveFetch();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+});

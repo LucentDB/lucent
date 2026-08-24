@@ -84,8 +84,16 @@ export function createCellView(model: NotebookModel) {
     if (cell) cell.view = next;
   }
 
+/** Temporary paging diagnostics — enable with localStorage.lucentPagingDebug. */
+function debugView(event: string, detail: Record<string, unknown>) {
+  if (typeof localStorage !== 'undefined' && localStorage.lucentPagingDebug) {
+    console.warn(`[cellView] ${event}`, detail);
+  }
+}
+
   async function refetch(cellId: string, state: CellViewState, offset: number) {
     if (!model.sessionKey) return;
+    debugView('refetch', { cellId, offset, fetchedCount: state.fetchedCount });
     put(cellId, { ...state, loading: true });
     try {
       const out = await nb.notebookFetchPage(
@@ -98,6 +106,7 @@ export function createCellView(model: NotebookModel) {
         wireSortFor(state.sorting, state.columns),
         state.filters,
       );
+      debugView('refetch resolved', { offset, incoming: out.rows.length, bufferAfter: offset === 0 ? out.rows.length : state.rows.length + out.rows.length });
       const rows = offset === 0 ? out.rows : [...state.rows, ...out.rows];
       put(cellId, {
         ...state,
@@ -163,6 +172,7 @@ export function createCellView(model: NotebookModel) {
 
     /** Called after a cell re-runs, so its window restarts from the new output. */
     resetFrom(cellId: string) {
+      debugView('resetFrom', { cellId, stack: new Error().stack?.split('\n')[2]?.trim() });
       states.delete(cellId);
       const cell = model.cells.find((c) => c.id === cellId);
       if (cell) cell.view = stateFor(cellId);

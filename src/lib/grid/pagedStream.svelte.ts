@@ -56,7 +56,15 @@ export function createPagedStream(config: PagedStreamConfig) {
     Math.min((page + 1) * config.pageSize, config.fetchedCount),
   );
 
+  /** Temporary paging diagnostics — enable with localStorage.lucentPagingDebug. */
+  function debugPaging(event: string, detail: Record<string, unknown>) {
+    if (typeof localStorage !== 'undefined' && localStorage.lucentPagingDebug) {
+      console.warn(`[paging] ${event}`, detail);
+    }
+  }
+
   function reset() {
+    debugPaging('reset()', { tabId: config.tabId, stack: new Error().stack?.split('\n')[2]?.trim() });
     page = 0;
     isFetchingMore = false;
     config.onScrollReset?.();
@@ -74,6 +82,7 @@ export function createPagedStream(config: PagedStreamConfig) {
   $effect(() => {
     void config.fetchedCount;
     if (config.fetchedCount > 0 && config.fetchedCount <= config.pageSize) {
+      debugPaging('fresh-fetch reset', { fetchedCount: config.fetchedCount, pageSize: config.pageSize });
       page = 0;
       config.onScrollReset?.();
     }
@@ -83,13 +92,20 @@ export function createPagedStream(config: PagedStreamConfig) {
   // advancing before fetchedCount catches up, and tab state resets.
   $effect(() => {
     void maxPage;
-    if (page > maxPage) page = maxPage;
+    if (page > maxPage) {
+      debugPaging('clamp', { page, maxPage });
+      page = maxPage;
+    }
   });
 
   async function goNext() {
     // Local guard against racing ahead of an in-flight fetch on rapid clicks.
-    if (isFetchingMore) return;
+    if (isFetchingMore) {
+      debugPaging('goNext ignored (fetch in flight)', { page });
+      return;
+    }
     const nextPage = page + 1;
+    debugPaging('goNext', { page, nextPage, fetchedCount: config.fetchedCount });
     if (nextPage * config.pageSize >= config.fetchedCount) {
       isFetchingMore = true;
       try {
