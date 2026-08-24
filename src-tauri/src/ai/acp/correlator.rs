@@ -14,15 +14,12 @@ use crate::ai::events::{AgentPermissionPayload, AiEvent, DmlApprovalPayload};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-/// One buffered bridge result: the tool name, the structured payload, and the
-/// arguments the bridge executed (the agent's own report of a CLI-path call
-/// carries none).
+/// One buffered bridge result: the tool name and the structured payload.
 #[derive(Clone, Debug)]
 pub struct BufferedToolResult {
     pub tool: String,
     pub summary: String,
     pub output: serde_json::Value,
-    pub input: Option<serde_json::Value>,
 }
 
 /// The shared buffer between the bridge's sink wrapper (writer) and the
@@ -82,14 +79,12 @@ impl AgentSink for CorrelatingSink {
                 tool,
                 summary,
                 output: Some(output),
-                input,
                 ..
             } if id.starts_with("acp-") => {
                 self.state.push(BufferedToolResult {
                     tool,
                     summary,
                     output,
-                    input,
                 });
             }
             other => self.inner.event(other),
@@ -137,7 +132,6 @@ mod tests {
             tool: tool.into(),
             summary: "1 row".into(),
             output: Some(query_result_payload()),
-            input: Some(serde_json::json!({"sql": "select 1"})),
             status: crate::ai::events::ToolResultStatus::Completed,
         }
     }
@@ -177,13 +171,11 @@ mod tests {
             tool: "search_schema".into(),
             summary: "s".into(),
             output: query_result_payload(),
-            input: None,
         });
         state.push(BufferedToolResult {
             tool: "run_readonly_query".into(),
             summary: "q".into(),
             output: query_result_payload(),
-            input: None,
         });
 
         // Name match pops the SECOND (the one whose update arrives now).
@@ -202,7 +194,6 @@ mod tests {
             tool: "t".into(),
             summary: "s".into(),
             output: query_result_payload(),
-            input: None,
         });
         state.clear();
         assert!(state.is_empty());
@@ -217,7 +208,6 @@ mod tests {
             tool: "t".into(),
             summary: "s".into(),
             output: None,
-            input: None,
             status: crate::ai::events::ToolResultStatus::Completed,
         });
         assert_eq!(

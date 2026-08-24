@@ -10,7 +10,6 @@
   import { connectionEndpoint } from '../../connection-format';
   import { dbMatches, schemaMatches, objectMatches } from './sidebar-search.ts';
   import SchemaBranch from './SchemaBranch.svelte';
-  import DbIcon from '../icons/DbIcon.svelte';
 
   let { onObjectClick, onDisconnect, onOpenLogs } = $props();
 
@@ -42,7 +41,9 @@
   let loading = $derived(dbs.isPending);
   let error = $derived(dbs.error ?? schemas.error ?? null);
   let schemasByDb = $derived(
-    Object.fromEntries([...expandedDbs].map((db) => [db, schemas.data ?? []])),
+    Object.fromEntries(
+      [...expandedDbs].map((db) => [db, schemas.data ?? []]),
+    ),
   );
   let isRefreshing = $derived(dbs.isFetching || schemas.isFetching);
 
@@ -163,7 +164,20 @@
       >
         <!-- Database icon -->
         <span class="switcher-db-icon">
-          <DbIcon kind="database" size={13} strokeWidth={1.6} />
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <ellipse cx="12" cy="5" rx="9" ry="3" />
+            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+          </svg>
         </span>
         <span class="switcher-name">
           {activeProfile?.name ?? 'Select connection'}
@@ -287,7 +301,20 @@
                 />
               </svg>
               <span class="node-icon db-icon">
-                <DbIcon kind="database" size={13} strokeWidth={1.6} />
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <ellipse cx="12" cy="5" rx="9" ry="3" />
+                  <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+                  <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+                </svg>
               </span>
               <span class="node-name" class:current={db.is_current}
                 >{db.name}</span
@@ -349,17 +376,28 @@
                           stroke-linejoin="round"
                         />
                       </svg>
-                      <DbIcon
-                        kind="schema"
-                        size={13}
-                        strokeWidth={1.6}
+                      <!-- Folder icon for schema -->
+                      <svg
                         class="node-icon schema-icon"
-                        open={expandedSchemas.has(schema.name) || !!searchQuery}
-                      />
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      >
+                        <path
+                          d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+                        />
+                      </svg>
                       <span class="schema-name">{schema.name}</span>
                       {#if searchQuery && loadedObjects[schema.name]}
-                        {@const matchCount = loadedObjects[schema.name].filter(
-                          (o) => objectMatches(o.name, searchQueryLower),
+                        {@const matchCount = loadedObjects[
+                          schema.name
+                        ].filter((o) =>
+                          objectMatches(o.name, searchQueryLower),
                         ).length}
                         <span class="count-badge" class:match={matchCount > 0}
                           >{matchCount}</span
@@ -370,8 +408,8 @@
                     {#if expandedSchemas.has(schema.name) || searchQuery}
                       <div class="children">
                         <SchemaBranch
-                          {conn}
-                          {schema}
+                          conn={conn}
+                          schema={schema}
                           expanded={expandedSchemas.has(schema.name) ||
                             !!searchQuery}
                           ondata={handleObjectsLoaded}
@@ -380,60 +418,154 @@
                             {#each groupObjects(objects)
                               .map( (g) => ({ ...g, items: g.items.filter( (o) => objectMatches(o.name, searchQueryLower) ) }) )
                               .filter((g) => g.items.length > 0) as group}
-                              <div class="group-node">
-                                <button
-                                  class="group-header"
+                            <div class="group-node">
+                              <button
+                                class="group-header"
+                                class:open={expandedGroups.has(
+                                  `${schema.name}|${group.kind}`,
+                                ) || !!searchQuery}
+                                onclick={() =>
+                                  toggleGroup(schema.name, group.kind)}
+                              >
+                                <svg
+                                  class="chevron"
                                   class:open={expandedGroups.has(
                                     `${schema.name}|${group.kind}`,
                                   ) || !!searchQuery}
-                                  onclick={() =>
-                                    toggleGroup(schema.name, group.kind)}
+                                  width="12"
+                                  height="12"
+                                  viewBox="0 0 16 16"
+                                  fill="none"
                                 >
-                                  <svg
-                                    class="chevron"
-                                    class:open={expandedGroups.has(
-                                      `${schema.name}|${group.kind}`,
-                                    ) || !!searchQuery}
-                                    width="12"
-                                    height="12"
-                                    viewBox="0 0 16 16"
-                                    fill="none"
+                                  <path
+                                    d="M6 4l4 4-4 4"
+                                    stroke="currentColor"
+                                    stroke-width="1.5"
+                                    stroke-linecap="round"
+                                    stroke-linejoin="round"
+                                  />
+                                </svg>
+                                <span class="group-label">{group.label}</span>
+                                <span class="group-count"
+                                  >{group.items.length}</span
+                                >
+                              </button>
+                              {#if expandedGroups.has(`${schema.name}|${group.kind}`) || searchQuery}
+                                {#each group.items as obj}
+                                  <button
+                                    class="object-item"
+                                    class:active={activeObject ===
+                                      `${schema.name}.${obj.name}`}
+                                    onclick={() =>
+                                      handleObjectClick(schema, obj)}
                                   >
-                                    <path
-                                      d="M6 4l4 4-4 4"
-                                      stroke="currentColor"
-                                      stroke-width="1.5"
-                                      stroke-linecap="round"
-                                      stroke-linejoin="round"
-                                    />
-                                  </svg>
-                                  <span class="group-label">{group.label}</span>
-                                  <span class="group-count"
-                                    >{group.items.length}</span
-                                  >
-                                </button>
-                                {#if expandedGroups.has(`${schema.name}|${group.kind}`) || searchQuery}
-                                  {#each group.items as obj}
-                                    <button
-                                      class="object-item"
-                                      class:active={activeObject ===
-                                        `${schema.name}.${obj.name}`}
-                                      onclick={() =>
-                                        handleObjectClick(schema, obj)}
-                                    >
-                                      <DbIcon kind={obj.kind} size={12} strokeWidth={1.6} class="obj-icon {obj.kind}" />
-                                      <span class="object-name">{obj.name}</span
+                                    {#if obj.kind === 'table'}
+                                      <!-- Table: clean grid icon -->
+                                      <svg
+                                        class="obj-icon table"
+                                        width="13"
+                                        height="13"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        stroke-width="2"
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
                                       >
-                                      {#if obj.row_count !== null && obj.row_count > 0}
-                                        <span class="row-badge"
-                                          >{formatCount(obj.row_count)}</span
-                                        >
-                                      {/if}
-                                    </button>
-                                  {/each}
-                                {/if}
-                              </div>
-                            {/each}
+                                        <rect
+                                          x="3"
+                                          y="3"
+                                          width="18"
+                                          height="18"
+                                          rx="2"
+                                        />
+                                        <path d="M3 9h18M3 15h18M9 3v18" />
+                                      </svg>
+                                    {:else if obj.kind === 'matview'}
+                                      <!-- Materialized view: layered stacks (precomputed from a query) -->
+                                      <svg
+                                        class="obj-icon matview"
+                                        width="13"
+                                        height="13"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        stroke-width="2"
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                      >
+                                        <path d="M12 2 2 7l10 5 10-5-10-5z" />
+                                        <path d="m2 17 10 5 10-5" />
+                                        <path d="m2 12 10 5 10-5" />
+                                      </svg>
+                                    {:else if obj.kind === 'view'}
+                                      <!-- View: eye with sparkle dot -->
+                                      <svg
+                                        class="obj-icon view"
+                                        width="13"
+                                        height="13"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        stroke-width="2"
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                      >
+                                        <path
+                                          d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7z"
+                                        />
+                                        <circle cx="12" cy="12" r="2.5" />
+                                      </svg>
+                                    {:else if obj.kind === 'function'}
+                                      <!-- Function: curly braces {} -->
+                                      <svg
+                                        class="obj-icon function"
+                                        width="13"
+                                        height="13"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        stroke-width="2"
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                      >
+                                        <path
+                                          d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1"
+                                        />
+                                        <path
+                                          d="M16 3h1a2 2 0 0 1 2 2v5a2 2 0 0 0 2 2 2 2 0 0 0-2 2v5a2 2 0 0 1-2 2h-1"
+                                        />
+                                      </svg>
+                                    {:else if obj.kind === 'sequence'}
+                                      <!-- Sequence: hash / ordered list -->
+                                      <svg
+                                        class="obj-icon sequence"
+                                        width="13"
+                                        height="13"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        stroke-width="2"
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                      >
+                                        <line x1="4" y1="9" x2="20" y2="9" />
+                                        <line x1="4" y1="15" x2="20" y2="15" />
+                                        <line x1="10" y1="3" x2="8" y2="21" />
+                                        <line x1="16" y1="3" x2="14" y2="21" />
+                                      </svg>
+                                    {/if}
+                                    <span class="object-name">{obj.name}</span>
+                                    {#if obj.row_count !== null && obj.row_count > 0}
+                                      <span class="row-badge"
+                                        >{formatCount(obj.row_count)}</span
+                                      >
+                                    {/if}
+                                  </button>
+                                {/each}
+                              {/if}
+                            </div>
+                          {/each}
                           {/snippet}
                         </SchemaBranch>
                       </div>
@@ -827,7 +959,7 @@
     padding: 3px;
     box-sizing: border-box;
   }
-  .schema-row :global(.schema-icon) {
+  .schema-icon {
     color: #f59e0b;
   }
 
@@ -955,32 +1087,29 @@
   .object-item.active::before {
     background: var(--accent);
   }
-  .object-item.active :global(.obj-icon) {
+  .object-item.active .obj-icon {
     opacity: 1;
   }
 
   /* ── Object icons ──────────────────────────────────── */
-  /* Applied on child Lucide <svg> via DbIcon class prop */
-  .object-item :global(.obj-icon) {
+  .obj-icon {
     flex-shrink: 0;
-    width: 13px;
-    height: 13px;
     opacity: 0.85;
     transition: opacity var(--transition-fast);
   }
-  .object-item :global(.obj-icon.table) {
+  .obj-icon.table {
     color: #10b981;
   } /* emerald */
-  .object-item :global(.obj-icon.view) {
+  .obj-icon.view {
     color: #6366f1;
   } /* indigo  */
-  .object-item :global(.obj-icon.matview) {
+  .obj-icon.matview {
     color: #0ea5e9;
   } /* sky */
-  .object-item :global(.obj-icon.function) {
+  .obj-icon.function {
     color: #a855f7;
   } /* purple */
-  .object-item :global(.obj-icon.sequence) {
+  .obj-icon.sequence {
     color: #f59e0b;
   } /* amber  */
 
@@ -991,6 +1120,7 @@
     white-space: nowrap;
     font-family: var(--font-mono);
     font-size: 11.5px;
+    letter-spacing: -0.01em;
   }
   .object-item.active .object-name {
     color: var(--accent);

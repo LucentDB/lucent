@@ -66,10 +66,7 @@
     else onChange(p.id);
   }
 
-  function handleGridKeydown(
-    options: { id: string; sub?: string }[],
-    e: KeyboardEvent,
-  ) {
+  function handleGridKeydown(options: { id: string; sub?: string }[], e: KeyboardEvent) {
     const keys = options.map(cardKey);
     const focusedIdx = keys.findIndex(
       (k) => cards[k] === document.activeElement,
@@ -131,7 +128,7 @@
           style="--provider-tint: {(PROVIDER_BRANDS[p.id] ?? ACP_BRAND).tint};"
         >
           <span class="logo-tile">
-            <ProviderLogo provider={p.id} size={13} />
+            <ProviderLogo provider={p.id} size={16} />
           </span>
           <span class="card-name">
             {p.label}
@@ -165,10 +162,12 @@
     flex-direction: column;
   }
   .group-caption {
-    margin: 2px 0 6px;
+    margin: 4px 0 12px;
     color: var(--text-muted);
-    font-size: var(--text-xs);
-    font-weight: var(--weight-medium);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
   }
   .provider-grid {
     display: grid;
@@ -184,11 +183,11 @@
     position: relative;
     display: flex;
     align-items: center;
-    gap: 7px;
-    padding: 5px 8px;
+    gap: 8px;
+    padding: 8px 10px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--bg-elevated);
+    border-radius: var(--radius-md);
+    background: var(--bg-surface);
     cursor: pointer;
     text-align: left;
     font: inherit;
@@ -201,37 +200,43 @@
       box-shadow 0.25s ease;
   }
   .provider-card:hover {
+    transform: scale(1.03);
     border-color: var(--provider-tint);
     background: var(--bg-hover);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+    z-index: 1;
   }
   .provider-card.selected {
     border-color: var(--provider-tint);
-    background: color-mix(
-      in oklch,
-      var(--provider-tint) 10%,
-      var(--bg-elevated)
-    );
-    box-shadow: inset 0 0 0 1px var(--provider-tint);
+    background: color-mix(in srgb, var(--provider-tint) 12%, var(--bg-surface));
+    box-shadow:
+      0 4px 16px rgba(0, 0, 0, 0.08),
+      inset 0 0 0 1px var(--provider-tint),
+      inset 0 2px 12px color-mix(in srgb, var(--provider-tint) 20%, transparent);
   }
   .provider-card:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 1px;
+    outline: 2px solid var(--accent-selection);
+    outline-offset: 2px;
   }
   .logo-tile {
-    width: 20px;
-    height: 20px;
-    border-radius: var(--radius-sm);
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
     background: var(--provider-tint);
     display: inline-flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    transition: transform var(--transition-normal);
+    transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  .provider-card.selected .logo-tile {
+    transform: scale(1.08);
   }
   .card-name {
     font-size: 12px;
     font-weight: 600;
     line-height: 1.2;
+    letter-spacing: -0.01em;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -243,17 +248,31 @@
     color: var(--text-muted);
     letter-spacing: 0;
   }
-  /* Inside the card, on the accent, at the trailing edge: a checkmark is a
-     selection mark, so it belongs in the row it marks and in the colour the
-     rest of the app selects with. Hung outside the corner it clipped against
-     the neighbouring card and popped in on a bounce curve, reading as a
-     notification badge rather than a state. */
   .check-badge {
-    margin-left: auto;
-    flex-shrink: 0;
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--provider-tint);
+    color: #ffffff;
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--accent);
+    box-shadow:
+      0 0 0 2px var(--bg-surface),
+      0 2px 6px rgba(0, 0, 0, 0.15);
+    animation: badge-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  }
+  @keyframes badge-pop {
+    0% {
+      opacity: 0;
+      transform: scale(0.3) rotate(-15deg);
+    }
+    100% {
+      opacity: 1;
+      transform: scale(1) rotate(0deg);
+    }
   }
 </style>

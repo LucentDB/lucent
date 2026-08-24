@@ -62,15 +62,12 @@ describe('cell view state', () => {
     fetchPage.mockResolvedValue(page([[9]]));
 
     const view = createCellView(model);
-    await view.applyState(id, {
-      filters: [],
-      sorting: [{ id: '0', desc: true }],
-    });
+    await view.applyState(id, { filters: [], sorting: [{ id: '0', desc: true }] });
 
     const args = fetchPage.mock.calls[0];
     expect(args[3]).toBe(10); // limit
     expect(args[4]).toBe(0); // offset — a sort change must restart paging
-    expect(args[5]).toEqual({ column: 'n', direction: 'desc' }); // id resolved back to name for the wire
+    expect(args[5]).toEqual([{ column: 'n', direction: 'desc' }]); // ids resolved back to names for the wire — full list since phase ③
     expect(view.stateFor(id).rows).toEqual([[9]]);
   });
 

@@ -1438,9 +1438,14 @@ pub async fn execute_query(
     sql: String,
     limit: i64,
     offset: i64,
-    sort: Option<crate::query_paging::SortSpec>,
+    // The wire sort became a LIST (multi-key ORDER BY). Tauri command params
+    // cannot carry `#[serde(default)]`, and Option<T> is the framework's
+    // absent/null-tolerant form — so the list arrives wrapped and defaults to
+    // empty, which is exactly what the old Option<SortSpec> gave clients.
+    sort: Option<Vec<crate::query_paging::SortSpec>>,
     filters: Vec<crate::query_paging::FilterSpec>,
 ) -> Result<ExecuteResult, CommandError> {
+    let sort = sort.unwrap_or_default();
     let conn_id = (*state.current_connection_id.lock().await)
         .ok_or_else(|| CommandError::new("QueryError", "not connected — connect first"))?;
     let client = state
@@ -1821,9 +1826,12 @@ pub async fn browse_table(
     name: String,
     limit: i64,
     offset: i64,
-    sort: Option<crate::query_paging::SortSpec>,
+    // Same list-shaped wire sort as execute_query: Option-wrapped because
+    // tauri params cannot take #[serde(default)].
+    sort: Option<Vec<crate::query_paging::SortSpec>>,
     filters: Vec<crate::query_paging::FilterSpec>,
 ) -> Result<ExecuteResult, CommandError> {
+    let sort = sort.unwrap_or_default();
     let conn_id = (*state.current_connection_id.lock().await)
         .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
     let client = state
@@ -2118,7 +2126,7 @@ pub async fn ensure_reranker(state: &AppState) {
 /// set, else the rig `DatabaseAgent`. Pure so the branch is unit-testable
 /// (the D1 seam test). The `provider` is only ever built on the rig path —
 /// ACP agents own their auth.
-pub(crate) fn pick_driver(
+fn pick_driver(
     acp: &Option<crate::ai::config::AcpAgentConfig>,
     provider: Option<Arc<dyn LlmProvider>>,
     tools: Vec<crate::ai::tools::LucentToolEnum>,

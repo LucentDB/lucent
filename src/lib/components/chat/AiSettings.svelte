@@ -16,13 +16,11 @@
     type RegistryAgentSummary,
     type InstalledAcpAgent,
   } from '../../ipc/ai.ts';
-  import ProviderPane from './settings/ProviderPane.svelte';
-  import ModelPane from './settings/ModelPane.svelte';
-  import AgentsPane from './settings/AgentsPane.svelte';
-  import DataPane from './settings/DataPane.svelte';
+  import ProviderPicker from './ProviderPicker.svelte';
+  import ModelPicker from './ModelPicker.svelte';
+  import AcpRegistryPanel from './AcpRegistryPanel.svelte';
 
   let { onClose }: { onClose: () => void } = $props();
-
   let apiKey = $state('');
   let saving = $state(false);
   let err = $state('');
@@ -31,45 +29,6 @@
   let fetchedModels: AiModelSummary[] = $state([]);
   let fetchError = $state('');
 
-  let agents: RegistryAgentSummary[] = $state([]);
-  let installedAgents = $state<InstalledAcpAgent[]>([]);
-  let acpLoading = $state(false);
-  let acpError = $state('');
-
-  // ── Sections ───────────────────────────────────────────────────────────
-  // The dialog was one 740px scroll of five stacked cards. A rail plus one
-  // visible pane is how the platform's own settings cluster this much, and it
-  // means a user changing a row limit never scrolls past an agent registry.
-  type SectionId = 'provider' | 'model' | 'agents' | 'data';
-
-  let isAcp = $derived(aiConfig.provider === 'acp');
-
-  // Relevance follows the provider: a key-based provider has no agent to
-  // configure, and an agent brings its own model. Hiding the pane is more
-  // honest than showing one that explains it does not apply.
-  let sections = $derived([
-    { id: 'provider' as const, label: 'Provider' },
-    ...(isAcp ? [] : [{ id: 'model' as const, label: 'Model' }]),
-    { id: 'agents' as const, label: 'Agents' },
-    { id: 'data' as const, label: 'Data & Safety' },
-  ]);
-
-  let active = $state<SectionId>('provider');
-
-  // A section can disappear under the user when the provider changes.
-  $effect(() => {
-    if (!sections.some((s) => s.id === active)) active = 'provider';
-  });
-
-  let statusLabel = $derived(
-    fetchStatus === 'idle'
-      ? 'Not tested'
-      : fetchStatus === 'loading'
-        ? 'Fetching models…'
-        : fetchStatus === 'success'
-          ? 'Ready'
-          : 'Failed',
-  );
   let statusTitle = $derived(
     fetchStatus === 'idle'
       ? 'Not tested this session'
@@ -79,6 +38,26 @@
           ? 'Model list loaded'
           : 'Model fetch failed',
   );
+
+  let showKey = $state(false);
+
+  // Agents (ACP) registry section — browsable regardless of the selected
+  // provider, so the user can install an agent before picking it.
+  let agents: RegistryAgentSummary[] = $state([]);
+  let installedAgents = $state<InstalledAcpAgent[]>([]);
+  let acpLoading = $state(false);
+  let acpError = $state('');
+  let statusLabel = $derived(
+    fetchStatus === 'idle'
+      ? 'Not tested'
+      : fetchStatus === 'loading'
+        ? 'Fetching models…'
+        : fetchStatus === 'success'
+          ? 'Ready'
+          : 'Failed',
+  );
+
+  const SHOWS_ENDPOINT = new Set(['ollama', 'custom']);
 
   onMount(async () => {
     try {
@@ -119,16 +98,14 @@
     acpLoading = true;
     acpError = '';
     try {
-      agents = (await listRegistryAgents()) ?? [];
+      const list = await listRegistryAgents();
+      agents = list ?? [];
     } catch (e) {
-      acpError = messageOf(e);
+      acpError =
+        typeof e === 'string' ? e : ((e as Error)?.message ?? String(e));
     } finally {
       acpLoading = false;
     }
-  }
-
-  function messageOf(e: unknown): string {
-    return typeof e === 'string' ? e : ((e as Error)?.message ?? String(e));
   }
 
   async function handleInstall(agentId: string) {
@@ -138,7 +115,8 @@
       await refreshAgents();
       await refreshInstalledAgents();
     } catch (e) {
-      acpError = messageOf(e);
+      acpError =
+        typeof e === 'string' ? e : ((e as Error)?.message ?? String(e));
     }
   }
 
@@ -149,14 +127,12 @@
       await refreshAgents();
       await refreshInstalledAgents();
     } catch (e) {
-      acpError = messageOf(e);
+      acpError =
+        typeof e === 'string' ? e : ((e as Error)?.message ?? String(e));
     }
   }
 
-  // ProviderPicker's ids come from its own literal list, so the cast is the
-  // one place that boundary is asserted rather than sprinkled through the pane.
-  function handleProviderChange(rawId: string, agentId?: string) {
-    const id = rawId as AiProviderId;
+  function handleProviderChange(id: AiProviderId, agentId?: string) {
     aiConfig.provider = id;
     aiConfig.model = aiConfig.providerModels[id] ?? '';
     if (id === 'acp' && agentId) {
@@ -175,17 +151,22 @@
     fetchedModels = [];
   }
 
-  function handleModelChange(id: string) {
-    aiConfig.model = id;
-    aiConfig.providerModels = {
-      ...aiConfig.providerModels,
-      [aiConfig.provider]: id,
-    };
-  }
-
   // ACP env overrides are edited as key/value rows and written back into
   // `aiConfig.acp.env` (a plain record) so Save sends the merged block.
-  let envRows = $state<{ id: number; key: string; value: string }[]>([]);
+  let envRows = $state<{ key: string; value: string }[]>([]);
+
+  function rebuildEnvRows() {
+    const env = aiConfig.acp?.env ?? {};
+    envRows = Object.entries(env).map(([key, value]) => ({ key, value }));
+  }
+
+  function addEnvRow() {
+    envRows = [...envRows, { key: '', value: '' }];
+  }
+
+  function removeEnvRow(index: number) {
+    envRows = envRows.filter((_, i) => i !== index);
+  }
 
   function syncEnvToConfig() {
     if (!aiConfig.acp) return;
@@ -197,18 +178,20 @@
   }
 
   $effect(() => {
-    // Rebuild the rows whenever the selected agent changes so the editor never
-    // shows another agent's env. `aiConfig.acp` may be null before the first
-    // ACP selection — read it defensively.
+    // Rebuild the rows whenever the selected agent changes so the editor
+    // never shows another agent's env. `aiConfig.acp` may be null before the
+    // first ACP selection — read it defensively.
     aiConfig.acp?.agentId;
-    if (aiConfig.provider !== 'acp') return;
-    const env = aiConfig.acp?.env ?? {};
-    envRows = Object.entries(env).map(([key, value], i) => ({
-      id: i,
-      key,
-      value,
-    }));
+    if (aiConfig.provider === 'acp') rebuildEnvRows();
   });
+
+  function handleModelChange(id: string) {
+    aiConfig.model = id;
+    aiConfig.providerModels = {
+      ...aiConfig.providerModels,
+      [aiConfig.provider]: id,
+    };
+  }
 
   async function fetchModels() {
     const requestedProvider = aiConfig.provider;
@@ -224,7 +207,8 @@
       fetchStatus = 'success';
     } catch (e) {
       if (aiConfig.provider !== requestedProvider) return;
-      fetchError = messageOf(e);
+      fetchError =
+        typeof e === 'string' ? e : ((e as Error)?.message ?? String(e));
       fetchStatus = 'error';
     }
   }
@@ -261,264 +245,598 @@
       saving = false;
     }
   }
-
-  /** A dialog has to close on Escape; the overlay's click-out is not enough. */
-  function onKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape' && !saving) {
-      e.stopPropagation();
-      onClose();
-    }
-  }
-
-  /** Up/Down move between sections when the rail has focus, as a list does. */
-  function onRailKeydown(e: KeyboardEvent) {
-    const delta = e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0;
-    if (delta === 0) return;
-    e.preventDefault();
-    const i = sections.findIndex((s) => s.id === active);
-    const next = Math.max(0, Math.min(sections.length - 1, i + delta));
-    active = sections[next].id;
-  }
 </script>
 
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<div
-  class="settings"
-  role="dialog"
-  tabindex="-1"
-  aria-modal="true"
-  aria-labelledby="ai-settings-title"
-  onkeydown={onKeydown}
->
-  <header class="titlebar">
-    <h2 id="ai-settings-title">AI Settings</h2>
-  </header>
-
-  <div class="split">
-    <nav class="rail" aria-label="Settings sections" onkeydown={onRailKeydown}>
-      {#each sections as section (section.id)}
-        <button
-          type="button"
-          class="rail-item"
-          class:active={active === section.id}
-          aria-current={active === section.id ? 'page' : undefined}
-          onclick={() => (active = section.id)}
-        >
-          {section.label}
-        </button>
-      {/each}
-    </nav>
-
-    <div class="pane" role="region" aria-label={statusTitle} tabindex="-1">
-      {#if err}
-        <p class="error" role="alert">{err}</p>
-      {/if}
-
-      {#if active === 'provider'}
-        <ProviderPane
-          bind:apiKey
-          {installedAgents}
-          onProviderChange={handleProviderChange}
-        />
-      {:else if active === 'model'}
-        <ModelPane
-          {fetchStatus}
-          {fetchedModels}
-          {fetchError}
-          canFetch={!customEndpointMissing}
-          onFetch={fetchModels}
-          onModelChange={handleModelChange}
-        />
-      {:else if active === 'agents'}
-        <AgentsPane
-          {agents}
-          loading={acpLoading}
-          error={acpError}
-          bind:envRows
-          onInstall={handleInstall}
-          onUninstall={handleUninstall}
-          onEnvChange={syncEnvToConfig}
-        />
-      {:else}
-        <DataPane />
-      {/if}
-    </div>
-  </div>
-
-  <footer class="footer">
-    <!-- The connection status belongs beside Save, which is what commits it,
-         not in the title bar where it read as the dialog's own state. -->
-    <span class="status" title={statusTitle}>
-      <span class="dot" data-status={fetchStatus}></span>
+<div class="settings">
+  <div class="settings-header">
+    <h2>AI Settings</h2>
+    <span class="status" title={statusTitle} aria-label={statusTitle}>
+      <span class="status-dot" data-status={fetchStatus}></span>
       {statusLabel}
     </span>
-    <div class="spacer"></div>
-    <button type="button" class="btn" onclick={onClose} disabled={saving}>
+  </div>
+  {#if err}<div class="error">{err}</div>{/if}
+
+  <div class="settings-body">
+    <section class="card">
+      <h3 class="card-title">Provider &amp; Authentication</h3>
+      <ProviderPicker
+        value={aiConfig.provider}
+        acpAgentId={aiConfig.acp?.agentId}
+        {installedAgents}
+        onChange={handleProviderChange}
+      />
+      {#if aiConfig.provider === 'acp' && aiConfig.acp}
+        <div class="acp-config">
+          <div class="acp-agent-row">
+            <span class="acp-agent-label">Selected agent</span>
+            <span class="acp-agent-name">{aiConfig.acp.agentId}</span>
+          </div>
+          <label class="toggle-row">
+            <input
+              type="checkbox"
+              bind:checked={aiConfig.acp.autoDenyPermissions}
+            />
+            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            <span class="toggle-text"
+              >Auto-deny the agent's tool-permission requests (no dialog)</span
+            >
+          </label>
+          <details class="acp-advanced">
+            <summary>Advanced</summary>
+            <label class="field">
+              Command override
+              <input
+                type="text"
+                bind:value={aiConfig.acp.command}
+                placeholder="e.g. npx @opencode/agent --headless"
+              />
+            </label>
+            <div class="env-editor">
+              <span class="env-caption">Environment variables</span>
+              {#each envRows as row, i (i)}
+                <div class="env-row">
+                  <input
+                    type="text"
+                    placeholder="KEY"
+                    bind:value={row.key}
+                    aria-label="Environment key"
+                    oninput={syncEnvToConfig}
+                  />
+                  <input
+                    type="text"
+                    placeholder="value"
+                    bind:value={row.value}
+                    aria-label="Environment value"
+                    oninput={syncEnvToConfig}
+                  />
+                  <button
+                    type="button"
+                    class="env-remove"
+                    aria-label="Remove environment variable"
+                    onclick={() => removeEnvRow(i)}>×</button
+                  >
+                </div>
+              {/each}
+              <button type="button" class="env-add" onclick={addEnvRow}
+                >Add variable</button
+              >
+            </div>
+          </details>
+        </div>
+      {:else}
+        <label class="field">
+          API Key
+          <span class="input-wrap">
+            <input
+              type={showKey ? 'text' : 'password'}
+              bind:value={apiKey}
+              placeholder={SHOWS_ENDPOINT.has(aiConfig.provider)
+                ? 'Optional'
+                : 'sk-…'}
+            />
+            <button
+              type="button"
+              class="eye-btn"
+              onclick={() => (showKey = !showKey)}
+              aria-label={showKey ? 'Hide API key' : 'Show API key'}
+            >
+              {#if showKey}
+                <svg
+                  viewBox="0 0 24 24"
+                  width="16"
+                  height="16"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path
+                    d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"
+                  />
+                  <path d="M14.084 14.158a3 3 0 0 1-4.242-4.242" />
+                  <path
+                    d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"
+                  />
+                  <path d="m2 2 20 20" />
+                </svg>
+              {:else}
+                <svg
+                  viewBox="0 0 24 24"
+                  width="16"
+                  height="16"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path
+                    d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"
+                  />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              {/if}
+            </button>
+          </span>
+          <span class="hint"
+            >Leave blank to keep existing. Stored in OS keychain.</span
+          >
+        </label>
+        {#if SHOWS_ENDPOINT.has(aiConfig.provider)}
+          <label class="field">
+            Endpoint
+            <input
+              type="url"
+              bind:value={aiConfig.endpoint}
+              placeholder={aiConfig.provider === 'ollama'
+                ? 'http://localhost:11434/v1'
+                : 'https://your-endpoint/v1'}
+            />
+          </label>
+        {/if}
+      {/if}
+    </section>
+
+    {#if aiConfig.provider !== 'acp'}
+      <section class="card">
+        <h3 class="card-title">Model</h3>
+        <button
+          type="button"
+          class="fetch-btn"
+          onclick={fetchModels}
+          disabled={fetchStatus === 'loading' || customEndpointMissing}
+        >
+          {fetchStatus === 'loading' ? 'Fetching…' : 'Fetch Models'}
+        </button>
+        <ModelPicker
+          status={fetchStatus}
+          models={fetchedModels}
+          value={aiConfig.model}
+          onChange={handleModelChange}
+          errorMessage={fetchError}
+          providerLabel={aiConfig.provider}
+        />
+      </section>
+    {/if}
+  </div>
+
+  <section class="card">
+    <h3 class="card-title">Agents (ACP)</h3>
+    {#if acpError}<div class="error">{acpError}</div>{/if}
+    <AcpRegistryPanel
+      {agents}
+      loading={acpLoading}
+      onInstall={handleInstall}
+      onUninstall={handleUninstall}
+    />
+  </section>
+
+  <section class="card behavior-card">
+    <label class="toggle-row">
+      <input type="checkbox" bind:checked={aiConfig.sampleColumnValues} />
+      <span class="toggle-track"><span class="toggle-thumb"></span></span>
+      <span class="toggle-text"
+        >Sample column values for the semantic index (reads up to 1,000 rows per
+        column)</span
+      >
+    </label>
+    <label class="toggle-row">
+      <input type="checkbox" bind:checked={aiConfig.enableBlastRadiusCheck} />
+      <span class="toggle-track"><span class="toggle-thumb"></span></span>
+      <span class="toggle-text">Show estimated rows before DML</span>
+    </label>
+  </section>
+
+  <div class="actions">
+    <button
+      type="button"
+      class="btn btn-secondary"
+      onclick={onClose}
+      disabled={saving}
+    >
       Cancel
     </button>
     <button
       type="button"
-      class="btn primary"
+      class="btn btn-primary"
       onclick={save}
       disabled={saving || customEndpointMissing}
     >
       {saving ? 'Saving…' : 'Save'}
     </button>
-  </footer>
+  </div>
 </div>
 
 <style>
-  /* A fixed frame, not a growing scroll: the dialog is the same size whichever
-     section is open, so switching sections never resizes the window. */
   .settings {
+    width: min(740px, calc(100vw - 48px));
+    padding: 24px 26px 20px;
     display: flex;
     flex-direction: column;
-    width: min(820px, calc(100vw - 64px));
-    height: min(580px, calc(100vh - 80px));
-    overflow: hidden;
+    gap: 16px;
+    max-height: calc(100vh - 64px);
+    overflow-y: auto;
   }
-
-  .titlebar {
+  .settings-header {
     display: flex;
     align-items: center;
-    height: 38px;
-    padding: 0 14px;
+    justify-content: space-between;
+    padding-bottom: 14px;
     border-bottom: 1px solid var(--border-light);
-    background: var(--bg-subtle);
-    flex-shrink: 0;
   }
-  .titlebar h2 {
+  .settings-header h2 {
     margin: 0;
-    font-size: var(--text-base);
-    font-weight: var(--weight-semibold);
-  }
-
-  .split {
-    display: grid;
-    grid-template-columns: 176px minmax(0, 1fr);
-    flex: 1;
-    min-height: 0;
-  }
-
-  /* The sidebar surface, a step cooler than the content it indexes. */
-  .rail {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    padding: 8px 8px;
-    border-right: 1px solid var(--border-light);
-    background: var(--bg-subtle);
-    overflow-y: auto;
-  }
-  .rail-item {
-    padding: 5px 8px;
-    border: none;
-    border-radius: var(--radius-sm);
-    background: none;
-    color: var(--text-secondary);
-    font-size: var(--text-base);
-    text-align: left;
-    transition:
-      background var(--transition-fast),
-      color var(--transition-fast);
-  }
-  .rail-item:hover:not(.active) {
-    background: var(--bg-hover);
-    color: var(--text);
-  }
-  /* Solid accent for the current section, as a source-list selection. */
-  .rail-item.active {
-    background: var(--accent);
-    color: var(--accent-foreground);
-  }
-  .rail-item:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: -2px;
-  }
-
-  .pane {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-4);
-    padding: 16px 18px;
-    overflow-y: auto;
-    background: var(--bg-surface);
-    outline: none;
-  }
-
-  .footer {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    height: 48px;
-    padding: 0 14px;
-    border-top: 1px solid var(--border-light);
-    background: var(--bg-subtle);
-    flex-shrink: 0;
-  }
-  .spacer {
-    flex: 1;
+    font-size: 17px;
+    font-weight: 650;
+    letter-spacing: -0.02em;
   }
   .status {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: var(--text-xs);
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-weight: 500;
+    background: var(--bg-subtle);
+    padding: 4px 10px 4px 8px;
+    border-radius: 99px;
+    border: 1px solid var(--border);
+  }
+  .settings-body {
+    display: grid;
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+    gap: 14px;
+    align-items: start;
+  }
+  .card {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 16px 18px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-card);
+  }
+  .behavior-card {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 24px;
+    padding: 14px 18px;
+  }
+  .card-title {
+    margin: 0;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
     color: var(--text-muted);
   }
-  .dot {
-    width: 6px;
-    height: 6px;
-    border-radius: var(--radius-full);
-    background: var(--text-muted);
+  .acp-config {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
   }
-  .dot[data-status='success'] {
-    background: var(--success);
+  .acp-agent-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 13px;
   }
-  .dot[data-status='error'] {
-    background: var(--danger);
+  .acp-agent-label {
+    color: var(--text-muted);
+    font-weight: 500;
   }
-  .dot[data-status='loading'] {
-    background: var(--warning);
+  .acp-agent-name {
+    font-weight: 650;
+    font-variant-numeric: tabular-nums;
   }
-
-  .btn {
-    min-width: 68px;
-    padding: 4px 12px;
+  .acp-advanced {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 8px 12px;
+  }
+  .acp-advanced summary {
+    cursor: pointer;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+  .acp-advanced[open] summary {
+    margin-bottom: 10px;
+  }
+  .env-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .env-caption {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    font-weight: 500;
+  }
+  .env-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 6px;
+    align-items: center;
+  }
+  .env-row input {
+    padding: 7px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
-    background: var(--bg-elevated);
+    background: var(--bg-input);
+    font-size: 13px;
+    font-family: var(--font-mono, monospace);
+  }
+  .env-remove {
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 15px;
+    padding: 4px 6px;
+    border-radius: var(--radius-sm);
+  }
+  .env-remove:hover {
+    color: var(--error);
+    background: var(--error-bg);
+  }
+  .env-add {
+    align-self: flex-start;
+    border: 1px dashed var(--border);
+    background: transparent;
+    color: var(--text-secondary);
+    padding: 5px 12px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .env-add:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .field input {
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-input);
+    font-size: 13.5px;
+    transition:
+      border-color var(--transition-fast),
+      box-shadow var(--transition-fast);
+  }
+  .field input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent);
+  }
+  .input-wrap {
+    position: relative;
+    display: block;
+  }
+  .input-wrap input {
+    width: 100%;
+    padding: 9px 34px 9px 12px;
+  }
+  .eye-btn {
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: inline-flex;
+    padding: 4px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    transition: color var(--transition-fast);
+  }
+  .eye-btn:hover {
     color: var(--text);
-    font-size: var(--text-base);
-    box-shadow: var(--shadow-sm);
+  }
+  .hint {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    font-weight: 400;
+  }
+  .fetch-btn {
+    width: 100%;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    padding: 9px 16px;
+    border-radius: var(--radius-md);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
     transition:
       background var(--transition-fast),
-      border-color var(--transition-fast);
+      transform var(--transition-fast),
+      box-shadow var(--transition-fast);
+    box-shadow:
+      0 1px 3px color-mix(in srgb, var(--accent) 40%, transparent),
+      0 4px 10px color-mix(in srgb, var(--accent) 20%, transparent);
+    letter-spacing: -0.01em;
   }
-  .btn:hover:not(:disabled) {
-    background: var(--bg-hover);
-  }
-  .btn.primary {
-    border-color: transparent;
-    background: var(--accent);
-    color: var(--accent-foreground);
-    font-weight: var(--weight-medium);
-  }
-  .btn.primary:hover:not(:disabled) {
+  .fetch-btn:hover:not(:disabled) {
     background: var(--accent-hover);
+    transform: translateY(-1px);
+    box-shadow:
+      0 2px 6px color-mix(in srgb, var(--accent) 50%, transparent),
+      0 6px 14px color-mix(in srgb, var(--accent) 25%, transparent);
   }
-  .btn:disabled {
+  .fetch-btn:disabled {
     opacity: 0.5;
-    cursor: default;
+    cursor: not-allowed;
+    box-shadow: none;
   }
-
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    font-size: 13.5px;
+    color: var(--text);
+    user-select: none;
+  }
+  .toggle-row input {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+  .toggle-track {
+    width: 36px;
+    height: 20px;
+    border-radius: 999px;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    position: relative;
+    transition:
+      background var(--transition-normal),
+      border-color var(--transition-normal);
+    flex-shrink: 0;
+  }
+  .toggle-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    transition:
+      transform var(--transition-normal),
+      background var(--transition-normal);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  }
+  .toggle-row input:checked + .toggle-track {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .toggle-row input:checked + .toggle-track .toggle-thumb {
+    transform: translateX(16px);
+    background: #fff;
+  }
+  .toggle-row input:focus-visible + .toggle-track {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+  }
   .error {
-    margin: 0;
-    padding: 7px 10px;
-    border: 1px solid color-mix(in oklch, var(--danger) 35%, transparent);
-    border-radius: var(--radius-sm);
-    background: var(--danger-bg);
-    color: var(--danger);
-    font-size: var(--text-xs);
+    background: var(--error-bg);
+    color: var(--error);
+    padding: 10px 14px;
+    border-radius: var(--radius-md);
+    font-size: 13px;
+    border: 1px solid color-mix(in srgb, var(--error) 25%, transparent);
+  }
+  .actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    padding-top: 4px;
+  }
+  .btn {
+    padding: 9px 22px;
+    border-radius: var(--radius-md);
+    font-size: 13.5px;
+    cursor: pointer;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    transition:
+      background var(--transition-fast),
+      transform var(--transition-fast),
+      box-shadow var(--transition-fast);
+  }
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    font-weight: 600;
+    box-shadow:
+      0 1px 3px color-mix(in srgb, var(--accent) 40%, transparent),
+      0 4px 10px color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+    transform: translateY(-1px);
+  }
+  .btn-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+  .btn-secondary {
+    background: var(--bg-surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-sm);
+  }
+  .btn-secondary:hover:not(:disabled) {
+    background: var(--bg-hover);
+    border-color: color-mix(in srgb, var(--text) 30%, transparent);
+  }
+  .btn-secondary:disabled {
+    opacity: 0.55;
+  }
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .status-dot[data-status='idle'] {
+    background: #9ca3af;
+  }
+  .status-dot[data-status='loading'] {
+    background: #f59e0b;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  .status-dot[data-status='success'] {
+    background: #22c55e;
+    box-shadow: 0 0 0 2px color-mix(in srgb, #22c55e 25%, transparent);
+  }
+  .status-dot[data-status='error'] {
+    background: #ef4444;
+    box-shadow: 0 0 0 2px color-mix(in srgb, #ef4444 25%, transparent);
+  }
+  @keyframes pulse {
+    0%,
+    100% {
+      opacity: 0.4;
+    }
+    50% {
+      opacity: 1;
+    }
   }
 </style>

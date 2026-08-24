@@ -94,8 +94,8 @@ export function createCellView(model: NotebookModel) {
         model.cells,
         state.pageSize,
         offset,
-        // The wire takes one key until phase ③ widens SortSpec to a list.
-        wireSortFor(state.sorting, state.columns)[0] ?? null,
+        // The full sort list crosses: phase ③ widened SortSpec to a list.
+        wireSortFor(state.sorting, state.columns),
         state.filters,
       );
       const rows = offset === 0 ? out.rows : [...state.rows, ...out.rows];

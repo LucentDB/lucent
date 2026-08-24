@@ -8,15 +8,7 @@
   import { createGridEngine } from './engine.svelte.ts';
   import { createPagedStream } from './pagedStream.svelte.ts';
   import { formatCell } from './format.js';
-  import {
-    EMPTY,
-    boundsOf,
-    cellAt,
-    extendTo,
-    moveBy,
-    rowAt,
-    selectionToTsv,
-  } from './selection.js';
+  import { toTsv, toCsv } from './serialize.js';
   import {
     normalize,
     applyable,
@@ -50,19 +42,15 @@
 
   let filters = $state(normalize($state.snapshot(initFilters)));
   let columnWidths = $state({});
-  let checkedRows = $state(new Set());
   let barOpen = $state(false);
   let pickerOpen = $state(false);
   let resizing = $state(null);
   let resizeGuide = $state(null);
+  /** True while a cell-range drag is in flight; mouseenter extends only then. */
+  let dragging = $state(false);
   let tableWrapperEl = $state(null);
-  let tableEl = $state(null);
   let columnMenu = $state(null);
   let cellMenu = $state(null);
-
-  // Cell selection. The grid owns the value; selection.js owns the rules.
-  let selection = $state(EMPTY);
-  let dragSelecting = $state(false);
 
   // Clears the document-level drag listeners if the grid unmounts mid-drag.
   // Without this, an unmount leaves mousemove/mouseup attached to `document`
@@ -135,7 +123,8 @@
     void tabId;
     untrack(() => {
       filters = normalize(initFilters);
-      checkedRows = new Set();
+      engine.clearRowSelection();
+      engine.clearCellSelection();
       barOpen = false;
       pickerOpen = false;
       restoringTabState = true;
@@ -154,37 +143,120 @@
   function emitChange() {
     if (restoringTabState) return; // a tab switch restores state, it does not change it
     stream.reset();
-    checkedRows = new Set();
+    engine.clearRowSelection();
+    // A committed sort/filter refetches with new order or rows; positional
+    // cell ranges would point at different values afterwards.
+    engine.clearCellSelection();
     onStateChange?.({ filters, sorting: engine.sorting });
   }
 
-  function toggleSort(columnId) {
-    engine.table.getColumn(columnId)?.toggleSorting();
+  function toggleSort(columnId, event) {
+    const column = engine.table.getColumn(columnId);
+    if (!column) return;
+    // Passing the event lets Table apply isMultiSortEvent, so shift-click
+    // appends a key instead of replacing the sort.
+    column.getToggleSortingHandler()?.(event);
   }
 
-  function sortIndicatorFor(columnId) {
-    const dir = engine.table.getColumn(columnId)?.getIsSorted();
-    if (!dir) return '';
-    return dir === 'asc' ? ' ▴' : ' ▾';
+  function sortIndexOf(columnId) {
+    return engine.sortIndexOf(columnId);
   }
 
-  function toggleCheckAll() {
-    const visible = stream.pageRows.length;
-    const offset = stream.page * pageSize;
-    if (checkedRows.size === visible) {
-      checkedRows = new Set();
-    } else {
-      checkedRows = new Set(
-        Array.from({ length: visible }, (_, i) => offset + i),
-      );
+  function sortDirectionOf(columnId) {
+    return engine.table.getColumn(columnId)?.getIsSorted() ?? false;
+  }
+
+  function onCellMouseDown(rowIndex, columnId, event) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    dragging = true;
+    if (event.shiftKey) engine.extendCellSelection({ rowIndex, columnId });
+    else engine.startCellSelection({ rowIndex, columnId });
+    // A drag can end anywhere, including outside the window.
+    const stop = () => {
+      dragging = false;
+      window.removeEventListener('mouseup', stop);
+    };
+    window.addEventListener('mouseup', stop);
+    activeDragCleanup = stop;
+  }
+
+  function onCellMouseEnter(rowIndex, columnId) {
+    if (!dragging) return;
+    engine.extendCellSelection({ rowIndex, columnId });
+  }
+
+  const ARROWS = {
+    ArrowUp: 'up',
+    ArrowDown: 'down',
+    ArrowLeft: 'left',
+    ArrowRight: 'right',
+  };
+
+  /**
+   * What Cmd+C copies, in priority order: an active cell range, else a row
+   * selection, else nothing (so the browser's own copy still works on, say,
+   * selected text in the filter bar).
+   */
+  function copySelection(format = 'tsv') {
+    const cells = engine.selectedCellRangesData();
+    // `payload`, not `rows` — the local must not shadow the accumulated-buffer prop.
+    const payload =
+      cells.length > 0
+        ? cells
+        : engine.selectedRowIndices().map((i) => rows[i]).filter(Boolean);
+    if (payload.length === 0) return false;
+    const text = format === 'csv' ? toCsv(payload) : toTsv(payload);
+    navigator.clipboard?.writeText(text).catch(() => {});
+    return true;
+  }
+
+  function handleGridKeydown(e) {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'c') {
+      if (copySelection('tsv')) e.preventDefault();
+      return;
+    }
+    if (ARROWS[e.key]) {
+      e.preventDefault();
+      engine.moveCellSelection(ARROWS[e.key], e.shiftKey);
+      // Keep the focused cell on screen when arrowing past the viewport edge.
+      queueMicrotask(() => {
+        tableWrapperEl
+          ?.querySelector('td.focused')
+          ?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+      });
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
+      e.preventDefault();
+      engine.selectAllCells();
+      return;
+    }
+    if (e.key === 'Escape') {
+      engine.clearCellSelection();
     }
   }
 
-  function toggleCheck(absolute) {
-    const next = new Set(checkedRows);
-    if (next.has(absolute)) next.delete(absolute);
-    else next.add(absolute);
-    checkedRows = next;
+  /** Absolute indices of gutter-selected rows, for cell styling and copy. */
+  const selectedRows = $derived(new Set(engine.selectedRowIndices()));
+
+  function selectRow(absolute, opts) {
+    engine.selectRow(absolute, opts);
+  }
+
+  function toggleSelectAllPage() {
+    const offset = stream.page * pageSize;
+    const onPage = stream.pageRows.map((_, i) => offset + i);
+    if (onPage.length === 0) return;
+    if (onPage.every((i) => selectedRows.has(i))) {
+      engine.clearRowSelection();
+      return;
+    }
+    // Union semantics: every not-yet-selected page row joins; selections on
+    // this page and other pages survive. A per-row toggle would REMOVE rows
+    // that were already selected — the opposite of what a select-all
+    // affordance means.
+    engine.selectRows(onPage.filter((i) => !selectedRows.has(i)));
   }
 
   // Filter bar
@@ -227,9 +299,26 @@
     { id: 'desc', label: 'Sort descending' },
     { id: 'clear-sort', label: 'Clear sort' },
     { separator: true },
+    { id: 'pin-left', label: 'Pin to left' },
+    { id: 'pin-right', label: 'Pin to right' },
+    { id: 'unpin', label: 'Unpin' },
+    { separator: true },
     { id: 'filter', label: 'Filter by this column' },
     { id: 'copy', label: 'Copy column name' },
   ];
+
+  // Spec §4.4: the pin affordances need horizontal room to be worth it.
+  // Below a 640px container they hide; cell-range selection stays at every
+  // width. The wrapper measures itself, so embedded mounts gate correctly too.
+  let wrapperWidth = $state(0);
+  const pinningAvailable = $derived(wrapperWidth >= 640);
+  const columnMenuItems = $derived(
+    pinningAvailable
+      ? COLUMN_MENU_ITEMS
+      : COLUMN_MENU_ITEMS.filter(
+          (i) => !String(i.id ?? '').startsWith('pin') && i.id !== 'unpin',
+        ),
+  );
 
   /** The header passes a column ID; meta carries the display name/type. */
   function openColumnMenu(e, colId) {
@@ -259,6 +348,9 @@
       engine.table.getColumn(id)?.clearSorting();
       return;
     }
+    if (action === 'pin-left') return engine.pinColumn(id, 'left');
+    if (action === 'pin-right') return engine.pinColumn(id, 'right');
+    if (action === 'unpin') return engine.pinColumn(id, false);
     if (action === 'filter') {
       barOpen = true;
       const next = addFilter(filters, column, typeName);
@@ -282,12 +374,18 @@
             { id: 'filter-out', label: 'Filter by is not null' },
             { separator: true },
             { id: 'copy', label: 'Copy value' },
+            { separator: true },
+            { id: 'copy-selection-tsv', label: 'Copy selection (TSV)' },
+            { id: 'copy-selection-csv', label: 'Copy selection (CSV)' },
           ]
         : [
             { id: 'filter', label: 'Filter by this value' },
             { id: 'filter-out', label: 'Filter out this value' },
             { separator: true },
             { id: 'copy', label: 'Copy value' },
+            { separator: true },
+            { id: 'copy-selection-tsv', label: 'Copy selection (TSV)' },
+            { id: 'copy-selection-csv', label: 'Copy selection (CSV)' },
           ],
   );
 
@@ -306,6 +404,8 @@
 
   function handleCellMenuSelect(id) {
     const { column, typeName, value } = cellMenu;
+    if (id === 'copy-selection-tsv') return void copySelection('tsv');
+    if (id === 'copy-selection-csv') return void copySelection('csv');
     if (id === 'copy') {
       navigator.clipboard?.writeText(formatCell(value)).catch(() => {});
       return;
@@ -324,125 +424,6 @@
       pickerOpen = true;
     }
   }
-
-  // --- Cell selection ---------------------------------------------------
-  // Visible column position -> index into the raw row tuple. Columns can be
-  // hidden and reordered, so a copy must follow what is on screen rather than
-  // the query's column order.
-  let visibleColIndexes = $derived(
-    engine.table
-      .getVisibleLeafColumns()
-      .map((c) => c.columnDef.meta?.index ?? 0),
-  );
-  let selBounds = $derived(boundsOf(selection));
-  let gridShape = $derived({
-    rows: stream.pageRows.length,
-    cols: visibleColIndexes.length,
-  });
-
-  function onCellMouseDown(e, row, col) {
-    // Right-click opens the cell menu and must not move the selection out
-    // from under it.
-    if (e.button !== 0) return;
-    selection = e.shiftKey ? extendTo(selection, row, col) : cellAt(row, col);
-    dragSelecting = true;
-    // The table owns the keyboard, so a click has to hand it focus or the
-    // arrow keys would go nowhere.
-    tableEl?.focus({ preventScroll: true });
-    beginDragSelect();
-  }
-
-  function onCellMouseEnter(row, col) {
-    if (!dragSelecting) return;
-    selection = extendTo(selection, row, col);
-  }
-
-  /**
-   * The pointer can leave the table mid-drag, so the release is caught on the
-   * document. Registered per drag and torn down on release, which also keeps
-   * `activeDragCleanup` honest if the grid unmounts while the button is down.
-   */
-  function beginDragSelect() {
-    if (activeDragCleanup !== null) return;
-    function stop() {
-      dragSelecting = false;
-      document.removeEventListener('mouseup', stop);
-      activeDragCleanup = null;
-    }
-    document.addEventListener('mouseup', stop);
-    activeDragCleanup = stop;
-  }
-
-  function copySelection() {
-    const text = selectionToTsv(stream.pageRows, visibleColIndexes, selBounds);
-    if (text === '') return;
-    navigator.clipboard?.writeText(text).catch(() => {});
-  }
-
-  /**
-   * Keyboard navigation for the cell cursor.
-   *
-   * Deliberately bound to the table wrapper rather than to the window: five
-   * ResultsGrid instances can be mounted at once, and a window listener would
-   * have every one of them react to the same arrow key. Handled keys also stop
-   * propagating, because Notebook's command-mode keymap only ignores events
-   * from INPUT/TEXTAREA/SELECT — a focused div is not on that list, so an
-   * arrow press here would otherwise also move the notebook's cell selection.
-   */
-  function handleGridKeydown(e) {
-    const { rows, cols } = gridShape;
-    if (rows === 0 || cols === 0) return;
-    const mod = e.metaKey || e.ctrlKey;
-    const extend = e.shiftKey;
-    let next = null;
-
-    if (mod && e.key === 'c') {
-      copySelection();
-    } else if (mod && e.key === 'a') {
-      selection = {
-        anchor: { row: 0, col: 0 },
-        cursor: { row: rows - 1, col: cols - 1 },
-      };
-    } else if (e.key === 'ArrowDown') {
-      next = moveBy(selection, 1, 0, { rows, cols, extend });
-    } else if (e.key === 'ArrowUp') {
-      next = moveBy(selection, -1, 0, { rows, cols, extend });
-    } else if (e.key === 'ArrowRight') {
-      next = moveBy(selection, 0, 1, { rows, cols, extend });
-    } else if (e.key === 'ArrowLeft') {
-      next = moveBy(selection, 0, -1, { rows, cols, extend });
-    } else if (e.key === 'Tab') {
-      next = moveBy(selection, 0, e.shiftKey ? -1 : 1, { rows, cols });
-    } else if (e.key === 'Home') {
-      next = moveBy(selection, 0, -cols, { rows, cols, extend });
-    } else if (e.key === 'End') {
-      next = moveBy(selection, 0, cols, { rows, cols, extend });
-    } else if (e.key === 'PageDown') {
-      next = moveBy(selection, rows, 0, { rows, cols, extend });
-    } else if (e.key === 'PageUp') {
-      next = moveBy(selection, -rows, 0, { rows, cols, extend });
-    } else if (e.key === 'Escape') {
-      selection = EMPTY;
-    } else {
-      return;
-    }
-
-    if (next !== null) selection = next;
-    e.preventDefault();
-    e.stopPropagation();
-  }
-
-  /**
-   * A selection is a set of coordinates into the visible page, so it stops
-   * meaning anything once the page, the tab or the column set changes. Reading
-   * only the identifiers keeps this from firing on every streamed batch.
-   */
-  $effect(() => {
-    void tabId;
-    void stream.page;
-    void visibleColIndexes.length;
-    selection = EMPTY;
-  });
 
   // --- Column resize ---
   const MIN_COL_WIDTH = 80;
@@ -697,7 +678,13 @@
       {/if}
     </div>
   {:else if columns.length > 0}
-    <div class="table-wrapper" class:loading bind:this={tableWrapperEl}>
+    <div
+      class="table-wrapper"
+      class:loading
+      bind:this={tableWrapperEl}
+      bind:clientWidth={wrapperWidth}
+      onkeydown={handleGridKeydown}
+    >
       {#if loading}
         <div class="refetch-bar" role="status" aria-label="Refreshing rows">
           <span class="refetch-bar-fill"></span>
@@ -706,36 +693,31 @@
       {#if resizeGuide !== null}
         <div class="resize-guide" style="left: {resizeGuide}px"></div>
       {/if}
-      <table
-        bind:this={tableEl}
-        role="grid"
-        tabindex="0"
-        aria-label="Query results"
-        aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Meta+C"
-        onkeydown={handleGridKeydown}
-      >
+      <table>
         <GridHeader
           table={engine.table}
           {columnWidths}
-          {sortIndicatorFor}
+          {sortIndexOf}
+          {sortDirectionOf}
           onToggleSort={toggleSort}
           onOpenMenu={openColumnMenu}
           onResizeStart={startResize}
           onResizeKeydown={handleResizeKeydown}
-          onToggleCheckAll={toggleCheckAll}
+          onToggleSelectAllPage={toggleSelectAllPage}
           openColumnId={columnMenu?.id ?? null}
-          allChecked={checkedRows.size === stream.pageRows.length &&
-            stream.pageRows.length > 0}
+          allPageSelected={stream.pageRows.length > 0 &&
+            stream.pageRows.every(
+              (_, i) => selectedRows.has(stream.page * pageSize + i),
+            )}
         />
         <GridBody
           table={engine.table}
           pageRows={stream.pageRows}
           pageOffset={stream.page * pageSize}
           {columnWidths}
-          {checkedRows}
-          onToggleCheck={toggleCheck}
+          {selectedRows}
+          onSelectRow={selectRow}
           onCellContextMenu={openCellMenu}
-          {selBounds}
           {onCellMouseDown}
           {onCellMouseEnter}
         />
@@ -765,7 +747,7 @@
   <GridMenu
     x={columnMenu.x}
     y={columnMenu.y}
-    items={COLUMN_MENU_ITEMS}
+    items={columnMenuItems}
     onSelect={handleColumnMenuSelect}
     onClose={() => (columnMenu = null)}
   />
@@ -809,8 +791,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0 var(--space-3);
-    height: 32px;
+    padding: var(--space-2) var(--space-4);
+    height: 40px;
     border-bottom: 1px solid var(--border);
     background: var(--bg-surface);
   }
@@ -890,8 +872,8 @@
   .error-panel-message {
     max-width: 600px;
     padding: var(--space-3);
-    background: var(--bg-subtle);
-    border-radius: var(--radius-sm);
+    background: rgba(0, 0, 0, 0.04);
+    border-radius: var(--radius-md);
     font-family: var(--font-mono);
     font-size: var(--text-sm);
     line-height: 1.6;
@@ -907,28 +889,23 @@
   .tool-btn {
     display: flex;
     align-items: center;
-    gap: 5px;
-    padding: 3px 9px;
+    gap: 6px;
+    padding: 4px 12px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--bg-elevated);
+    border-radius: 20px;
+    background: var(--bg-surface);
     color: var(--text-secondary);
     font-size: var(--text-sm);
     font-weight: var(--weight-medium);
     cursor: pointer;
-    box-shadow: var(--shadow-sm);
-    transition:
-      background var(--transition-fast),
-      border-color var(--transition-fast),
-      color var(--transition-fast);
+    transition: all var(--transition-fast);
   }
   /* Compact (icon-only) mode collapses pill to a square ghost button */
   .tool-btn.icon-only {
-    padding: 4px;
-    border-radius: var(--radius-sm);
+    padding: 5px;
+    border-radius: var(--radius-md);
     border-color: transparent;
     background: transparent;
-    box-shadow: none;
   }
   .tool-btn.icon-only:hover {
     border-color: transparent;
@@ -943,10 +920,10 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 24px;
-    height: 24px;
+    width: 28px;
+    height: 28px;
     border: none;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     background: transparent;
     color: var(--text-secondary);
     cursor: pointer;
@@ -959,7 +936,9 @@
   }
   .tool-btn:hover {
     background: var(--bg-hover);
+    border-color: var(--text-muted);
     color: var(--text);
+    transform: scale(1.02);
   }
   .tool-btn.active {
     background: var(--accent-soft);
@@ -976,16 +955,6 @@
     overflow: auto;
     border-top: 1px solid var(--grid-line);
     position: relative;
-  }
-  /* Tabbed into rather than clicked: the grid needs to say where the keyboard
-     went before any cell is selected. A click selects a cell, and the cell's
-     own fill is the indicator from then on. */
-  table:focus {
-    outline: none;
-  }
-  table:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: -2px;
   }
   table {
     width: 100%;

@@ -27,38 +27,22 @@ describe('GridPagination', () => {
 
   it('disables Previous on the first page', () => {
     const { getByRole } = render(GridPagination, { props: base });
-    expect(
-      (getByRole('button', { name: /previous/i }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(true);
+    expect((getByRole('button', { name: /previous/i }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('enables Previous past the first page', () => {
-    const { getByRole } = render(GridPagination, {
-      props: { ...base, page: 1 },
-    });
-    expect(
-      (getByRole('button', { name: /previous/i }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(false);
+    const { getByRole } = render(GridPagination, { props: { ...base, page: 1 } });
+    expect((getByRole('button', { name: /previous/i }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('disables Next when there is nothing to advance to', () => {
-    const { getByRole } = render(GridPagination, {
-      props: { ...base, canGoNext: false },
-    });
-    expect(
-      (getByRole('button', { name: /next/i }) as HTMLButtonElement).disabled,
-    ).toBe(true);
+    const { getByRole } = render(GridPagination, { props: { ...base, canGoNext: false } });
+    expect((getByRole('button', { name: /next/i }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('disables Next while a fetch is in flight', () => {
-    const { getByRole } = render(GridPagination, {
-      props: { ...base, isFetchingMore: true },
-    });
-    expect(
-      (getByRole('button', { name: /next/i }) as HTMLButtonElement).disabled,
-    ).toBe(true);
+    const { getByRole } = render(GridPagination, { props: { ...base, isFetchingMore: true } });
+    expect((getByRole('button', { name: /next/i }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('calls onNext and onPrev', async () => {

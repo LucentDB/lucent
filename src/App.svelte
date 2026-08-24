@@ -568,7 +568,7 @@
       // Built as a new object, not mutated — see the repo's immutability rule.
       const opts = {
         ...fetchMoreOptions(tab, CHUNK_SIZE),
-        sort: wireSortFor(tab.sorting, tab.columns)[0] ?? null,
+        sort: wireSortFor(tab.sorting, tab.columns),
       };
       const result =
         tab.kind === 'view' || tab.kind === 'table'
@@ -602,7 +602,7 @@
       // Built as a new object, not mutated — see the repo's immutability rule.
       const opts = {
         ...refetchOptions(merged, CHUNK_SIZE),
-        sort: wireSortFor(merged.sorting, merged.columns)[0] ?? null,
+        sort: wireSortFor(merged.sorting, merged.columns),
       };
       const result =
         merged.kind === 'view' || merged.kind === 'table'

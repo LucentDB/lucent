@@ -31,17 +31,6 @@ beforeEach(() => {
   aiConfig.acp = null;
 });
 
-/**
- * The dialog is a two-pane settings surface, so a control only exists while
- * its section is open. Tests that reach across sections navigate first, the
- * same way a user does.
- */
-async function goTo(
-  section: 'Provider' | 'Model' | 'Agents' | 'Data & Safety',
-) {
-  await fireEvent.click(screen.getByRole('button', { name: section }));
-}
-
 describe('AiSettings', () => {
   it('remembers the last-picked model per provider when switching back and forth', async () => {
     render(AiSettings, { onClose: vi.fn() });
@@ -78,7 +67,6 @@ describe('AiSettings', () => {
     });
     render(AiSettings, { onClose: vi.fn() });
 
-    await goTo('Model');
     await fireEvent.click(
       screen.getByRole('button', { name: /Fetch Models/i }),
     );
@@ -94,7 +82,6 @@ describe('AiSettings', () => {
     });
     render(AiSettings, { onClose: vi.fn() });
 
-    await goTo('Model');
     await fireEvent.click(
       screen.getByRole('button', { name: /Fetch Models/i }),
     );
@@ -114,21 +101,15 @@ describe('AiSettings', () => {
       screen.getByRole('radio', { name: 'Custom (OpenAI-compatible)' }),
     );
 
-    await goTo('Model');
-    expect(
-      (
-        screen.getByRole('button', {
-          name: /Fetch Models/i,
-        }) as HTMLButtonElement
-      ).disabled,
-    ).toBe(true);
+    const fetchBtn = screen.getByRole('button', {
+      name: /Fetch Models/i,
+    }) as HTMLButtonElement;
+    expect(fetchBtn.disabled).toBe(true);
 
-    await goTo('Provider');
     await fireEvent.input(screen.getByLabelText(/endpoint/i), {
       target: { value: 'http://localhost:8080/v1' },
     });
 
-    await goTo('Model');
     expect(
       (
         screen.getByRole('button', {
@@ -153,13 +134,11 @@ describe('AiSettings', () => {
     render(AiSettings, { onClose: vi.fn() });
 
     // Start fetch for openai
-    await goTo('Model');
     await fireEvent.click(
       screen.getByRole('button', { name: /Fetch Models/i }),
     );
 
     // Switch to Anthropic mid-flight
-    await goTo('Provider');
     await fireEvent.click(screen.getByRole('radio', { name: 'OpenAI' }));
     await fireEvent.click(screen.getByRole('radio', { name: 'Anthropic' }));
 
@@ -168,7 +147,6 @@ describe('AiSettings', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     // Should still show idle — not the stale openai models
-    await goTo('Model');
     expect(screen.getByText(/Fetch Models to load/)).toBeTruthy();
     expect(screen.queryByText('gpt-4o')).toBeNull();
   });
@@ -228,7 +206,6 @@ describe('AiSettings', () => {
     });
     render(AiSettings, { onClose: vi.fn() });
 
-    await goTo('Agents');
     // "Terminal agent" is the registry row's description — the provider
     // picker also contains an "OpenCode" card, so the row text must be
     // disambiguated from it.
@@ -267,7 +244,7 @@ describe('AiSettings', () => {
     expect(screen.queryByRole('button', { name: /Fetch Models/i })).toBeNull();
   });
 
-  it('shows the agent config with the selected agent and auto-deny when provider is acp', async () => {
+  it('shows the ACP config section with the selected agent and auto-deny when provider is acp', async () => {
     invokeMock.mockImplementation(async (cmd) => {
       if (cmd === 'get_ai_settings') return { ...aiConfig };
       if (cmd === 'list_installed_acp_agents') {
@@ -287,12 +264,9 @@ describe('AiSettings', () => {
       await screen.findByRole('radio', { name: 'ACP Agent — opencode' }),
     );
 
-    expect(aiConfig.acp?.agentId).toBe('opencode');
-    await goTo('Agents');
     expect(screen.getByText('Selected agent')).toBeTruthy();
-    // A switch, not a checkbox: it applies immediately rather than being a
-    // form value that Save collects.
-    expect(screen.getByRole('switch', { name: /Auto-deny/i })).toBeTruthy();
+    expect(aiConfig.acp?.agentId).toBe('opencode');
+    expect(screen.getByRole('checkbox', { name: /Auto-deny/i })).toBeTruthy();
   });
 
   it('passes the acp block to save_ai_settings when saving an ACP provider', async () => {
@@ -321,116 +295,6 @@ describe('AiSettings', () => {
         apiKey: null,
       }),
     );
-  });
-
-  // ── The two-pane redesign ───────────────────────────────────────────────
-
-  it('opens on Provider and shows one section at a time', async () => {
-    render(AiSettings, { onClose: vi.fn() });
-    // Provider content present, other sections' content absent.
-    expect(
-      screen.getByLabelText(/API Key/i, { selector: 'input' }),
-    ).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /Fetch Models/i })).toBeNull();
-    expect(screen.queryByText('Row limit')).toBeNull();
-
-    await goTo('Data & Safety');
-    expect(screen.getByText('Row limit')).toBeTruthy();
-    expect(
-      screen.queryByLabelText(/API Key/i, { selector: 'input' }),
-    ).toBeNull();
-  });
-
-  it('drops the Model section for an agent provider, which brings its own', async () => {
-    invokeMock.mockImplementation(async (cmd) => {
-      if (cmd === 'get_ai_settings') return { ...aiConfig };
-      if (cmd === 'list_installed_acp_agents') {
-        return [
-          {
-            id: 'opencode',
-            version: '1.2.3',
-            launch: { cmd: 'npx', args: [], env: {} },
-          },
-        ];
-      }
-      return undefined;
-    });
-    render(AiSettings, { onClose: vi.fn() });
-    expect(screen.getByRole('button', { name: 'Model' })).toBeTruthy();
-
-    await fireEvent.click(
-      await screen.findByRole('radio', { name: 'ACP Agent — opencode' }),
-    );
-    expect(screen.queryByRole('button', { name: 'Model' })).toBeNull();
-  });
-
-  // Through the UI the provider only changes from the Provider pane, so Model
-  // cannot vanish while the user stands in it. The guard is defensive, and the
-  // store is shared, so drive it from there rather than fake a UI path.
-  it('falls back to Provider when the open section stops applying', async () => {
-    render(AiSettings, { onClose: vi.fn() });
-    await goTo('Model');
-    expect(screen.getByRole('button', { name: /Fetch Models/i })).toBeTruthy();
-
-    aiConfig.provider = 'acp';
-
-    await waitFor(() =>
-      expect(screen.queryByRole('button', { name: 'Model' })).toBeNull(),
-    );
-    // The pane recovered onto Provider rather than rendering nothing.
-    expect(screen.getByText('Signed in as')).toBeTruthy();
-  });
-
-  // maxTokens, maxTurns and rowLimit were already loaded from disk and already
-  // sent on every save, but no control for any of them existed in the dialog.
-  it('saves the generation and row limits that previously had no controls', async () => {
-    render(AiSettings, { onClose: vi.fn() });
-
-    await goTo('Model');
-    await fireEvent.input(screen.getByLabelText('Max tokens'), {
-      target: { value: '8192' },
-    });
-    await fireEvent.input(screen.getByLabelText('Max turns'), {
-      target: { value: '12' },
-    });
-
-    await goTo('Data & Safety');
-    await fireEvent.input(screen.getByLabelText('Row limit'), {
-      target: { value: '250' },
-    });
-
-    await fireEvent.click(screen.getByRole('button', { name: /^Save/ }));
-
-    await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('save_ai_settings', {
-        config: expect.objectContaining({
-          maxTokens: 8192,
-          maxTurns: 12,
-          rowLimit: 250,
-        }),
-        apiKey: null,
-      }),
-    );
-  });
-
-  it('toggles the safety switches through their accessible role', async () => {
-    render(AiSettings, { onClose: vi.fn() });
-    await goTo('Data & Safety');
-
-    const before = aiConfig.enableBlastRadiusCheck;
-    await fireEvent.click(
-      screen.getByRole('switch', { name: /Confirm before writes/i }),
-    );
-    expect(aiConfig.enableBlastRadiusCheck).toBe(!before);
-  });
-
-  it('closes on Escape', async () => {
-    const onClose = vi.fn();
-    const { container } = render(AiSettings, { onClose });
-    await fireEvent.keyDown(container.querySelector('[role="dialog"]')!, {
-      key: 'Escape',
-    });
-    expect(onClose).toHaveBeenCalled();
   });
 
   it('refreshes the provider picker after installing an agent', async () => {
@@ -464,13 +328,10 @@ describe('AiSettings', () => {
     });
     render(AiSettings, { onClose: vi.fn() });
 
-    await goTo('Agents');
     await screen.findByText('Terminal agent');
     await fireEvent.click(
       await screen.findByRole('button', { name: 'Install' }),
     );
-    // Back to Provider: installing an agent is what makes it selectable there.
-    await goTo('Provider');
     await waitFor(() =>
       expect(
         screen.getByRole('radio', { name: 'OpenCode — opencode' }),

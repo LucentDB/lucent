@@ -100,7 +100,7 @@ pub fn wrap_for_count(base_sql: &str, filters: &[FilterSpec], builder: &dyn SqlB
 
 pub fn wrap_for_page(
     base_sql: &str,
-    sort: &Option<SortSpec>,
+    sort: &[SortSpec],
     filters: &[FilterSpec],
     limit: i64,
     offset: i64,
@@ -115,16 +115,21 @@ pub fn wrap_for_page(
         sql.push_str(&filters_to_where_clause(filters, builder));
     }
 
-    if let Some(s) = sort {
-        let dir = if s.direction.eq_ignore_ascii_case("desc") {
-            "DESC"
-        } else {
-            "ASC"
-        };
-        sql.push_str(&format!(
-            " ORDER BY {} {dir}",
-            builder.quote_identifier(&s.column)
-        ));
+    if !sort.is_empty() {
+        // Keys join in the order the client sent them, which is the order the
+        // header's sort badges show. Position IS the badge number.
+        let keys: Vec<String> = sort
+            .iter()
+            .map(|s| {
+                let dir = if s.direction.eq_ignore_ascii_case("desc") {
+                    "DESC"
+                } else {
+                    "ASC"
+                };
+                format!("{} {dir}", builder.quote_identifier(&s.column))
+            })
+            .collect();
+        sql.push_str(&format!(" ORDER BY {}", keys.join(", ")));
     }
 
     // `page` re-emits the whole SQL plus the window clause.
@@ -516,7 +521,7 @@ mod wrap_tests {
         // C6: the body's trailing `-- done` used to comment out the closing
         // paren, producing a syntax error on every paged query with a trailing
         // comment. The newline after the body terminates the comment.
-        let sql = wrap_for_page("SELECT 1 -- done", &None, &[], 200, 0, &pg());
+        let sql = wrap_for_page("SELECT 1 -- done", &[], &[], 200, 0, &pg());
         assert!(
             sql.starts_with("SELECT * FROM (SELECT 1 -- done\n) AS _lucent_page"),
             "closing paren must not be inside the comment: {sql}"
@@ -531,7 +536,7 @@ mod wrap_tests {
 
     #[test]
     fn wraps_with_limit_and_offset_only() {
-        let sql = wrap_for_page("SELECT * FROM users", &None, &[], 200, 0, &pg());
+        let sql = wrap_for_page("SELECT * FROM users", &[], &[], 200, 0, &pg());
         assert_eq!(
             sql,
             r#"SELECT * FROM (SELECT * FROM users
@@ -541,16 +546,16 @@ mod wrap_tests {
 
     #[test]
     fn strips_trailing_semicolon_and_whitespace_from_base() {
-        let sql = wrap_for_page("SELECT * FROM users;  ", &None, &[], 200, 0, &pg());
+        let sql = wrap_for_page("SELECT * FROM users;  ", &[], &[], 200, 0, &pg());
         assert!(sql.starts_with("SELECT * FROM (SELECT * FROM users\n) AS _lucent_page"));
     }
 
     #[test]
     fn includes_order_by_when_sort_given() {
-        let sort = Some(SortSpec {
+        let sort = vec![SortSpec {
             column: "created_at".into(),
             direction: "desc".into(),
-        });
+        }];
         let sql = wrap_for_page("SELECT * FROM users", &sort, &[], 200, 0, &pg());
         assert_eq!(
             sql,
@@ -561,10 +566,10 @@ mod wrap_tests {
 
     #[test]
     fn non_desc_direction_defaults_to_asc() {
-        let sort = Some(SortSpec {
+        let sort = vec![SortSpec {
             column: "id".into(),
             direction: "whatever".into(),
-        });
+        }];
         let sql = wrap_for_page("SELECT * FROM users", &sort, &[], 200, 0, &pg());
         assert!(sql.contains(r#"ORDER BY "id" ASC"#));
     }
@@ -576,7 +581,7 @@ mod wrap_tests {
             operator: "eq".into(),
             value: Some("true".into()),
         }];
-        let sql = wrap_for_page("SELECT * FROM users", &None, &filters, 200, 0, &pg());
+        let sql = wrap_for_page("SELECT * FROM users", &[], &filters, 200, 0, &pg());
         assert_eq!(
             sql,
             r#"SELECT * FROM (SELECT * FROM users
@@ -598,16 +603,16 @@ mod wrap_tests {
                 value: Some("guest".into()),
             },
         ];
-        let sql = wrap_for_page("SELECT * FROM users", &None, &filters, 200, 0, &pg());
+        let sql = wrap_for_page("SELECT * FROM users", &[], &filters, 200, 0, &pg());
         assert!(sql.contains(r#"WHERE "active" = 'true' AND "role" != 'guest'"#));
     }
 
     #[test]
     fn where_and_order_by_and_pagination_compose_together() {
-        let sort = Some(SortSpec {
+        let sort = vec![SortSpec {
             column: "id".into(),
             direction: "asc".into(),
-        });
+        }];
         let filters = vec![FilterSpec {
             column: "active".into(),
             operator: "eq".into(),
@@ -623,8 +628,98 @@ mod wrap_tests {
 
     #[test]
     fn negative_limit_and_offset_are_clamped_to_zero() {
-        let sql = wrap_for_page("SELECT * FROM users", &None, &[], -5, -10, &pg());
+        let sql = wrap_for_page("SELECT * FROM users", &[], &[], -5, -10, &pg());
         assert!(sql.ends_with("LIMIT 0 OFFSET 0"));
+    }
+
+    #[test]
+    fn empty_sort_list_emits_no_order_by() {
+        let sql = wrap_for_page("SELECT * FROM users", &[], &[], 200, 0, &pg());
+        assert!(!sql.contains("ORDER BY"));
+    }
+
+    #[test]
+    fn single_sort_key_matches_the_previous_single_sort_output() {
+        let sort = vec![SortSpec {
+            column: "created_at".into(),
+            direction: "desc".into(),
+        }];
+        let sql = wrap_for_page("SELECT * FROM users", &sort, &[], 200, 0, &pg());
+        // Byte-identical to the pre-list behaviour. This is the parity contract.
+        assert_eq!(
+            sql,
+            r#"SELECT * FROM (SELECT * FROM users
+) AS _lucent_page ORDER BY "created_at" DESC LIMIT 200 OFFSET 0"#
+        );
+    }
+
+    #[test]
+    fn multiple_sort_keys_join_in_order() {
+        let sort = vec![
+            SortSpec {
+                column: "status".into(),
+                direction: "asc".into(),
+            },
+            SortSpec {
+                column: "created_at".into(),
+                direction: "desc".into(),
+            },
+        ];
+        let sql = wrap_for_page("SELECT * FROM users", &sort, &[], 200, 0, &pg());
+        // Order is the badge order the header shows: 1 then 2.
+        assert!(sql.contains(r#"ORDER BY "status" ASC, "created_at" DESC"#));
+    }
+
+    #[test]
+    fn every_sort_key_is_identifier_quoted() {
+        let sort = vec![
+            SortSpec {
+                column: "order".into(),
+                direction: "asc".into(),
+            },
+            SortSpec {
+                column: "group by".into(),
+                direction: "asc".into(),
+            },
+        ];
+        let sql = wrap_for_page("SELECT * FROM t", &sort, &[], 10, 0, &pg());
+        // A reserved word and a name with a space: unquoted, either is a syntax
+        // error or worse.
+        assert!(sql.contains(r#""order" ASC"#));
+        assert!(sql.contains(r#""group by" ASC"#));
+    }
+
+    #[test]
+    fn unknown_direction_still_defaults_to_asc_per_key() {
+        let sort = vec![
+            SortSpec {
+                column: "a".into(),
+                direction: "whatever".into(),
+            },
+            SortSpec {
+                column: "b".into(),
+                direction: "DESC".into(),
+            },
+        ];
+        let sql = wrap_for_page("SELECT * FROM t", &sort, &[], 10, 0, &pg());
+        assert!(sql.contains(r#""a" ASC, "b" DESC"#));
+    }
+
+    #[test]
+    fn sort_and_filters_compose_with_where_before_order_by() {
+        let filters = vec![FilterSpec {
+            column: "status".into(),
+            operator: "eq".into(),
+            value: Some("active".into()),
+        }];
+        let sort = vec![SortSpec {
+            column: "id".into(),
+            direction: "asc".into(),
+        }];
+        let sql = wrap_for_page("SELECT * FROM users", &sort, &filters, 50, 0, &pg());
+        let where_at = sql.find("WHERE").expect("WHERE present");
+        let order_at = sql.find("ORDER BY").expect("ORDER BY present");
+        assert!(where_at < order_at);
     }
 }
 

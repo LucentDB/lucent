@@ -85,7 +85,10 @@ export async function notebookFetchPage(
   cells: CellModel[],
   limit: number,
   offset: number,
-  sort: SortSpec | null,
+  // A list since phase ③: the wire carries every sort key, not just one.
+  // Rust side is Option<Vec<SortSpec>>; omitting stays legal, null no longer
+  // needs to be sent.
+  sort: SortSpec[],
   filters: FilterSpec[],
 ): Promise<TableOutput> {
   return invoke('notebook_fetch_page', {

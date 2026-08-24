@@ -31,13 +31,6 @@ pub enum AiEvent {
         tool: String,
         summary: String,
         output: Option<serde_json::Value>,
-        /// The arguments the tool actually ran with, when the call's own
-        /// report lacked them. ACP agents that reach the DB tools through the
-        /// `lucent-tool` CLI report a shell command with no structured input,
-        /// so the bridge — which sees the real arguments — backfills them and
-        /// the card's Input section stops rendering `null`.
-        #[serde(default)]
-        input: Option<serde_json::Value>,
         /// `Failed` renders the card in its error state (spec D7).
         #[serde(default)]
         status: ToolResultStatus,
@@ -271,7 +264,6 @@ mod tests {
             tool: "run_readonly_query".into(),
             summary: "1 row".into(),
             output: None,
-            input: None,
             status: ToolResultStatus::Failed,
         };
         let json = serde_json::to_value(&event).unwrap();

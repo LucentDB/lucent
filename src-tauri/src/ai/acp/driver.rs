@@ -100,24 +100,14 @@ impl AcpChatDriver {
             // Spec D4: the preamble only claims DB tools the agent actually
             // connected (ground truth = the bridge hello). Wait once, decide once —
             // v1 prepends the preamble to the first user message only.
-            let tools_ok = if mcp_hopeless(&self.acp.agent_id) {
-                // A curated-unsupported agent accepts `mcpServers` and drops it,
-                // so the handshake will never arrive: waiting the full gate
-                // stalls the first turn of every conversation for nothing.
-                false
-            } else {
-                session.tools.wait_connected(tools_gate_timeout()).await
-            };
+            let tools_ok = session.tools.wait_connected(tools_gate_timeout()).await;
             if !tools_ok && !session.tools_notice.swap(true, Ordering::SeqCst) {
-                notice = Some(cli_bridge_notice());
+                notice = Some(
+                    "Database tools didn't reach this agent — it didn't connect Lucent's MCP server, so it can't query your database in this conversation."
+                        .into(),
+                );
             }
-            first_prompt_text(
-                &system_prompt,
-                &message,
-                &self.acp.agent_id,
-                tools_ok,
-                tool_helper_path(&self.acp.agent_id, &session_key),
-            )
+            first_prompt_text(&system_prompt, &message, &self.acp.agent_id, tools_ok)
         } else {
             message
         };
@@ -305,7 +295,6 @@ impl AcpChatDriver {
                         tool,
                         summary,
                         output,
-                        input,
                         ..
                     } = &mut event
                     {
@@ -319,26 +308,10 @@ impl AcpChatDriver {
                         // the agent's own tool_call_id, so the UI card renders the grid.
                         if output.is_none() {
                             if let Some(buffered) = correlator.pop_for(tool) {
-                                // The name the bridge executed is the truthful
-                                // one. On the CLI path the agent's is a shell
-                                // command, and consumers key off this field:
-                                // the notebook reads `run_readonly_query`'s
-                                // arguments from it to populate the AI Table.
-                                *tool = buffered.tool;
-                                // The bridge's summary wins over the agent's own:
-                                // a CLI-path agent reports the tool's stdout — the
-                                // Markdown row preview — and the structured payload
-                                // below renders those same rows as a grid. The card
-                                // header takes the short form ("10 rows"), never the
-                                // preview text.
-                                *summary = buffered.summary;
-                                *output = Some(buffered.output);
-                                // The agent's report of a CLI-path call carries no
-                                // structured arguments (it ran a shell command), so
-                                // the bridge's are the only real ones.
-                                if input.is_none() {
-                                    *input = buffered.input;
+                                if summary.is_empty() {
+                                    *summary = buffered.summary;
                                 }
+                                *output = Some(buffered.output);
                             }
                         }
                     }
@@ -440,9 +413,6 @@ pub fn map_update(update: &SessionUpdate) -> Option<AiEvent> {
                 tool: String::new(), // filled by chat()'s name tracking
                 summary: tool_result_text(tu),
                 output: None,
-                // Agents that revise the call's raw input on the update carry
-                // it here; the rest are backfilled from the bridge in chat().
-                input: tu.fields.raw_input.clone(),
                 status: ToolResultStatus::Completed,
             }),
             // A failed call has no result payload in v1, but it MUST surface as a
@@ -458,7 +428,6 @@ pub fn map_update(update: &SessionUpdate) -> Option<AiEvent> {
                         text
                     },
                     output: None,
-                    input: tu.fields.raw_input.clone(),
                     status: ToolResultStatus::Failed,
                 })
             }
@@ -512,75 +481,20 @@ fn acp_tool_guidance() -> String {
         .to_string()
 }
 
-/// The fallback guidance when the agent runtime has not connected MCP over
-/// stdio. Informs the model that Lucent has provisioned the `lucent-tool` CLI
-/// helper in its workspace, with the exact argument shape of every tool.
-///
-/// The schemas matter here in a way they don't on the MCP path: `tools/list`
-/// carries them for a native client, but a CLI caller has nothing to read, and
-/// an agent left to guess `{"sql": ...}` burns a turn finding out.
-fn acp_fallback_tool_guidance(agent_id: &str, tool_path: Option<String>) -> String {
-    // The `./`-relative form is the ergonomic one, but it breaks the moment the
-    // agent changes directory — so name the absolute path too.
-    let absolute = tool_path
-        .map(|p| format!("Absolute path (works from any directory): `{p}`\n"))
-        .unwrap_or_default();
+/// The fallback guidance when the agent runtime has not connected MCP over stdio.
+/// Informs the model that Lucent has provisioned the `./lucent-tool` CLI helper in its workspace
+/// and provides complete database context and schema details.
+fn acp_fallback_tool_guidance(agent_id: &str) -> String {
     format!(
         "\n\nDATABASE TOOLS IN ACP:\n\
-         Your agent runtime ({agent_id}) has not connected Lucent's MCP server over stdio, so Lucent has provisioned an equivalent CLI helper in your working directory. It reaches the same live database through the same guardrails:\n\
+         Your agent runtime ({agent_id}) has not connected Lucent's MCP server over stdio, but Lucent has provisioned a local CLI tool in your working directory:\n\
          - `./lucent-tool <tool_name> '<json_arguments>'` (or `lucent-tool.cmd` on Windows)\n\
-         {absolute}\n\
-         TOOLS AND THEIR ARGUMENTS:\n\
-         - `./lucent-tool search_schema '{{\"query\":\"unpaid invoices\",\"mode\":\"hybrid\"}}'` — find tables/columns by meaning (`semantic`), by name (`keyword`), or both (`hybrid`, the default).\n\
-         - `./lucent-tool get_objects_info '{{\"objects\":[{{\"schema\":\"public\",\"kind\":\"table\",\"name\":\"orders\"}}]}}'` — columns, types, constraints.\n\
-         - `./lucent-tool run_readonly_query '{{\"sql\":\"SELECT count(*) FROM public.orders\"}}'` — execute SELECT/WITH/EXPLAIN.\n\
-         - `./lucent-tool preview_dml '{{\"sql\":\"UPDATE ...\"}}'` — stage one INSERT/UPDATE/DELETE for the user to approve. It never executes on its own.\n\
-         \n\
-         SHORTHAND: a bare (non-JSON) argument is read as that tool's primary field, which avoids nesting JSON inside shell quoting:\n\
-         - `./lucent-tool run_readonly_query \"SELECT count(*) FROM public.orders\"`\n\
-         - `./lucent-tool search_schema \"unpaid invoices\"`\n\
-         Run `./lucent-tool help` for the full JSON schemas.\n\
+         Available database tools: `search_schema`, `get_objects_info`, `run_readonly_query`, `preview_dml`.\n\
          \n\
          CRITICAL INSTRUCTIONS:\n\
-         - If you have bash or terminal execution capabilities, use this helper to query the live database rather than reading local files. It is a first-class path, not a degraded one — do not tell the user you have no database access.\n\
-         - Your working directory is a scratch workspace Lucent created for this conversation, not a code repository. There are no project files to search there.\n\
+         - If you have bash or terminal execution capabilities, run `./lucent-tool run_readonly_query '<json_arguments>'` to query the live database rather than reading local files.\n\
          - If you only have text generation capabilities, use the active database connection and schema information provided to write SQL matching the database dialect for the user."
     )
-}
-
-/// The UI note for a conversation whose agent never connected the MCP bridge.
-/// The tools are still reachable — through the CLI helper — so this reports the
-/// channel, not a loss of capability.
-pub fn cli_bridge_notice() -> String {
-    "This agent didn't connect Lucent's MCP server, so its database tools run through \
-     Lucent's CLI bridge instead (`lucent-tool` in the agent's workspace). Same database, \
-     same guardrails — you may see shell commands in the tool cards."
-        .to_string()
-}
-
-/// Whether waiting on the bridge handshake is pointless for this agent: a
-/// curated-unsupported runtime accepts `mcpServers` and drops it, so the gate
-/// can only ever time out (`registry::db_tool_support`).
-pub fn mcp_hopeless(agent_id: &str) -> bool {
-    matches!(
-        crate::ai::acp::registry::db_tool_support(agent_id),
-        crate::ai::acp::registry::DbToolSupport::Unsupported
-    )
-}
-
-/// The absolute path of the CLI helper `session_for` wrote into the sandbox,
-/// so the guidance can name a path that survives the agent changing directory.
-/// `None` when the workspace root can't be resolved — the relative form still
-/// works from the session cwd.
-pub fn tool_helper_path(agent_id: &str, conversation_id: &str) -> Option<String> {
-    let name = if cfg!(windows) {
-        "lucent-tool.cmd"
-    } else {
-        "lucent-tool"
-    };
-    workspace_dir(agent_id, conversation_id)
-        .ok()
-        .map(|d| d.join(name).to_string_lossy().to_string())
 }
 
 /// How long the driver waits on the first prompt for the agent's MCP client
@@ -601,16 +515,34 @@ pub fn first_prompt_text(
     message: &str,
     agent_id: &str,
     tools_ok: bool,
-    tool_path: Option<String>,
 ) -> String {
     if tools_ok {
         format!("{system_prompt}{}\n\n{message}", acp_tool_guidance())
     } else {
         format!(
             "{system_prompt}{}\n\n{message}",
-            acp_fallback_tool_guidance(agent_id, tool_path)
+            acp_fallback_tool_guidance(agent_id)
         )
     }
+}
+
+/// The honest first-prompt preamble when the agent never connected Lucent's
+/// DB-tool bridge: no tool claims (the model must not promise tools it
+/// doesn't have) and a graceful fallback — SQL the user can run in Lucent's
+/// query editor.
+pub fn no_tools_preamble(agent_id: &str) -> String {
+    format!(
+        "You are connected to a database through Lucent, a database client.\n\n\
+         Lucent provides four database tools (search_schema, get_objects_info, \
+         run_readonly_query, preview_dml) through its own MCP tool server. Your agent \
+         runtime ({agent_id}) did not connect to that server, so THOSE TOOLS ARE NOT \
+         AVAILABLE in this session — they are not in your toolset and you cannot call them.\n\n\
+         RULES:\n\
+         - Do not claim to have these tools, and do not attempt to call them.\n\
+         - If the user asks about the database, write SQL they can run in Lucent's query \
+           editor and explain what it does; describe which queries would answer their question.\n\
+         - Never fabricate query results or schema details you have not seen."
+    )
 }
 
 /// The agent's sandbox root for a conversation:
@@ -836,7 +768,6 @@ mod tests {
                 tool: String::new(),
                 summary: "found 2 tables".into(),
                 output: None,
-                input: None,
                 status: ToolResultStatus::Completed,
             })
         );
@@ -946,7 +877,7 @@ mod tests {
             &events,
             vec![
                 AiEvent::Notice {
-                    content: cli_bridge_notice(),
+                    content: "Database tools didn't reach this agent — it didn't connect Lucent's MCP server, so it can't query your database in this conversation.".into(),
                 },
                 AiEvent::Thinking {
                     content: "thinking…".into(),
@@ -969,7 +900,6 @@ mod tests {
                     tool: "search_schema".into(), // enriched from the ToolCall
                     summary: "found 2 tables".into(),
                     output: None,
-                    input: None,
                     status: ToolResultStatus::Completed,
                 },
                 AiEvent::Done {
@@ -1030,7 +960,7 @@ mod tests {
 
     #[test]
     fn first_prompt_text_claims_tools_only_when_connected() {
-        let with = first_prompt_text("sys preamble", "hello", "stub", true, None);
+        let with = first_prompt_text("sys preamble", "hello", "stub", true);
         assert!(
             with.contains("DATABASE TOOLS IN ACP"),
             "tools guidance present: {with}"
@@ -1041,7 +971,7 @@ mod tests {
         );
         assert!(with.contains("hello"));
 
-        let without = first_prompt_text("sys preamble", "hello", "stub", false, None);
+        let without = first_prompt_text("sys preamble", "hello", "stub", false);
         assert!(
             without.contains("lucent-tool"),
             "fallback cli guidance present: {without}"
@@ -1051,83 +981,6 @@ mod tests {
             "the system prompt and schema details are preserved when mcp bridge is not connected"
         );
         assert!(without.contains("hello"));
-    }
-
-    #[test]
-    fn cli_guidance_spells_out_every_tool_argument_shape() {
-        // A CLI-path agent has no `tools/list` to read the schemas from, so the
-        // guidance is the only place it can learn them. Guessing costs a turn.
-        let g = first_prompt_text("sys", "hi", "pi-acp", false, None);
-        for field in [
-            r#"search_schema '{"query""#,
-            r#"get_objects_info '{"objects""#,
-            r#"run_readonly_query '{"sql""#,
-            r#"preview_dml '{"sql""#,
-        ] {
-            assert!(g.contains(field), "missing arg shape {field}: {g}");
-        }
-        assert!(
-            g.contains("SHORTHAND"),
-            "the bare-string form avoids JSON-in-shell quoting: {g}"
-        );
-        assert!(
-            g.contains("do not tell the user you have no database access"),
-            "the CLI path must not be described to the model as a dead end: {g}"
-        );
-    }
-
-    #[test]
-    fn cli_guidance_names_an_absolute_path_when_known() {
-        let with_path = first_prompt_text(
-            "sys",
-            "hi",
-            "pi-acp",
-            false,
-            Some("/tmp/ws/lucent-tool".to_string()),
-        );
-        assert!(
-            with_path.contains("/tmp/ws/lucent-tool"),
-            "`./lucent-tool` breaks once the agent changes directory: {with_path}"
-        );
-        // Absent a resolvable workspace the relative form still stands alone.
-        let without = first_prompt_text("sys", "hi", "pi-acp", false, None);
-        assert!(!without.contains("Absolute path"), "{without}");
-    }
-
-    #[test]
-    fn mcp_hopeless_only_for_curated_unsupported_agents() {
-        // pi drops `mcpServers`, so waiting on the bridge handshake can only
-        // ever time out — the gate is skipped and the first turn starts at once.
-        assert!(mcp_hopeless("pi-acp"));
-        assert!(!mcp_hopeless("opencode"));
-        // Unverified agents are still probed.
-        assert!(!mcp_hopeless("gemini"));
-    }
-
-    #[test]
-    fn tool_helper_path_lands_in_the_conversation_sandbox() {
-        let _ws = hermetic_workspace();
-        let p = tool_helper_path("pi-acp", "conv-7").expect("workspace resolves");
-        let expected_name = if cfg!(windows) {
-            "lucent-tool.cmd"
-        } else {
-            "lucent-tool"
-        };
-        assert!(p.ends_with(expected_name), "{p}");
-        assert!(p.contains("conv-7"), "scoped to the conversation: {p}");
-        // Same directory `session_for` writes the helper into, so the path the
-        // model is handed is the file that exists. (Compared structurally: the
-        // workspace root comes from a process-global env var that parallel
-        // tests re-point, so re-resolving it here would race.)
-        assert!(
-            p.contains(&format!(
-                "{}agent-workspace{}pi-acp{}conv-7",
-                std::path::MAIN_SEPARATOR,
-                std::path::MAIN_SEPARATOR,
-                std::path::MAIN_SEPARATOR
-            )),
-            "{p}"
-        );
     }
 
     #[test]
@@ -1634,7 +1487,6 @@ mod tests {
         session.correlator.push(BufferedToolResult {
             tool: "run_readonly_query".into(),
             summary: "1 row".into(),
-            input: Some(serde_json::json!({"sql": "select 1"})),
             output: serde_json::json!({
                 "type": "query_result",
                 "columns": [{"name": "x", "type": "INTEGER"}],

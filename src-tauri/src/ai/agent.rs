@@ -832,9 +832,6 @@ impl DatabaseAgent {
                     tool: tc.name.clone(),
                     summary,
                     output: output_json,
-                    // The rig path's `ToolCalls` event already carried the
-                    // arguments to the card; nothing to backfill.
-                    input: None,
                     status: crate::ai::events::ToolResultStatus::Completed,
                 });
 
