@@ -172,6 +172,11 @@
     dragging = true;
     if (event.shiftKey) engine.extendCellSelection({ rowIndex, columnId });
     else engine.startCellSelection({ rowIndex, columnId });
+    // preventDefault above also stops the browser focusing anything, so move
+    // focus into the grid explicitly — otherwise the next Cmd+C/arrow keydown
+    // dispatches to <body> and never reaches handleGridKeydown (WebKit never
+    // focuses cells or buttons on click).
+    tableWrapperEl?.focus({ preventScroll: true });
     // A drag can end anywhere, including outside the window.
     const stop = () => {
       dragging = false;
@@ -242,6 +247,10 @@
 
   function selectRow(absolute, opts) {
     engine.selectRow(absolute, opts);
+    // WKWebView/Safari does not give buttons DOM focus on click, so without
+    // this the gutter click leaves focus on <body> and grid keyboard shortcuts
+    // (Cmd+C copy, Escape) silently never fire.
+    tableWrapperEl?.focus({ preventScroll: true });
   }
 
   function toggleSelectAllPage() {
@@ -678,11 +687,18 @@
       {/if}
     </div>
   {:else if columns.length > 0}
+    <!-- Focusable region: the grid hosts selection/keyboard shortcuts, and
+         WebKit never focuses buttons on click, so interactions move focus
+         here explicitly (see selectRow / onCellMouseDown). -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
     <div
       class="table-wrapper"
       class:loading
       bind:this={tableWrapperEl}
       bind:clientWidth={wrapperWidth}
+      tabindex="0"
+      role="region"
+      aria-label="Query results"
       onkeydown={handleGridKeydown}
     >
       {#if loading}

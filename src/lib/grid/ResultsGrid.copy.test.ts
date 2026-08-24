@@ -90,3 +90,24 @@ describe('select-all-on-page', () => {
     expect(states).toEqual([false, false]);
   });
 });
+
+describe('focus follows selection (WebKit never focuses buttons on click)', () => {
+  it('moves focus to the grid after a gutter click, so Cmd+C reaches the grid handler', async () => {
+    const { container } = render(ResultsGrid, { props });
+    await fireEvent.click(container.querySelectorAll('.gutter')[1]);
+    // In WKWebView/Safari a mousedown does not focus <button>s — focus would
+    // stay on <body> and the Cmd+C keydown would never pass through the grid.
+    expect(document.activeElement).toBe(
+      container.querySelector('.table-wrapper'),
+    );
+  });
+
+  it('moves focus to the grid after starting a cell selection', async () => {
+    const { container } = render(ResultsGrid, { props });
+    const cells = container.querySelectorAll('tbody td:not(.row-num)');
+    await fireEvent.mouseDown(cells[0]);
+    expect(document.activeElement).toBe(
+      container.querySelector('.table-wrapper'),
+    );
+  });
+});
