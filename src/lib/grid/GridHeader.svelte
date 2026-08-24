@@ -1,4 +1,6 @@
 <script>
+  import { GUTTER_WIDTH } from './engine.svelte.ts';
+
   let {
     table,
     columnWidths = {},
@@ -39,11 +41,23 @@
     if (!dir) return '';
     return dir === 'asc' ? '▴' : '▾';
   }
+
+  // Sticky insets: `position: sticky` never engages without a non-auto inset,
+  // and getStart('start') measures only within the pinning region — it cannot
+  // see the gutter th that renders before every start-group cell.
+  function startLeftOffset(header) {
+    return GUTTER_WIDTH + header.column.getStart('start');
+  }
+
+  /** Cumulative width of end-group columns rendered to this column's right. */
+  function endRightOffset(header) {
+    return header.column.getAfter('end');
+  }
 </script>
 
 <thead>
   <tr>
-    <th class="row-num hdr-start">
+    <th class="row-num hdr-start" style="left: 0;">
       <input
         type="checkbox"
         onchange={onToggleSelectAllPage}
@@ -74,7 +88,9 @@
     style="width: {widthOf(meta.index)}px; min-width: 80px; {extraClass.includes(
       'hdr-start',
     )
-      ? `left: ${header.column.getStart('start')}px;`
+      ? `left: ${startLeftOffset(header)}px;`
+      : ''}{extraClass.includes('hdr-end')
+      ? `right: ${endRightOffset(header)}px;`
       : ''}"
     title={meta.typeName}
   >

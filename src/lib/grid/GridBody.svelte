@@ -3,6 +3,7 @@
   // column cell renderers: those need FlexRender in the body, which would
   // break the rule that only engine.svelte.ts touches the adapter. Spec §3.3.
   import { formatCell, cellClass } from './format.js';
+  import { GUTTER_WIDTH } from './engine.svelte.ts';
   import GridGutter from './GridGutter.svelte';
 
   let {
@@ -32,7 +33,7 @@
     {@const absolute = pageOffset + i}
     {@const tableRow = table.getRowModel().rows[absolute]}
     <tr class:even={absolute % 2 === 0}>
-      <td class="row-num cell-start">
+      <td class="row-num cell-start" style="left: 0;">
         <GridGutter
           rowNumber={absolute + 1}
           selected={selectedRows.has(absolute)}
@@ -64,7 +65,15 @@
     data-selected={cell.getIsSelected() ? 'true' : 'false'}
     class:focused={cell.getIsFocused()}
     tabindex={cell.getTabIndex()}
-    style="width: {widthOf(index)}px; min-width: 80px;"
+    style="width: {widthOf(index)}px; min-width: 80px; {extraClass.includes(
+      'cell-start',
+    )
+      ? `left: ${
+          GUTTER_WIDTH + cell.column.getStart('start')
+        }px;`
+      : ''}{extraClass.includes('cell-end')
+      ? `right: ${cell.column.getAfter('end')}px;`
+      : ''}"
     onmousedown={(e) => onCellMouseDown(rowIndex, cell.column.id, e)}
     onmouseenter={() => onCellMouseEnter(rowIndex, cell.column.id)}
     oncontextmenu={(e) => onCellContextMenu(e, index, value)}

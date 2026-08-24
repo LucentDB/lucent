@@ -23,6 +23,14 @@ import {
   rowSortingFeature,
 } from '@tanstack/svelte-table';
 
+/**
+ * Width of the row-number gutter (`td.row-num` / `th.row-num`). The gutter
+ * renders inside the sticky start region but outside the table's pinning
+ * model, so every pinned-column offset must include it or the first pinned
+ * data column slides under the gutter.
+ */
+export const GUTTER_WIDTH = 44;
+
 export interface GridColumn {
   name: string;
   type_name: string;
@@ -96,6 +104,11 @@ export function createGridEngine(config: GridConfig) {
   });
 
   let cellSelection = $state<CellSelectionRangeState[]>([]);
+  // Controlled sizing: without a state slice + change handler, a programmatic
+  // setColumnSizing writes past the adapter's atom sync and getSize()/
+  // getStart() read back null — which silently breaks pinned-offset math.
+  // v9 shape: plain numbers per column id (NOT v8's {size} objects).
+  let columnSizing = $state<Record<string, number>>({});
 
   /**
    * All three manual flags are pinned per spec D3 even though
@@ -184,6 +197,9 @@ export function createGridEngine(config: GridConfig) {
       get cellSelection() {
         return cellSelection;
       },
+      get columnSizing() {
+        return columnSizing;
+      },
     },
     onSortingChange: (updater: unknown) => {
       sorting =
@@ -191,6 +207,14 @@ export function createGridEngine(config: GridConfig) {
           ? (updater as (prev: SortState[]) => SortState[])(sorting)
           : (updater as SortState[]);
       config.onSortingChange?.(sorting);
+    },
+    onColumnSizingChange: (updater: unknown) => {
+      columnSizing =
+        typeof updater === 'function'
+          ? (updater as (
+              prev: Record<string, number>,
+            ) => Record<string, number>)(columnSizing)
+          : (updater as Record<string, number>);
     },
     onColumnPinningChange: (updater: unknown) => {
       // Every write re-normalizes the two keys: a partial or foreign-shaped
@@ -283,6 +307,17 @@ export function createGridEngine(config: GridConfig) {
   function clearRowSelection() {
     rowSelection = {};
     selectionAnchor = null;
+  }
+
+  /**
+   * Union `indices` into the selection, keeping everything already selected
+   * (including rows on other pages). Unlike selectRow's replace branch, this
+   * is the primitive select-all affordances build on.
+   */
+  function selectRows(indices: number[]) {
+    const next = { ...rowSelection };
+    for (const i of indices) next[String(i)] = true;
+    rowSelection = next;
   }
 
   /**
@@ -381,6 +416,7 @@ export function createGridEngine(config: GridConfig) {
     selectedRowIndices,
     selectRow,
     clearRowSelection,
+    selectRows,
     pinColumn,
     sortIndexOf,
     sortingForWire,

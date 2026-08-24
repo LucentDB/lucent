@@ -170,3 +170,24 @@ describe('cell selection rendering', () => {
     expect(focusable).toHaveLength(1);
   });
 });
+
+describe('pinned cell offsets', () => {
+  it('offsets left-pinned cells past the gutter', () => {
+    const { container } = renderBody({ pinLeft: ['0'] });
+    const firstRow = container.querySelectorAll('tbody tr')[0];
+    const startCells = firstRow.querySelectorAll('.cell-start');
+    // [gutter, first data column]: gutter pins at 0, data clears it.
+    expect(startCells[0].getAttribute('style')).toContain('left: 0');
+    expect(startCells[1].getAttribute('style')).toContain('left: 44px');
+  });
+
+  it('gives stacked right-pinned cells cumulative insets', () => {
+    const { container } = renderBody({ pinRight: ['1', '0'] });
+    const endCells =
+      container.querySelectorAll('tbody tr')[0].querySelectorAll('.cell-end');
+    const rights = [...endCells].map((td) =>
+      Number(td.getAttribute('style')?.match(/right: ([\d.]+)px/)?.[1]),
+    );
+    expect([...rights].sort((a, b) => a - b)).toEqual([0, 150]);
+  });
+});

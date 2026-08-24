@@ -160,3 +160,51 @@ describe('pinned layout', () => {
     expect(container.querySelector('.pinned-edge')).toBeNull();
   });
 });
+
+describe('pinned offsets', () => {
+  /** The adapter syncs table atoms on the microtask queue; settle before asserting. */
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it('offsets the first left-pinned column past the gutter', () => {
+    const { container } = renderHeader({ pinLeft: ['0'] });
+    const idTh = [...container.querySelectorAll('thead th')].find((el) =>
+      el.textContent?.includes('id'),
+    );
+    // getStart('start') alone reports 0 inside the region; the gutter th
+    // renders before every start cell, so the inset must include its width.
+    expect(idTh?.getAttribute('style')).toContain('left: 44px');
+  });
+
+  it('keeps the gutter header itself pinned at left 0', () => {
+    const { container } = renderHeader({ pinLeft: ['0'] });
+    const gutter = container.querySelector('th.row-num');
+    expect(gutter?.getAttribute('style')).toContain('left: 0');
+  });
+
+  it('stacks multiple right-pinned columns cumulatively', () => {
+    const { container } = renderHeader({ pinRight: ['1', '0'] });
+    const rights = [...container.querySelectorAll('thead th')]
+      .filter((el) => el.className.includes('hdr-end'))
+      .map((el) =>
+        Number(el.getAttribute('style')?.match(/right: ([\d.]+)px/)?.[1]),
+      );
+    // Two pinned columns, default size 150 each: the inner edge sits at 0,
+    // the outer at one column's width — regardless of internal order.
+    expect([...rights].sort((a, b) => a - b)).toEqual([0, 150]);
+  });
+
+  it('recomputes pinned offsets after a column resize', async () => {
+    const result = renderHeader({ pinLeft: ['0', '1'] });
+    const secondStart = () =>
+      [...result.container.querySelectorAll('thead th')].find(
+        (el) =>
+          el.className.includes('hdr-start') &&
+          !el.className.includes('row-num') &&
+          el.textContent?.includes('email'),
+      );
+    expect(secondStart()?.getAttribute('style')).toContain('left: 194px');
+    result.component.resizeTo('0', 250);
+    await settle();
+    expect(secondStart()?.getAttribute('style')).toContain('left: 294px');
+  });
+});

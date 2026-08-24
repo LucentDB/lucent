@@ -31,6 +31,12 @@
   });
   for (const id of pinLeft) engine.pinColumn(id, 'left');
   for (const id of pinRight) engine.pinColumn(id, 'right');
+
+  /** Post-render sizing hook: tests drive the real table API from outside. */
+  export function resizeTo(id, size) {
+    engine.table.setColumnSizing({ [id]: size });
+  }
+
 </script>
 
 <table>
