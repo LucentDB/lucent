@@ -247,13 +247,16 @@
   function toggleSelectAllPage() {
     const offset = stream.page * pageSize;
     const onPage = stream.pageRows.map((_, i) => offset + i);
-    const allSelected = onPage.every((i) => selectedRows.has(i));
-    if (allSelected) {
+    if (onPage.length === 0) return;
+    if (onPage.every((i) => selectedRows.has(i))) {
       engine.clearRowSelection();
       return;
     }
-    // extend:false/toggle:true per row: already-selected rows stay, others join.
-    for (const i of onPage) engine.selectRow(i, { extend: false, toggle: true });
+    // Union semantics: every not-yet-selected page row joins; selections on
+    // this page and other pages survive. A per-row toggle would REMOVE rows
+    // that were already selected — the opposite of what a select-all
+    // affordance means.
+    engine.selectRows(onPage.filter((i) => !selectedRows.has(i)));
   }
 
   // Filter bar

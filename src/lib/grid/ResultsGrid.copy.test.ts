@@ -60,3 +60,33 @@ describe('copy', () => {
     expect(writeText).not.toHaveBeenCalled();
   });
 });
+
+describe('select-all-on-page', () => {
+  it('keeps already-selected rows instead of toggling them off', async () => {
+    const { container } = render(ResultsGrid, { props });
+    // Partial selection: only row 0 is selected.
+    await fireEvent.click(container.querySelectorAll('.gutter')[0]);
+    // Select-all must UNION, not toggle each row (which would drop row 0).
+    await fireEvent.click(
+      container.querySelector('thead input[type="checkbox"]')!,
+    );
+    const states = [...container.querySelectorAll('.gutter')].map((g) =>
+      g.className.includes('selected'),
+    );
+    expect(states).toEqual([true, true]);
+  });
+
+  it('clears when every page row is already selected', async () => {
+    const { container } = render(ResultsGrid, { props });
+    await fireEvent.click(
+      container.querySelector('thead input[type="checkbox"]')!,
+    );
+    await fireEvent.click(
+      container.querySelector('thead input[type="checkbox"]')!,
+    );
+    const states = [...container.querySelectorAll('.gutter')].map((g) =>
+      g.className.includes('selected'),
+    );
+    expect(states).toEqual([false, false]);
+  });
+});
