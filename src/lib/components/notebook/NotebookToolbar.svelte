@@ -134,7 +134,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 6px 12px;
+    padding: 8px 14px;
     border-bottom: 1px solid var(--border);
     background: var(--bg-surface);
     gap: 12px;
@@ -159,7 +159,7 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 4px 8px;
+    padding: 4px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: var(--bg-subtle);
@@ -210,14 +210,14 @@
     border: none;
     background: var(--accent);
     color: #fff;
-    box-shadow: 0 1px 3px color-mix(in srgb, var(--accent) 35%, transparent);
+    box-shadow: 0 1px 4px color-mix(in srgb, var(--accent) 30%, transparent);
     min-width: 80px;
     justify-content: center;
   }
   .toolbar-btn.primary:hover:not(:disabled) {
     background: var(--accent-hover);
-    box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 45%, transparent);
-    transform: translateY(-1px);
+    box-shadow: 0 3px 10px color-mix(in srgb, var(--accent) 40%, transparent);
+    transform: translateY(-0.5px) scale(1.02);
   }
   .toolbar-btn.primary:active:not(:disabled) {
     transform: translateY(0);
@@ -273,7 +273,7 @@
     display: inline-flex;
     align-items: center;
     gap: 7px;
-    padding: 4px 10px;
+    padding: 5px 12px;
     border-radius: var(--radius-full);
     background: var(--bg-subtle);
     border: 1px solid var(--border);

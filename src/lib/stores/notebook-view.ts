@@ -84,17 +84,26 @@ export function createCellView(model: NotebookModel) {
     if (cell) cell.view = next;
   }
 
-/** Temporary paging diagnostics — enable with localStorage.lucentPagingDebug. */
-function debugView(event: string, detail: Record<string, unknown>) {
-  if (typeof localStorage !== 'undefined' && localStorage.lucentPagingDebug) {
-    console.warn(`[cellView] ${event}`, detail);
+  /** Temporary paging diagnostics — enable with localStorage.lucentPagingDebug. */
+  function debugView(event: string, detail: Record<string, unknown>) {
+    if (typeof localStorage !== 'undefined' && localStorage.lucentPagingDebug) {
+      console.warn(`[cellView] ${event}`, detail);
+    }
   }
-}
 
-  async function refetch(cellId: string, state: CellViewState, offset: number) {
+  async function refetch(
+    cellId: string,
+    state: CellViewState,
+    offset: number,
+    /** Append-page fetches must not dim the table — the disabled Next button
+     *  is the fetching affordance. Only content-replacing (offset-0) refetches
+     *  surface the loading dim. */
+    opts: { showLoading?: boolean } = {},
+  ) {
+    const showLoading = opts.showLoading !== false;
     if (!model.sessionKey) return;
     debugView('refetch', { cellId, offset, fetchedCount: state.fetchedCount });
-    put(cellId, { ...state, loading: true });
+    if (showLoading) put(cellId, { ...state, loading: true });
     try {
       const out = await nb.notebookFetchPage(
         model.sessionKey,
@@ -106,7 +115,12 @@ function debugView(event: string, detail: Record<string, unknown>) {
         wireSortFor(state.sorting, state.columns),
         state.filters,
       );
-      debugView('refetch resolved', { offset, incoming: out.rows.length, bufferAfter: offset === 0 ? out.rows.length : state.rows.length + out.rows.length });
+      debugView('refetch resolved', {
+        offset,
+        incoming: out.rows.length,
+        bufferAfter:
+          offset === 0 ? out.rows.length : state.rows.length + out.rows.length,
+      });
       const rows = offset === 0 ? out.rows : [...state.rows, ...out.rows];
       put(cellId, {
         ...state,
@@ -146,7 +160,7 @@ function debugView(event: string, detail: Record<string, unknown>) {
     async fetchMore(cellId: string) {
       const state = stateFor(cellId);
       if (state.isEnd || state.loading) return;
-      await refetch(cellId, state, state.fetchedCount);
+      await refetch(cellId, state, state.fetchedCount, { showLoading: false });
     },
 
     async countAll(cellId: string) {
@@ -172,7 +186,10 @@ function debugView(event: string, detail: Record<string, unknown>) {
 
     /** Called after a cell re-runs, so its window restarts from the new output. */
     resetFrom(cellId: string) {
-      debugView('resetFrom', { cellId, stack: new Error().stack?.split('\n')[2]?.trim() });
+      debugView('resetFrom', {
+        cellId,
+        stack: new Error().stack?.split('\n')[2]?.trim(),
+      });
       states.delete(cellId);
       const cell = model.cells.find((c) => c.id === cellId);
       if (cell) cell.view = stateFor(cellId);

@@ -22,9 +22,9 @@
   .ai-context-badge {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    padding: 2px 8px;
-    border-radius: var(--radius-sm);
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: var(--radius-full);
     background: var(--bg-subtle);
     border: 1px solid var(--border);
     font-size: var(--text-xs);
@@ -35,7 +35,7 @@
     background: color-mix(in srgb, var(--warning) 10%, transparent);
   }
   .ai-context-icon {
-    font-size: var(--text-xs);
+    font-size: 11px;
     line-height: 1;
   }
   .ai-context-label {

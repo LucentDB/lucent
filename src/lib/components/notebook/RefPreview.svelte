@@ -115,23 +115,27 @@
     margin: 4px 12px 8px;
   }
   .preview-toggle {
-    padding: 0;
+    padding: 2px 4px;
     border: none;
     background: none;
     color: var(--text-muted);
     font-size: var(--text-xs);
     cursor: pointer;
+    border-radius: var(--radius-sm);
+    transition: color 0.12s ease;
   }
   .preview-toggle:hover {
     color: var(--text-secondary);
   }
   .preview-sql {
-    margin: 4px 0 0;
-    padding: 8px;
+    margin: 6px 0 0;
+    padding: 8px 12px;
     background: var(--bg-subtle);
-    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-light, var(--border));
+    border-radius: var(--radius-md);
     font-family: var(--font-mono);
     font-size: var(--text-xs);
+    line-height: 1.5;
     color: var(--text-muted);
     white-space: pre-wrap;
     max-height: 140px;

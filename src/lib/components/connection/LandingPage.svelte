@@ -32,6 +32,7 @@
 
   let view = $state<ViewState>({ mode: 'list' });
   let selectedId = $state<string | null>(null);
+  let quickConnectOpen = $state(false);
 
   // Saved profiles live in the connections query; the store keeps session
   // state. Mutations invalidate the list on success.
@@ -40,6 +41,14 @@
   const save = saveConnectionMutation();
   const del = deleteConnectionMutation();
   const dup = duplicateConnectionMutation();
+
+  /** Auto-open quick connect when no saved connections exist. */
+  const hasProfiles = $derived((profiles.data ?? []).length > 0);
+  $effect(() => {
+    if (!hasProfiles && !profiles.isPending) {
+      quickConnectOpen = true;
+    }
+  });
 
   // ─── Actions ──────────────────────────────────────────────────────────
 
@@ -83,6 +92,7 @@
       .mutateAsync({ profile, password })
       .then(() => {
         view = { mode: 'list' };
+        quickConnectOpen = false;
       })
       .catch((e) => {
         console.error('Failed to save profile:', e);
@@ -155,19 +165,21 @@
   {#if view.mode === 'list'}
     <!-- Connection List -->
     <div class="manager-body">
-      <ConnectionList
-        profiles={profiles.data ?? []}
-        groupedProfiles={grouped}
-        loading={profiles.isPending}
-        activeProfileId={connections.activeProfileId}
-        testingIds={connections.testingIds}
-        onSelect={handleSelect}
-        onTest={handleTestProfile}
-        onEdit={handleEditProfile}
-        onDelete={handleDeleteProfile}
-        onDuplicate={handleDuplicateProfile}
-        onNewConnection={handleNewConnection}
-      />
+      {#if hasProfiles || profiles.isPending}
+        <ConnectionList
+          profiles={profiles.data ?? []}
+          groupedProfiles={grouped}
+          loading={profiles.isPending}
+          activeProfileId={connections.activeProfileId}
+          testingIds={connections.testingIds}
+          onSelect={handleSelect}
+          onTest={handleTestProfile}
+          onEdit={handleEditProfile}
+          onDelete={handleDeleteProfile}
+          onDuplicate={handleDuplicateProfile}
+          onNewConnection={handleNewConnection}
+        />
+      {/if}
 
       <!-- Error banner -->
       {#if connectError || connections.errorMessage}
@@ -180,24 +192,46 @@
         </div>
       {/if}
 
-      <!-- Inline connection form for quick connect -->
+      <!-- Collapsible Quick Connect -->
       {#if !connections.activeProfileId}
-        <div class="quick-connect-container">
-          <div class="quick-connect-header">
-            <h3>Quick Connect</h3>
-          </div>
-          <ConnectionForm
-            onSave={(p, _pw) => {
-              handleSaveProfile(p, _pw);
-              if (_pw) {
-                connections.connectInline({
-                  driver: p.driver,
-                  params: { ...p.params },
-                  secret: _pw,
-                });
-              }
-            }}
-          />
+        <div class="quick-connect" class:open={quickConnectOpen}>
+          <button
+            class="quick-connect-toggle"
+            type="button"
+            onclick={() => (quickConnectOpen = !quickConnectOpen)}
+          >
+            <svg
+              class="toggle-chevron"
+              class:rotated={quickConnectOpen}
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+            <span class="toggle-label">Quick Connect</span>
+            <span class="toggle-hint">New connection without saving</span>
+          </button>
+
+          {#if quickConnectOpen}
+            <div class="quick-connect-body">
+              <ConnectionForm
+                onSave={(p, _pw) => {
+                  handleSaveProfile(p, _pw);
+                  if (_pw) {
+                    connections.connectInline({
+                      driver: p.driver,
+                      params: { ...p.params },
+                      secret: _pw,
+                    });
+                  }
+                }}
+              />
+            </div>
+          {/if}
         </div>
       {/if}
     </div>
@@ -266,17 +300,16 @@
     display: flex;
     flex-direction: column;
     background: var(--bg);
-    overflow: hidden;
     max-width: 780px;
     margin: 0 auto;
     width: 100%;
-    height: 100%;
     box-sizing: border-box;
     position: relative;
+    padding: 0 24px 32px;
   }
   .manager-header {
     text-align: center;
-    padding: 44px 24px 24px;
+    padding: 32px 0 16px;
     flex-shrink: 0;
     position: relative;
   }
@@ -323,12 +356,9 @@
     line-height: 1.5;
   }
   .manager-body {
-    flex: 1;
-    overflow-y: auto;
-    padding: 0 24px 32px;
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 16px;
   }
   .manager-body.form-panel {
     padding-top: 4px;
@@ -408,26 +438,80 @@
   .dismiss-btn:hover {
     background: color-mix(in srgb, var(--error) 15%, transparent);
   }
-  .quick-connect-container {
-    margin-top: 28px;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
+
+  /* ─── Collapsible Quick Connect ──────────────────────────────────── */
+  .quick-connect {
+    margin-top: 12px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border);
+    overflow: visible;
+    background: var(--bg-surface);
+    transition: border-color 0.2s ease;
   }
-  .quick-connect-header {
+  .quick-connect.open {
+    border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  }
+
+  .quick-connect-toggle {
+    width: 100%;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 0 4px;
-  }
-  .quick-connect-header h3 {
-    font-size: 12px;
+    gap: 8px;
+    padding: 12px 16px;
+    border: none;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    background: var(--bg-surface);
+    color: var(--text);
+    font-size: 13px;
     font-weight: 600;
-    color: var(--text-muted);
-    margin: 0;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
+    cursor: pointer;
+    transition:
+      background 0.12s,
+      color 0.12s;
   }
+  .quick-connect:not(.open) .quick-connect-toggle {
+    border-radius: var(--radius-lg);
+  }
+  .quick-connect-toggle:hover {
+    background: var(--bg-hover);
+  }
+
+  .toggle-chevron {
+    color: var(--text-muted);
+    transition: transform 0.2s ease;
+    flex-shrink: 0;
+  }
+  .toggle-chevron.rotated {
+    transform: rotate(90deg);
+  }
+
+  .toggle-label {
+    color: var(--text);
+  }
+  .toggle-hint {
+    margin-left: auto;
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-muted);
+  }
+
+  .quick-connect-body {
+    border-top: 1px solid var(--border);
+    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+    overflow: visible;
+  }
+  /* The form already has its own card styling; remove the double border inside the collapsible */
+  .quick-connect-body :global(.connection-form) {
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+  }
+  .quick-connect-body :global(.form-body),
+  .form-panel :global(.form-body) {
+    max-height: none;
+    overflow: visible;
+  }
+
   .shortcut-hint {
     text-align: center;
     font-size: 12px;

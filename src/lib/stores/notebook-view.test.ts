@@ -168,3 +168,49 @@ describe('cell view state', () => {
     expect(fetchPage).not.toHaveBeenCalled();
   });
 });
+
+describe('append-page fetches must not flash the table', () => {
+  it('fetchMore never sets the loading flag — dimming is for offset-0 refetches', async () => {
+    const model = createNotebookModel();
+    model.sessionKey = 'sk';
+    model.cells[0].outputs = fullPage();
+    let resolveFetch: (v: unknown) => void = () => {};
+    fetchPage.mockImplementation(
+      () =>
+        new Promise((r) => {
+          resolveFetch = r;
+        }),
+    );
+    const id = model.cells[0].id;
+    const view = createCellView(model);
+    const flight = view.fetchMore(id);
+    // MID-FLIGHT: loading must stay false. Flipping it dims the whole tbody
+    // (.table-wrapper.loading tbody { opacity: 0.5 }) — a visible blink on
+    // every page turn. The Next button disabling is the fetching affordance.
+    expect(view.stateFor(id).loading).toBe(false);
+    resolveFetch(fullPage());
+    await flight;
+    expect(view.stateFor(id).loading).toBe(false);
+    expect(view.stateFor(id).rows).toHaveLength(20);
+  });
+
+  it('offset-0 refetches still surface loading', async () => {
+    const model = createNotebookModel();
+    model.sessionKey = 'sk';
+    model.cells[0].outputs = fullPage();
+    let resolveFetch: (v: unknown) => void = () => {};
+    fetchPage.mockImplementation(
+      () =>
+        new Promise((r) => {
+          resolveFetch = r;
+        }),
+    );
+    const id = model.cells[0].id;
+    const view = createCellView(model);
+    const flight = view.applyState(id, { filters: [], sorting: [] });
+    expect(view.stateFor(id).loading).toBe(true);
+    resolveFetch(fullPage());
+    await flight;
+    expect(view.stateFor(id).loading).toBe(false);
+  });
+});

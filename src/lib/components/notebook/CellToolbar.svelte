@@ -148,7 +148,7 @@
   .ref-chip {
     display: inline-flex;
     align-items: center;
-    height: 20px;
+    height: 22px;
     margin-right: 4px;
     padding: 0 6px;
     border: 1px solid var(--border-light, var(--border));
@@ -199,8 +199,8 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    height: 20px;
-    padding: 0 5px;
+    height: 22px;
+    padding: 0 6px;
     border: 1px solid transparent;
     border-radius: var(--radius-sm);
     background: var(--bg-surface);

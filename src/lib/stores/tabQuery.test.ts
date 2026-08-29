@@ -89,7 +89,10 @@ describe('wireSortFor', () => {
     // truncation (phase ③ widened SortSpec to a list).
     const tab = {
       fetchedCount: 200,
-      sorting: [{ id: '1', desc: true }, { id: '0', desc: false }],
+      sorting: [
+        { id: '1', desc: true },
+        { id: '0', desc: false },
+      ],
       columns: WIRE_COLUMNS,
       filters: [],
     };

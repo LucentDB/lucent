@@ -400,7 +400,7 @@
   .output-header {
     display: flex;
     align-items: stretch;
-    min-height: 30px;
+    min-height: 32px;
     padding: 0 10px;
     background: var(--bg-subtle);
     border-bottom: 1px solid var(--border-light, var(--border));
@@ -410,7 +410,7 @@
   }
 
   .activity {
-    padding: 6px 12px;
+    padding: 8px 14px;
     border-bottom: 1px solid var(--border-light, var(--border));
     background: var(--bg-subtle);
   }
@@ -427,7 +427,7 @@
     align-items: center;
     gap: 6px;
     min-width: 0;
-    padding: 2px 6px;
+    padding: 3px 8px;
     border: 1px solid transparent;
     border-radius: var(--radius-sm);
     background: none;
@@ -513,7 +513,7 @@
   .activity-body {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 4px;
     max-height: 320px;
     overflow-y: auto;
   }
@@ -526,7 +526,7 @@
     margin-bottom: -1px;
   }
   .tab-btn {
-    padding: 7px 12px;
+    padding: 8px 14px;
     border: none;
     border-bottom: 2px solid transparent;
     background: transparent;
@@ -556,7 +556,7 @@
     min-height: 0;
   }
   .pad {
-    padding: 12px 14px;
+    padding: 14px 16px;
   }
 
   /* SQL panel: actions float over the top-right of the code block. */
@@ -577,11 +577,11 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 28px;
-    height: 28px;
+    width: 30px;
+    height: 30px;
     padding: 0;
     border: 1px solid transparent;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     background: transparent;
     color: var(--text-muted);
     cursor: pointer;
