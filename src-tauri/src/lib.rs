@@ -10,6 +10,7 @@ pub mod connections;
 pub mod export;
 mod ipc_stream;
 pub mod notebook;
+pub mod paths;
 pub mod query_history;
 mod query_paging;
 #[cfg(feature = "integration-tests")]
