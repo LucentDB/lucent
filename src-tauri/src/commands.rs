@@ -1990,10 +1990,8 @@ mod describe_filters_tests {
 /// File-first avoids macOS keychain prompts during development.
 pub(crate) fn load_api_key(config: &AiConfig) -> Result<String, String> {
     // 1. Try ~/.lucent/ai-key.txt (avoids keychain prompts)
-    if let Ok(home) = std::env::var("HOME") {
-        let path = std::path::PathBuf::from(home)
-            .join(".lucent")
-            .join("ai-key.txt");
+    if let Ok(root) = crate::paths::lucent_home() {
+        let path = root.join("ai-key.txt");
         if let Ok(key) = std::fs::read_to_string(&path) {
             let trimmed = key.trim().to_string();
             if !trimmed.is_empty() {

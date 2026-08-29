@@ -780,9 +780,13 @@ mod tests {
         let sentinel = r#"{"mcpServers":{"user-server":{"command":"keep"}}}"#;
         std::fs::write(global_pi.join("mcp.json"), sentinel).unwrap();
 
-        let prior = std::env::var("HOME").ok();
+        let prior = std::env::var("HOME").ok(); // home-ok
         std::env::set_var("HOME", home.path());
         let _guard = EnvVarGuard("HOME", prior);
+
+        let prior_lucent = std::env::var("LUCENT_HOME").ok();
+        std::env::set_var("LUCENT_HOME", home.path().join(".lucent"));
+        let _lucent_guard = EnvVarGuard("LUCENT_HOME", prior_lucent);
 
         let acp = AcpState::new();
         let process = stub_process();

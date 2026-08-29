@@ -132,10 +132,7 @@ pub fn bundled_snapshot() -> Registry {
 
 /// Where the registry cache lives on disk: `~/.lucent/acp-registry.json`.
 pub fn cache_path() -> Result<std::path::PathBuf, String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    Ok(std::path::PathBuf::from(home)
-        .join(".lucent")
-        .join("acp-registry.json"))
+    Ok(crate::paths::lucent_home()?.join("acp-registry.json"))
 }
 
 /// Reads the cached feed, if any. `None` when there is no cache or it fails

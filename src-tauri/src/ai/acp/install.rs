@@ -43,8 +43,7 @@ pub fn target_triple() -> Option<&'static str> {
 
 /// Where installed agents live: `~/.lucent/agents`.
 pub fn agents_dir() -> Result<PathBuf, String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    Ok(PathBuf::from(home).join(".lucent").join("agents"))
+    Ok(crate::paths::lucent_home()?.join("agents"))
 }
 
 /// `cmd` from the manifest must resolve inside the extraction root. Rejects
@@ -438,12 +437,12 @@ mod tests {
         // install) must be skipped, not returned as a bogus entry.
         std::fs::create_dir_all(agents.join("no-metadata")).unwrap();
 
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", tmp.path());
+        let prev_home = std::env::var_os("LUCENT_HOME");
+        std::env::set_var("LUCENT_HOME", tmp.path().join(".lucent"));
         let listed = list_installed();
         match prev_home {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
+            Some(h) => std::env::set_var("LUCENT_HOME", h),
+            None => std::env::remove_var("LUCENT_HOME"),
         }
 
         let mut ids: Vec<_> = listed.iter().map(|a| a.id.as_str()).collect();

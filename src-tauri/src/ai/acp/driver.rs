@@ -617,10 +617,11 @@ pub fn first_prompt_text(
 /// `~/.lucent/agent-workspace/<agent>/<conversation>/` (spec §D7).
 /// `LUCENT_ACP_WORKSPACE` overrides the base so tests stay hermetic.
 pub fn workspace_dir(agent_id: &str, conversation_id: &str) -> Result<PathBuf, String> {
-    let base = std::env::var("LUCENT_ACP_WORKSPACE")
-        .or_else(|_| std::env::var("HOME").map_err(|_| "HOME not set".to_string()))?;
-    Ok(PathBuf::from(base)
-        .join(".lucent")
+    let root = match std::env::var_os("LUCENT_ACP_WORKSPACE") {
+        Some(base) => PathBuf::from(base).join(".lucent"),
+        None => crate::paths::lucent_home()?,
+    };
+    Ok(root
         .join("agent-workspace")
         .join(sanitize_segment(agent_id))
         .join(sanitize_segment(conversation_id)))

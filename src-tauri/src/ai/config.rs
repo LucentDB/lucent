@@ -185,10 +185,7 @@ pub fn load_config_from_disk() -> AiConfig {
 }
 
 fn config_file_path() -> Result<std::path::PathBuf, String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    Ok(std::path::PathBuf::from(home)
-        .join(".lucent")
-        .join("ai-config.json"))
+    Ok(crate::paths::lucent_home()?.join("ai-config.json"))
 }
 
 #[cfg(test)]
