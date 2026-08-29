@@ -59,3 +59,26 @@ jobs:
       - name: integration tests (AI module, real Postgres)
         working-directory: src-tauri
         run: cargo test --features integration-tests
+
+  cross-platform:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      # aws-lc-sys reaches the graph via BOTH russh and rustls and needs NASM
+      # to assemble its crypto primitives under MSVC. Without this the Windows
+      # job fails deep inside a build script with no obvious cause.
+      - name: Install NASM (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: ilammy/setup-nasm@v1
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check --all-targets
