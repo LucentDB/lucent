@@ -38,6 +38,11 @@ jobs:
       - name: clippy
         working-directory: src-tauri
         run: cargo clippy --all-targets -- -D warnings
+      # probe_connection spawns the REAL driver binaries, so the unit tier
+      # needs them on disk (the tests say so themselves). Without this the
+      # duckdb probe fails with "failed to spawn worker".
+      - name: build worker binaries
+        run: cargo build --workspace --bins
       - name: test (unit tier)
         working-directory: src-tauri
         run: cargo test
