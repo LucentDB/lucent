@@ -5,6 +5,7 @@
   import TabContextMenu from './TabContextMenu.svelte';
   import type { TabMenuItem } from './tab-menu.ts';
   import DbIcon from './icons/DbIcon.svelte';
+  import UpdateBanner from './UpdateBanner.svelte';
 
   let {
     config = null,
@@ -445,6 +446,8 @@
           </svg>
         </button>
       {/if}
+
+      <UpdateBanner />
     </div>
   </header>
 

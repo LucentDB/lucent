@@ -98,6 +98,8 @@ sha2 = "0.10"
 # Tauri plugins
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 [dev-dependencies]
 # Test-only Postgres client for the eval harness (evals.rs compiles under
