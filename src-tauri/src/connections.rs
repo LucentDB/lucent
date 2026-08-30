@@ -325,62 +325,58 @@ impl std::fmt::Display for KeychainError {
 
 impl std::error::Error for KeychainError {}
 
-pub fn get_password(profile_id: &str) -> Result<String, KeychainError> {
-    let entry = Entry::new(KEYCHAIN_SERVICE, profile_id)
-        .map_err(|e| KeychainError::Other(e.to_string()))?;
-    match entry.get_password() {
-        Ok(pw) => Ok(pw),
-        Err(keyring::Error::NoEntry) => Err(KeychainError::NotFound),
-        Err(keyring::Error::NoStorageAccess(_)) => Err(KeychainError::NoStorageAccess),
-        Err(e) => Err(KeychainError::Other(e.to_string())),
+/// Maps a `keyring` error onto Lucent's surface.
+///
+/// `PlatformFailure` means the OS credential store could not be reached at
+/// all. On Linux that is a missing or unreachable secret-service daemon
+/// (headless sessions, containers, CI); on macOS and Windows it covers the
+/// equivalent platform-level refusal. That is the same user-facing situation
+/// as a locked keychain, so it collapses into `NoStorageAccess` and the user
+/// gets an actionable message instead of a raw D-Bus dump.
+fn classify(e: keyring::Error) -> KeychainError {
+    match e {
+        keyring::Error::NoEntry => KeychainError::NotFound,
+        keyring::Error::NoStorageAccess(_) | keyring::Error::PlatformFailure(_) => {
+            KeychainError::NoStorageAccess
+        }
+        other => KeychainError::Other(other.to_string()),
     }
 }
 
+pub fn get_password(profile_id: &str) -> Result<String, KeychainError> {
+    let entry = Entry::new(KEYCHAIN_SERVICE, profile_id).map_err(classify)?;
+    entry.get_password().map_err(classify)
+}
+
 pub fn set_password(profile_id: &str, password: &str) -> Result<(), KeychainError> {
-    let entry = Entry::new(KEYCHAIN_SERVICE, profile_id)
-        .map_err(|e| KeychainError::Other(e.to_string()))?;
-    entry
-        .set_password(password)
-        .map_err(|e| KeychainError::Other(e.to_string()))
+    let entry = Entry::new(KEYCHAIN_SERVICE, profile_id).map_err(classify)?;
+    entry.set_password(password).map_err(classify)
 }
 
 pub fn delete_password(profile_id: &str) -> Result<(), KeychainError> {
-    let entry = Entry::new(KEYCHAIN_SERVICE, profile_id)
-        .map_err(|e| KeychainError::Other(e.to_string()))?;
+    let entry = Entry::new(KEYCHAIN_SERVICE, profile_id).map_err(classify)?;
     match entry.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(KeychainError::Other(e.to_string())),
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(classify(e)),
     }
 }
 
 /// SSH secret helpers
 pub fn get_ssh_secret(tunnel_id: &str) -> Result<String, KeychainError> {
-    let entry = Entry::new(KEYCHAIN_SSH_SERVICE, tunnel_id)
-        .map_err(|e| KeychainError::Other(e.to_string()))?;
-    match entry.get_password() {
-        Ok(pw) => Ok(pw),
-        Err(keyring::Error::NoEntry) => Err(KeychainError::NotFound),
-        Err(keyring::Error::NoStorageAccess(_)) => Err(KeychainError::NoStorageAccess),
-        Err(e) => Err(KeychainError::Other(e.to_string())),
-    }
+    let entry = Entry::new(KEYCHAIN_SSH_SERVICE, tunnel_id).map_err(classify)?;
+    entry.get_password().map_err(classify)
 }
 
 pub fn set_ssh_secret(tunnel_id: &str, secret: &str) -> Result<(), KeychainError> {
-    let entry = Entry::new(KEYCHAIN_SSH_SERVICE, tunnel_id)
-        .map_err(|e| KeychainError::Other(e.to_string()))?;
-    entry
-        .set_password(secret)
-        .map_err(|e| KeychainError::Other(e.to_string()))
+    let entry = Entry::new(KEYCHAIN_SSH_SERVICE, tunnel_id).map_err(classify)?;
+    entry.set_password(secret).map_err(classify)
 }
 
 pub fn delete_ssh_secret(tunnel_id: &str) -> Result<(), KeychainError> {
-    let entry = Entry::new(KEYCHAIN_SSH_SERVICE, tunnel_id)
-        .map_err(|e| KeychainError::Other(e.to_string()))?;
+    let entry = Entry::new(KEYCHAIN_SSH_SERVICE, tunnel_id).map_err(classify)?;
     match entry.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(KeychainError::Other(e.to_string())),
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(classify(e)),
     }
 }
 
