@@ -36,7 +36,6 @@ dashmap = { workspace = true }
 sqlparser = "0.62"
 futures = { workspace = true }
 bincode = { workspace = true }
-keyring = { workspace = true }
 rig-core = { workspace = true }
 
 # Embedding model for semantic schema search
@@ -97,6 +96,22 @@ sha2 = "0.10"
 # Tauri plugins
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
+
+# keyring backends are selected per target OS. Cargo features are additive
+# across the whole dependency graph, so a single workspace-wide feature list
+# silently disabled every platform but one: with no platform feature enabled,
+# keyring 3.x falls back to a mock in-memory store that reports success and
+# loses the credential on restart.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+# `vendored` statically links dbus-secret-service. Without it every Linux user
+# would need libdbus-1 present at runtime, defeating a self-contained AppImage.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "vendored"] }
 
 [dev-dependencies]
 # Test-only Postgres client for the eval harness (evals.rs compiles under

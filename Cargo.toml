@@ -19,7 +19,6 @@ async-trait = "0.1"
 tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"
 dashmap = { version = "6" }
-keyring = { version = "3", features = ["apple-native"] }
 rig-core = { version = "=0.39.0" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 flate2 = "1"
