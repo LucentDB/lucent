@@ -64,8 +64,41 @@ documentation, incident writeups, and reproducible analysis.
 
 ## Getting started
 
-> 📦 **Installers coming soon** — Lucent is pre-release. Until the first signed build
-> ships (macOS first, per our roadmap), run from source:
+### Install
+
+**macOS** (Apple Silicon or Intel):
+
+```bash
+brew tap LucentDB/lucent
+brew install --cask lucent
+```
+
+**Windows** and **Linux**: download the installer from the
+[latest release](https://github.com/LucentDB/lucent/releases/latest) —
+`.exe` for Windows, `.AppImage` or `.deb` for Linux.
+
+Lucent updates itself: new versions are downloaded and applied in place, so
+you only go through the steps below once.
+
+#### First launch
+
+Lucent is an independent project without a paid Apple or Microsoft signing
+certificate, so both systems ask for confirmation the first time. This is
+expected, not a sign that anything is wrong.
+
+- **macOS** — the first launch is refused. Go to **System Settings → Privacy
+  & Security**, scroll down, and click **Open Anyway**.
+- **Windows** — SmartScreen shows "Windows protected your PC". Click **More
+  info**, then **Run anyway**.
+
+#### First connect
+
+The AI copilot's schema search downloads a ~33MB embedding model
+(bge-small-en-v1.5) the first time you connect. Everything else works
+offline; if the download fails, semantic search stays unavailable until it
+succeeds and the rest of the app is unaffected.
+
+### Run from source
 
 **Prerequisites:** Rust (stable) + the [Tauri 2 system dependencies](https://v2.tauri.app/start/prerequisites/) for your OS, Node.js ≥ 18, npm, and a Postgres instance to connect to.
 
@@ -153,9 +186,11 @@ npx tauri build --target x86_64-apple-darwin   # cross-target, same staging flow
 
 - [x] Core SQL workspace + AI copilot
 - [x] SQL notebooks
-- [ ] Signed macOS installer + Homebrew cask (in progress)
-- [ ] Windows and Linux installers
-- [ ] First stable release (v0.1.0)
+- [x] macOS installer + Homebrew cask
+- [x] Windows and Linux installers
+- [x] In-app auto-update
+- [ ] Notarized macOS build (needs a paid Apple Developer ID)
+- [ ] winget / Scoop manifests
 
 ## Contributing
 
