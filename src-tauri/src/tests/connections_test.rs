@@ -203,10 +203,26 @@ fn test_profile_serialization_renames() {
     assert!(json.get("sslMode").is_none());
 }
 
+/// Whether this machine simply has no credential store to talk to.
+///
+/// Headless Linux and CI runners have no secret-service daemon, so the store
+/// is *absent* rather than empty, and every call fails the same way no matter
+/// what was asked. Tests must tolerate that without going blind to real
+/// regressions on a developer machine, where the store does exist and the
+/// specific assertions below still run.
+fn store_unavailable(e: &KeychainError) -> bool {
+    matches!(e, KeychainError::NoStorageAccess)
+}
+
 #[test]
 fn test_keychain_get_password_not_found() {
-    let result = get_password("nonexistent-profile");
-    assert!(matches!(result, Err(KeychainError::NotFound)));
+    match get_password("nonexistent-profile") {
+        Err(KeychainError::NotFound) => {}
+        Err(ref e) if store_unavailable(e) => {
+            eprintln!("keychain: no credential store on this machine - skipping");
+        }
+        other => panic!("expected NotFound, got {other:?}"),
+    }
 }
 
 #[test]
@@ -243,11 +259,13 @@ fn test_keychain_set_and_get() {
 
 #[test]
 fn test_delete_password_doesnt_error_if_missing() {
-    let result = delete_password("never-existed");
-    assert!(
-        result.is_ok(),
-        "deleting non-existent password should be a no-op"
-    );
+    match delete_password("never-existed") {
+        Ok(()) => {}
+        Err(ref e) if store_unavailable(e) => {
+            eprintln!("keychain: no credential store on this machine - skipping");
+        }
+        Err(e) => panic!("deleting a non-existent password should be a no-op, got {e:?}"),
+    }
 }
 
 #[test]
@@ -279,8 +297,13 @@ fn test_ssh_secret_keychain() {
 
 #[test]
 fn test_ssh_get_secret_not_found() {
-    let result = get_ssh_secret("nonexistent-tunnel");
-    assert!(matches!(result, Err(KeychainError::NotFound)));
+    match get_ssh_secret("nonexistent-tunnel") {
+        Err(KeychainError::NotFound) => {}
+        Err(ref e) if store_unavailable(e) => {
+            eprintln!("keychain: no credential store on this machine - skipping");
+        }
+        other => panic!("expected NotFound, got {other:?}"),
+    }
 }
 
 #[test]
