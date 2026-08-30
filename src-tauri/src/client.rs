@@ -1018,7 +1018,9 @@ mod catalog_client_tests {
     }
 }
 
-#[cfg(test)]
+// The fake worker in this module speaks over a Unix domain socket; the
+// Windows transport is a named pipe and is covered by manual verification.
+#[cfg(all(test, unix))]
 mod sync_routing_tests {
     use super::*;
     use lucent_protocol::{

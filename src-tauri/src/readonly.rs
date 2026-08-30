@@ -223,6 +223,7 @@ mod tests {
     /// replacing the `ProbeTimeoutGuard` / `ReadonlyTxnGuard` drop tests the
     /// ladder removes.
     #[tokio::test]
+    #[cfg(unix)]
     async fn readonly_session_rolls_back_on_drop() {
         let dir = tempfile::TempDir::new().unwrap();
         let socket_path = dir.path().join("worker.sock");
@@ -334,6 +335,7 @@ mod tests {
     /// when it has RECEIVED the ROLLBACK; close() returning after that
     /// proves the round trip completed inside close().
     #[tokio::test]
+    #[cfg(unix)]
     async fn close_awaits_the_rollback_round_trip() {
         let dir = tempfile::TempDir::new().unwrap();
         let socket_path = dir.path().join("worker.sock");

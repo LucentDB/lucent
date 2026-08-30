@@ -589,6 +589,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn bind_listener(dir: &tempfile::TempDir) -> (tokio::net::UnixListener, std::path::PathBuf) {
         let path = dir.path().join("t.sock");
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
@@ -596,6 +597,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn rejects_wrong_token() {
         let dir = tempfile::tempdir().unwrap();
         let (listener, path) = bind_listener(&dir);
@@ -619,6 +621,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn query_result_emits_structured_events() {
         let dir = tempfile::tempdir().unwrap();
         let (listener, path) = bind_listener(&dir);
@@ -704,6 +707,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn card_summary_stays_short_and_input_is_backfilled() {
         // A CLI-path agent reports the helper's stdout — the SQL echo plus the
         // Markdown row preview — as its tool result. The card header is a
@@ -786,6 +790,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn text_output_also_gets_a_card() {
         // `search_schema` / `get_objects_info` return Text. Without a
         // structured event the card fell back to the agent's own echo with a
@@ -855,6 +860,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn dml_hold_waits_for_approval_then_resolves() {
         let dir = tempfile::tempdir().unwrap();
         let (listener, path) = bind_listener(&dir);
@@ -939,6 +945,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn dml_rejection_resolves_with_error() {
         let dir = tempfile::tempdir().unwrap();
         let (listener, path) = bind_listener(&dir);
@@ -1049,6 +1056,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn text_output_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let (listener, path) = bind_listener(&dir);
@@ -1087,6 +1095,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn tool_error_maps_to_err_response() {
         let dir = tempfile::tempdir().unwrap();
         let (listener, path) = bind_listener(&dir);
@@ -1129,6 +1138,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn full_loop_with_bridge_client() {
         // Real listener + real serve + real BridgeClient — the whole wire
         // path, with only the executor and sink scripted.
@@ -1196,6 +1206,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn bridge_client_wrong_token_fails_on_first_call() {
         // A wrong token gets a silent close — the client sees EOF, never an
         // error message confirming the guess.
@@ -1227,6 +1238,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn bridge_client_reports_tool_errors() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("b.sock");
