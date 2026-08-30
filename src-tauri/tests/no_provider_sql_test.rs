@@ -72,6 +72,13 @@ fn no_provider_catalog_sql_above_the_connector_seam() {
             continue;
         };
         for (i, line) in text.lines().enumerate() {
+            // Prose is not SQL. A guard that cannot tell code from a comment
+            // about code produces false positives that train people to
+            // weaken it - doc comments legitimately name these identifiers
+            // when explaining why a driver owns them.
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
             for needle in FORBIDDEN {
                 if line.contains(needle) {
                     violations.push(format!(
