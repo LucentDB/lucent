@@ -1,0 +1,55 @@
+# Rewrites the Homebrew cask when a release is PUBLISHED.
+#
+# Publication (not the build) is the trigger, so the cask can never point at
+# artifacts nobody reviewed - the same gate that protects the updater.
+
+name: Update Homebrew tap
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  cask:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render the cask from the published assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          base="https://github.com/LucentDB/lucent/releases/download/${TAG}"
+
+          # Hash what users will actually download, rather than trusting a
+          # value computed elsewhere in the pipeline.
+          curl -fsSL -o arm.dmg   "${base}/Lucent_${VERSION}_aarch64.dmg"
+          curl -fsSL -o intel.dmg "${base}/Lucent_${VERSION}_x64.dmg"
+          SHA_ARM=$(shasum -a 256 arm.dmg   | cut -d' ' -f1)
+          SHA_INTEL=$(shasum -a 256 intel.dmg | cut -d' ' -f1)
+
+          mkdir -p out
+          sed -e "s/__VERSION__/${VERSION}/" \
+              -e "s/__SHA_ARM__/${SHA_ARM}/" \
+              -e "s/__SHA_INTEL__/${SHA_INTEL}/" \
+              .github/tap/lucent.rb.template > out/lucent.rb
+          cat out/lucent.rb
+
+      - name: Push it to the tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/LucentDB/homebrew-lucent.git" tap
+          mkdir -p tap/Casks
+          cp out/lucent.rb tap/Casks/lucent.rb
+          cd tap
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/lucent.rb
+          git commit -m "lucent ${TAG#v}" || { echo "no change"; exit 0; }
+          git push
