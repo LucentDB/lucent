@@ -1,71 +1,108 @@
-# Release workflow: sign + notarize + GitHub Release on tag push.
+# Tag-triggered release build.
 #
-# Trigger: push any tag matching `v*` (e.g. `v1.0.0`).
-#   git tag v1.0.0 && git push origin v1.0.0
+#   node scripts/bump-version.mjs 0.1.0
+#   git commit -am "release: v0.1.0" && git tag v0.1.0 && git push --follow-tags
 #
-# Required repository secrets (Settings > Secrets and variables > Actions):
-#   APPLE_CERTIFICATE          base64-encoded .p12 signing certificate
-#                              (create: `openssl pkcs12 -export ...` or from Keychain,
-#                              then `base64 -i cert.p12`)
-#   APPLE_CERTIFICATE_PASSWORD password for the .p12
-#   APPLE_ID                   Apple Developer account email (notarization)
-#   APPLE_PASSWORD             app-specific password for notarytool (not your Apple ID
-#                              password; generate at appleid.apple.com > App-Specific Passwords)
-#   APPLE_TEAM_ID              Apple Developer Team ID
-#   GITHUB_TOKEN               provided automatically by GitHub
+# Produces ONE DRAFT release. Publishing is manual and deliberate: the updater
+# endpoint (releases/latest/download/latest.json) resolves only to published
+# releases, so a bad build cannot reach an existing install's auto-updater
+# until a human says so. Publishing is also what updates the install channels
+# (tap.yml, and the Windows/Linux channels once they exist).
 #
-# See the production-readiness design doc:
-#   docs/superpowers/specs/2026-08-04-production-readiness-design.md (§12 signing/notarization)
+# Required secrets:
+#   TAURI_SIGNING_PRIVATE_KEY           minisign key for updater artifacts
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password
 #
-# On first tagged push: the workflow signs the app, notarizes it, and creates a
-# draft GitHub Release with the .dmg attached. If secrets are absent the job
-# fails loudly (by design). macOS must be signed + notarized (Apple Developer
-# ID) per spec §12, and distributed via GitHub Releases + a Homebrew cask.
+# There is deliberately NO Apple certificate: macOS is ad-hoc signed
+# (bundle.macOS.signingIdentity = "-") and never notarized, so the old
+# `security import` step could only ever fail. See the spec
+# docs/superpowers/specs/2026-08-29-release-distribution-design.md.
 
 name: Release
 
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   release:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            bundles: app,dmg
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb
+
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-      - run: npm ci
-      - name: Import Apple certificate
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Install Linux deps
+        if: matrix.platform == 'ubuntu-22.04'
         run: |
-          echo "$APPLE_CERTIFICATE" | base64 --decode > /tmp/apple-cert.p12
-          security create-keychain -p temp temp.keychain-db
-          security set-keychain-settings -lut 21600 temp.keychain-db
-          security unlock-keychain -p temp temp.keychain-db
-          security import /tmp/apple-cert.p12 -k temp.keychain-db -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k temp temp.keychain-db
-          security list-keychains -d user -s temp.keychain-db
-      # Database drivers (postgres, duckdb) and ACP bridge ship inside the
-      # bundle as Tauri sidecars. stage-sidecars.mjs builds them and stages
-      # them with the host triple in src-tauri/binaries/.
-      - name: Build & stage release sidecars
-        run: node scripts/stage-sidecars.mjs
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libappindicator3-dev librsvg2-dev patchelf libdbus-1-dev xdg-utils
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # The action installs the target into `stable` and selects it with
+      # `rustup default` — the weakest override rustup has. rust-toolchain.toml
+      # outranks it, so every cargo call below actually runs under the pinned
+      # toolchain, which would NOT have this target's std and would fail with
+      # "can't find crate for `std`". Install it into whichever toolchain the
+      # pin selects. No-op when they are the same.
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
+
+      # aws-lc-sys reaches the graph via russh and rustls and cannot assemble
+      # its crypto primitives under MSVC without NASM.
+      - name: Install NASM
+        if: matrix.platform == 'windows-latest'
+        uses: ilammy/setup-nasm@v1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Version consistency
+        run: node scripts/check-version.mjs
+
+      # The sidecars (postgres driver, duckdb driver, ACP bridge) are built and
+      # staged for THIS target by `beforeBuildCommand` — see
+      # scripts/stage-sidecars.mjs. Nothing to stage here: it runs inside
+      # `tauri build`, after `npm ci` and the `rustup target add` above.
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Lucent ${{ github.ref_name }}'
           releaseDraft: true
           prerelease: false
-          args: --config ${{ github.workspace }}/src-tauri/release-sidecar.json
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
