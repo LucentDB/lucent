@@ -45,13 +45,23 @@
         />
       </td>
       {#each tableRow?.getStartVisibleCells() ?? [] as cell, ci (cell.id)}
-        {@render bodyCell(cell, row, ci === startCount - 1 ? 'cell-start pinned-edge' : 'cell-start', absolute)}
+        {@render bodyCell(
+          cell,
+          row,
+          ci === startCount - 1 ? 'cell-start pinned-edge' : 'cell-start',
+          absolute,
+        )}
       {/each}
       {#each tableRow?.getCenterVisibleCells() ?? [] as cell (cell.id)}
         {@render bodyCell(cell, row, 'cell-center', absolute)}
       {/each}
       {#each tableRow?.getEndVisibleCells() ?? [] as cell, ci (cell.id)}
-        {@render bodyCell(cell, row, ci === 0 ? 'cell-end pinned-edge' : 'cell-end', absolute)}
+        {@render bodyCell(
+          cell,
+          row,
+          ci === 0 ? 'cell-end pinned-edge' : 'cell-end',
+          absolute,
+        )}
       {/each}
     </tr>
   {/each}
@@ -68,9 +78,7 @@
     style="width: {widthOf(index)}px; min-width: 80px; {extraClass.includes(
       'cell-start',
     )
-      ? `left: ${
-          GUTTER_WIDTH + cell.column.getStart('start')
-        }px;`
+      ? `left: ${GUTTER_WIDTH + cell.column.getStart('start')}px;`
       : ''}{extraClass.includes('cell-end')
       ? `right: ${cell.column.getAfter('end')}px;`
       : ''}"

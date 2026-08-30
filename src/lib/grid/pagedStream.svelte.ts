@@ -64,7 +64,10 @@ export function createPagedStream(config: PagedStreamConfig) {
   }
 
   function reset() {
-    debugPaging('reset()', { tabId: config.tabId, stack: new Error().stack?.split('\n')[2]?.trim() });
+    debugPaging('reset()', {
+      tabId: config.tabId,
+      stack: new Error().stack?.split('\n')[2]?.trim(),
+    });
     page = 0;
     isFetchingMore = false;
     config.onScrollReset?.();
@@ -82,7 +85,10 @@ export function createPagedStream(config: PagedStreamConfig) {
   $effect(() => {
     void config.fetchedCount;
     if (config.fetchedCount > 0 && config.fetchedCount <= config.pageSize) {
-      debugPaging('fresh-fetch reset', { fetchedCount: config.fetchedCount, pageSize: config.pageSize });
+      debugPaging('fresh-fetch reset', {
+        fetchedCount: config.fetchedCount,
+        pageSize: config.pageSize,
+      });
       page = 0;
       config.onScrollReset?.();
     }
@@ -105,7 +111,11 @@ export function createPagedStream(config: PagedStreamConfig) {
       return;
     }
     const nextPage = page + 1;
-    debugPaging('goNext', { page, nextPage, fetchedCount: config.fetchedCount });
+    debugPaging('goNext', {
+      page,
+      nextPage,
+      fetchedCount: config.fetchedCount,
+    });
     if (nextPage * config.pageSize >= config.fetchedCount) {
       isFetchingMore = true;
       try {

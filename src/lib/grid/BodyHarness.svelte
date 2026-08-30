@@ -33,8 +33,16 @@
       absoluteIndex: number,
       opts: { extend: boolean; toggle: boolean },
     ) => void;
-    onCellContextMenu?: (e: MouseEvent, columnIndex: number, value: unknown) => void;
-    onCellMouseDown?: (rowIndex: number, columnId: string, e: MouseEvent) => void;
+    onCellContextMenu?: (
+      e: MouseEvent,
+      columnIndex: number,
+      value: unknown,
+    ) => void;
+    onCellMouseDown?: (
+      rowIndex: number,
+      columnId: string,
+      e: MouseEvent,
+    ) => void;
     onCellMouseEnter?: (rowIndex: number, columnId: string) => void;
     pinLeft?: string[];
     pinRight?: string[];
@@ -42,10 +50,18 @@
   } = $props();
 
   const engine = createGridEngine({
-    get columns() { return columns ?? []; },
-    get rows() { return rows ?? []; },
-    get initialSorting() { return []; },
-    get initialFilters() { return []; },
+    get columns() {
+      return columns ?? [];
+    },
+    get rows() {
+      return rows ?? [];
+    },
+    get initialSorting() {
+      return [];
+    },
+    get initialFilters() {
+      return [];
+    },
   });
   // Deliberately read once at init: the harness pins before first render so
   // group layout is settled when the test's first assertions run.

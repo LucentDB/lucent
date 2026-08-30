@@ -17,7 +17,9 @@
   } = $props();
 
   const startHeaders = $derived(table.getStartHeaderGroups()[0]?.headers ?? []);
-  const centerHeaders = $derived(table.getCenterHeaderGroups()[0]?.headers ?? []);
+  const centerHeaders = $derived(
+    table.getCenterHeaderGroups()[0]?.headers ?? [],
+  );
   const endHeaders = $derived(table.getEndHeaderGroups()[0]?.headers ?? []);
 
   /** Badges only earn their space once a second key exists. */
@@ -85,9 +87,9 @@
   <th
     class="sortable {extraClass}"
     class:active={sortDirectionOf(header.column.id) !== false}
-    style="width: {widthOf(meta.index)}px; min-width: 80px; {extraClass.includes(
-      'hdr-start',
-    )
+    style="width: {widthOf(
+      meta.index,
+    )}px; min-width: 80px; {extraClass.includes('hdr-start')
       ? `left: ${startLeftOffset(header)}px;`
       : ''}{extraClass.includes('hdr-end')
       ? `right: ${endRightOffset(header)}px;`
@@ -107,7 +109,8 @@
               >{arrowFor(header.column.id)}</span
             >
             {#if sortKeyCount > 1}
-              <span class="sort-badge">{sortIndexOf(header.column.id) + 1}</span>
+              <span class="sort-badge">{sortIndexOf(header.column.id) + 1}</span
+              >
             {/if}
           {/if}
         </span>
