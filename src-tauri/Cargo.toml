@@ -1,7 +1,7 @@
 [package]
 name = "lucent"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 # The package also ships auxilliary binaries (lucent-acp-stub-agent,
 # lucent-db-tools-mcp); `tauri dev` invokes plain `cargo run`, which needs
 # this to know which binary is the app.

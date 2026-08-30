@@ -14,6 +14,8 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - name: version consistency
+        run: node scripts/check-version.mjs
       - run: npm run check
       - run: npm run format:check
       - run: npm test
