@@ -318,16 +318,20 @@ async fn capstone_tool_roundtrip_and_dml_approval() {
         "agent text summary mentions the count: {resp}"
     );
     let events = sink.events.lock().unwrap().clone();
+    // Step 6's search_schema emits a ToolResult too - a text card - and it
+    // reaches the sink first, so select by tool name rather than taking
+    // whichever structured output happens to lead the queue.
     let tool_result = events
         .iter()
         .find_map(|e| match e {
             AiEvent::ToolResult {
+                tool,
                 output: Some(output),
                 ..
-            } => Some(output.clone()),
+            } if tool == "run_readonly_query" => Some(output.clone()),
             _ => None,
         })
-        .expect("ToolResult with structured output reached the sink");
+        .expect("ToolResult for run_readonly_query reached the sink");
     assert_eq!(tool_result["type"], "query_result");
     // `row_count` is the number of RETURNED rows (one for count(*)); the
     // count itself is the first cell of the first row.
@@ -561,7 +565,11 @@ async fn tools_gate_claims_tools_when_the_bridge_connects() {
         _ws.path().to_string_lossy().into_owned(),
     );
     let _gate_guard = env_var_guard("LUCENT_ACP_TOOLS_GATE_MS");
-    std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "5000");
+    // Generous on purpose: this asserts what happens once the bridge HAS
+    // connected, so the gate only needs to outlast spawning the real MCP
+    // binary and its handshake. A shared CI vCPU exceeds 5s and then trips
+    // the no-tools fallback, failing the test for a reason it is not about.
+    std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "30000");
     let script_dir = tempfile::tempdir().unwrap();
     std::fs::write(
         script_dir.path().join("script.json"),
