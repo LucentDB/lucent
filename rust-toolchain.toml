@@ -1,0 +1,6 @@
+# Pinned so `cargo clippy` means the same thing locally and in CI. Without it
+# `dtolnay/rust-toolchain@stable` silently advances and a new lint lands as a
+# surprise red build on an unrelated PR. Bump this deliberately.
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]
