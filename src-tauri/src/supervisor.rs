@@ -7,6 +7,11 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::io::AsyncBufReadExt;
 use tokio::process::{Child, Command};
+
+/// `CREATE_NO_WINDOW` from the Win32 process-creation flags: suppresses the
+/// console window that would otherwise appear for each spawned child.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 use tokio::sync::Mutex;
 
 /// Shared in-memory ring buffer of worker stderr lines for the in-app Logs
@@ -204,12 +209,19 @@ impl Supervisor {
         }
 
         let binary = self.worker_binary_path();
-        let spawn_result = Command::new(&binary)
-            .arg(&self.endpoint)
+        let mut cmd = Command::new(&binary);
+        cmd.arg(&self.endpoint)
             .arg(&self.handshake_token)
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn();
+            .stderr(Stdio::piped());
+        // Without CREATE_NO_WINDOW a console window flashes on every worker
+        // spawn - once per connection - because the app is a GUI subsystem
+        // binary and the worker is a console one. `creation_flags` is an
+        // inherent method on tokio's Command gated to Windows, so no trait
+        // import is needed.
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        let spawn_result = cmd.spawn();
 
         let mut child = match spawn_result {
             Ok(c) => c,
