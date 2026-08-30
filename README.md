@@ -129,21 +129,24 @@ Prettier, and `cargo clippy -D warnings` on every push.
 
 ### Releases
 
-Tagged releases are built by `.github/workflows/release.yml` (sign + notarize +
-GitHub Release). The database driver workers (`lucent-driver-postgres`,
-`lucent-driver-duckdb`) and ACP bridge binary (`lucent-db-tools-mcp`) ship inside
-the bundle as Tauri sidecars.
+Tagged releases are built by `.github/workflows/release.yml`, which builds all
+four targets and attaches them to a single **draft** GitHub Release. macOS is
+ad-hoc signed and never notarized; Windows and Linux are unsigned.
 
-`npx tauri build` automatically builds and stages all required sidecars into
-`src-tauri/binaries/` via `beforeBuildCommand` before bundling. Fresh-checkout
-dev and test runs (`cargo test`, `cargo check`) automatically bypass the sidecar
-check if sidecars have not yet been staged, keeping development fast and clean.
+The database driver workers (`lucent-driver-postgres`, `lucent-driver-duckdb`)
+and the ACP bridge binary (`lucent-db-tools-mcp`) ship inside the bundle as Tauri
+sidecars. `scripts/stage-sidecars.mjs` builds and stages them under the **target**
+triple — not the host triple, which would ship an arm64 bridge in an Intel bundle
+— and `tauri build` runs it automatically via `beforeBuildCommand`. Fresh-checkout
+dev and test runs (`cargo test`, `cargo check`) bypass the sidecar check in
+`build.rs` when the binaries have not been staged yet, keeping development fast
+and clean.
 
 To build a release bundle locally:
 
 ```bash
-npx tauri build
-# or: npm run build:app
+npm run build:app                              # host target
+npx tauri build --target x86_64-apple-darwin   # cross-target, same staging flow
 ```
 
 ## Roadmap
