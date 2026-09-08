@@ -32,20 +32,36 @@
   let viewMode = $state<'list' | 'grid'>('list');
   let searchInput: HTMLInputElement | undefined = $state();
 
+  // Cache lowercase strings outside the reactive filter loop
+  let cachedProfiles = $derived(
+    profiles.map((p) => ({
+      profile: p,
+      nameLower: p.name.toLowerCase(),
+      driverLower: p.driver.toLowerCase(),
+      hostLower: (p.params['host'] ?? '').toLowerCase(),
+      pathLower: (p.params['path'] ?? '').toLowerCase(),
+      userLower: (p.params['user'] ?? '').toLowerCase(),
+      databaseLower: (p.params['database'] ?? '').toLowerCase(),
+      groupLower: (p.group ?? '').toLowerCase(),
+    })),
+  );
+
   // Filtered profiles based on search query
   let filteredProfiles = $derived.by(() => {
     if (!searchQuery.trim()) return profiles;
     const q = searchQuery.toLowerCase();
-    return profiles.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        p.driver.toLowerCase().includes(q) ||
-        (p.params['host'] ?? '').toLowerCase().includes(q) ||
-        (p.params['path'] ?? '').toLowerCase().includes(q) ||
-        (p.params['user'] ?? '').toLowerCase().includes(q) ||
-        (p.params['database'] ?? '').toLowerCase().includes(q) ||
-        (p.group ?? '').toLowerCase().includes(q),
-    );
+    return cachedProfiles
+      .filter(
+        (c) =>
+          c.nameLower.includes(q) ||
+          c.driverLower.includes(q) ||
+          c.hostLower.includes(q) ||
+          c.pathLower.includes(q) ||
+          c.userLower.includes(q) ||
+          c.databaseLower.includes(q) ||
+          c.groupLower.includes(q),
+      )
+      .map((c) => c.profile);
   });
 
   // Filtered groups (only groups with matching profiles)
