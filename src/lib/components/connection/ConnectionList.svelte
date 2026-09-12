@@ -32,20 +32,36 @@
   let viewMode = $state<'list' | 'grid'>('list');
   let searchInput: HTMLInputElement | undefined = $state();
 
+  // Precompute lowercase strings for search to avoid allocation during filtering
+  let cachedProfiles = $derived(
+    profiles.map((p) => ({
+      profile: p,
+      nameL: p.name.toLowerCase(),
+      driverL: p.driver.toLowerCase(),
+      hostL: (p.params['host'] ?? '').toLowerCase(),
+      pathL: (p.params['path'] ?? '').toLowerCase(),
+      userL: (p.params['user'] ?? '').toLowerCase(),
+      databaseL: (p.params['database'] ?? '').toLowerCase(),
+      groupL: (p.group ?? '').toLowerCase(),
+    })),
+  );
+
   // Filtered profiles based on search query
   let filteredProfiles = $derived.by(() => {
     if (!searchQuery.trim()) return profiles;
     const q = searchQuery.toLowerCase();
-    return profiles.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        p.driver.toLowerCase().includes(q) ||
-        (p.params['host'] ?? '').toLowerCase().includes(q) ||
-        (p.params['path'] ?? '').toLowerCase().includes(q) ||
-        (p.params['user'] ?? '').toLowerCase().includes(q) ||
-        (p.params['database'] ?? '').toLowerCase().includes(q) ||
-        (p.group ?? '').toLowerCase().includes(q),
-    );
+    return cachedProfiles
+      .filter(
+        (c) =>
+          c.nameL.includes(q) ||
+          c.driverL.includes(q) ||
+          c.hostL.includes(q) ||
+          c.pathL.includes(q) ||
+          c.userL.includes(q) ||
+          c.databaseL.includes(q) ||
+          c.groupL.includes(q),
+      )
+      .map((c) => c.profile);
   });
 
   // Filtered groups (only groups with matching profiles)
