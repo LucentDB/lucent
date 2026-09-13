@@ -6,12 +6,16 @@ import type { HistoryEntry as HistoryEntryType } from '../../stores/history.svel
 describe('HistoryEntry accessibility', () => {
   const sampleEntry: HistoryEntryType = {
     id: 'entry-1',
+    connectionId: 'conn-1',
+    database: 'test_db',
     sql: 'SELECT * FROM users;',
     durationMs: 42,
     rowCount: 10,
     status: 'success',
+    error: null,
     executedAt: new Date().toISOString(),
     favorite: false,
+    dateGroup: 'Today',
     connectionName: 'main-db',
   };
 
