@@ -421,12 +421,7 @@
                                       onclick={() =>
                                         handleObjectClick(schema, obj)}
                                     >
-                                      <DbIcon
-                                        kind={obj.kind}
-                                        size={12}
-                                        strokeWidth={1.6}
-                                        class="obj-icon {obj.kind}"
-                                      />
+                                      <DbIcon kind={obj.kind} size={12} strokeWidth={1.6} class="obj-icon {obj.kind}" />
                                       <span class="object-name">{obj.name}</span
                                       >
                                       {#if obj.row_count !== null && obj.row_count > 0}
