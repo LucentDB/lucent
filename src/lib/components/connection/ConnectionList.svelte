@@ -32,20 +32,33 @@
   let viewMode = $state<'list' | 'grid'>('list');
   let searchInput: HTMLInputElement | undefined = $state();
 
+  // Cache lowercased search strings per profile outside the filter loop.
+  // Uses a parallel cache pattern to avoid repeated string allocations (toLowerCase)
+  // on every keystroke while preserving Svelte object identity.
+  let searchableProfiles = $derived(
+    profiles.map((p) => ({
+      profile: p,
+      searchStr: [
+        p.name,
+        p.driver,
+        p.params['host'] ?? '',
+        p.params['path'] ?? '',
+        p.params['user'] ?? '',
+        p.params['database'] ?? '',
+        p.group ?? '',
+      ]
+        .join('\0')
+        .toLowerCase(),
+    })),
+  );
+
   // Filtered profiles based on search query
   let filteredProfiles = $derived.by(() => {
-    if (!searchQuery.trim()) return profiles;
-    const q = searchQuery.toLowerCase();
-    return profiles.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        p.driver.toLowerCase().includes(q) ||
-        (p.params['host'] ?? '').toLowerCase().includes(q) ||
-        (p.params['path'] ?? '').toLowerCase().includes(q) ||
-        (p.params['user'] ?? '').toLowerCase().includes(q) ||
-        (p.params['database'] ?? '').toLowerCase().includes(q) ||
-        (p.group ?? '').toLowerCase().includes(q),
-    );
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return profiles;
+    return searchableProfiles
+      .filter((sp) => sp.searchStr.includes(q))
+      .map((sp) => sp.profile);
   });
 
   // Filtered groups (only groups with matching profiles)

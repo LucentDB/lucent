@@ -432,10 +432,7 @@ impl SchemaDelta {
     }
 }
 
-pub fn compute_schema_delta(
-    previous: &CatalogSnapshot,
-    current: &CatalogSnapshot,
-) -> SchemaDelta {
+pub fn compute_schema_delta(previous: &CatalogSnapshot, current: &CatalogSnapshot) -> SchemaDelta {
     let mut prev_cols: HashMap<(&str, &str), Vec<&SnapshotColumn>> = HashMap::new();
     for c in &previous.columns {
         prev_cols
@@ -540,10 +537,18 @@ pub fn compute_schema_delta(
         }
     }
 
-    added.sort_by(|a, b| (a.schema.as_str(), a.name.as_str()).cmp(&(b.schema.as_str(), b.name.as_str())));
-    modified.sort_by(|a, b| (a.schema.as_str(), a.name.as_str()).cmp(&(b.schema.as_str(), b.name.as_str())));
-    deleted.sort_by(|a, b| (a.schema.as_str(), a.name.as_str()).cmp(&(b.schema.as_str(), b.name.as_str())));
-    unchanged.sort_by(|a, b| (a.schema.as_str(), a.name.as_str()).cmp(&(b.schema.as_str(), b.name.as_str())));
+    added.sort_by(|a, b| {
+        (a.schema.as_str(), a.name.as_str()).cmp(&(b.schema.as_str(), b.name.as_str()))
+    });
+    modified.sort_by(|a, b| {
+        (a.schema.as_str(), a.name.as_str()).cmp(&(b.schema.as_str(), b.name.as_str()))
+    });
+    deleted.sort_by(|a, b| {
+        (a.schema.as_str(), a.name.as_str()).cmp(&(b.schema.as_str(), b.name.as_str()))
+    });
+    unchanged.sort_by(|a, b| {
+        (a.schema.as_str(), a.name.as_str()).cmp(&(b.schema.as_str(), b.name.as_str()))
+    });
 
     SchemaDelta {
         added,
@@ -1082,7 +1087,9 @@ impl SchemaIndexer {
 
             for c in &mut tier2.columns {
                 if unchanged_set.contains(&(c.schema.as_str(), c.table.as_str())) {
-                    if let Some(pc) = prior_col_map.get(&(c.schema.as_str(), c.table.as_str(), c.name.as_str())) {
+                    if let Some(pc) =
+                        prior_col_map.get(&(c.schema.as_str(), c.table.as_str(), c.name.as_str()))
+                    {
                         c.sample_values = pc.sample_values.clone();
                         c.embedding = pc.embedding.clone();
                     }
@@ -1145,15 +1152,20 @@ impl SchemaIndexer {
                             };
 
                             if let Err(e) = client.execute(sampling_conn_id, "BEGIN").await {
-                                log::warn!("sampling chunk {ci}: BEGIN failed: {e}; skipping chunk");
+                                log::warn!(
+                                    "sampling chunk {ci}: BEGIN failed: {e}; skipping chunk"
+                                );
                                 break;
                             }
                             if let Err(e) = client
                                 .execute(sampling_conn_id, "SET LOCAL statement_timeout = 3000")
                                 .await
                             {
-                                log::warn!("sampling chunk {ci}: SET LOCAL failed: {e}; rolling back");
-                                if let Err(rb) = client.execute(sampling_conn_id, "ROLLBACK").await {
+                                log::warn!(
+                                    "sampling chunk {ci}: SET LOCAL failed: {e}; rolling back"
+                                );
+                                if let Err(rb) = client.execute(sampling_conn_id, "ROLLBACK").await
+                                {
                                     log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
                                 }
                                 break;
@@ -1166,12 +1178,17 @@ impl SchemaIndexer {
                             .await;
                             match result {
                                 Ok(Ok((res, _qid))) => {
-                                    if let Err(e) = client.execute(sampling_conn_id, "COMMIT").await {
+                                    if let Err(e) = client.execute(sampling_conn_id, "COMMIT").await
+                                    {
                                         log::warn!(
                                             "sampling chunk {ci}: COMMIT failed: {e}; rolling back"
                                         );
-                                        if let Err(rb) = client.execute(sampling_conn_id, "ROLLBACK").await {
-                                            log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
+                                        if let Err(rb) =
+                                            client.execute(sampling_conn_id, "ROLLBACK").await
+                                        {
+                                            log::warn!(
+                                                "sampling chunk {ci}: ROLLBACK failed: {rb}"
+                                            );
                                         }
                                         break;
                                     }
@@ -1179,7 +1196,9 @@ impl SchemaIndexer {
                                 }
                                 Ok(Err(e)) => {
                                     log::warn!("sampling chunk {ci} failed: {e}");
-                                    if let Err(rb) = client.execute(sampling_conn_id, "ROLLBACK").await {
+                                    if let Err(rb) =
+                                        client.execute(sampling_conn_id, "ROLLBACK").await
+                                    {
                                         log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
                                     }
                                     break;
@@ -1187,7 +1206,9 @@ impl SchemaIndexer {
                                 Err(_elapsed) => {
                                     log::warn!("sampling chunk {ci} timed out; cancelling");
                                     let _ = client.cancel(sampling_conn_id, query_id).await;
-                                    if let Err(rb) = client.execute(sampling_conn_id, "ROLLBACK").await {
+                                    if let Err(rb) =
+                                        client.execute(sampling_conn_id, "ROLLBACK").await
+                                    {
                                         log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
                                     }
                                     break;
@@ -2612,26 +2633,24 @@ mod tests {
             },
         ];
 
-        let details = vec![
-            ObjectDetail {
-                reference: ObjectRef {
-                    namespace: vec!["public".into()],
-                    name: "users_view".into(),
-                    kind: ObjectKind::View,
-                },
-                columns: vec![ColumnDetail {
-                    name: "email".into(),
-                    type_name: "text".into(),
-                    nullable: false,
-                    is_primary_key: false,
-                    ordinal: 1,
-                    default: None,
-                    comment: None,
-                    foreign_key: None,
-                }],
-                comment: None,
+        let details = vec![ObjectDetail {
+            reference: ObjectRef {
+                namespace: vec!["public".into()],
+                name: "users_view".into(),
+                kind: ObjectKind::View,
             },
-        ];
+            columns: vec![ColumnDetail {
+                name: "email".into(),
+                type_name: "text".into(),
+                nullable: false,
+                is_primary_key: false,
+                ordinal: 1,
+                default: None,
+                comment: None,
+                foreign_key: None,
+            }],
+            comment: None,
+        }];
 
         let (tables, cols) = harvest_to_entries(summaries, details);
         assert_eq!(tables.len(), 2);

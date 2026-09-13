@@ -55,9 +55,7 @@ impl Clone for AiToolContext {
 /// valid `AiToolContext` without touching the user's real `memory.db`.
 #[cfg(test)]
 pub fn test_memory_manager() -> Arc<crate::ai::memory::MemoryManager> {
-    Arc::new(
-        crate::ai::memory::MemoryManager::open_in_memory().expect("in-memory memory db opens"),
-    )
+    Arc::new(crate::ai::memory::MemoryManager::open_in_memory().expect("in-memory memory db opens"))
 }
 
 #[derive(Clone)]

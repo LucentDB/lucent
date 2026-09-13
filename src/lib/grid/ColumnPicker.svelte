@@ -30,8 +30,16 @@
   // toLowerCase() inside the filter loop allocates per item.
   let queryLower = $derived(query.trim().toLowerCase());
 
+  // Parallel cache so the lowercased name is computed once per column when the
+  // column list changes, not once per keystroke per column.
+  let cachedColumns = $derived(
+    columns.map((c) => ({ item: c, lowerName: c.name.toLowerCase() })),
+  );
+
   let matches = $derived(
-    columns.filter((c) => c.name.toLowerCase().includes(queryLower)),
+    cachedColumns
+      .filter((c) => c.lowerName.includes(queryLower))
+      .map((c) => c.item),
   );
 
   // A narrowed list can be shorter than the previous active index.

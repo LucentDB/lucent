@@ -229,7 +229,10 @@ mod tests {
             "an ErrorResolution deduction must not supersede a UserExplicit rule"
         );
         let active = mgr.list_memories("conn", false).await.unwrap();
-        let user_rule = active.iter().find(|m| m.id == "user_rule").expect("user rule");
+        let user_rule = active
+            .iter()
+            .find(|m| m.id == "user_rule")
+            .expect("user rule");
         assert_eq!(
             user_rule.status,
             MemoryStatus::Active,

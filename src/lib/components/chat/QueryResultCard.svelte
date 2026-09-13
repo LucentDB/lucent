@@ -21,9 +21,9 @@
     saveError = null;
     try {
       const connId = activeConv?.connectionId || 'global';
-      const lastUserMsg = activeConv?.messages
-        .filter((m) => m.role === 'user')
-        .at(-1)?.content || 'User query';
+      const lastUserMsg =
+        activeConv?.messages.filter((m) => m.role === 'user').at(-1)?.content ||
+        'User query';
       await saveGoldenQuery(connId, lastUserMsg, qr.sql);
       saved = true;
     } catch (e) {
@@ -42,7 +42,9 @@
     <span class="qr-badge">{qr.rowCount} rows</span>
     <span class="qr-time">{qr.executionTimeMs}ms</span>
     {#if saveError}
-      <span class="qr-save-error" role="alert" title={saveError}>Save failed: {saveError}</span>
+      <span class="qr-save-error" role="alert" title={saveError}
+        >Save failed: {saveError}</span
+      >
     {/if}
     <button
       class="qr-golden-btn"

@@ -234,7 +234,8 @@ mod grading_tests {
         assert!(verify_fidelity(source, valid_assertion).is_ok());
 
         // Dropping the numerical threshold '5' triggers MemFail summary_error
-        let corrupted_assertion = "subscriber active when status = 'active' and has frequent logins and plan is pro";
+        let corrupted_assertion =
+            "subscriber active when status = 'active' and has frequent logins and plan is pro";
         assert!(
             verify_fidelity(source, corrupted_assertion).is_err(),
             "dropping numerical thresholds must trigger fidelity guard failure"
@@ -285,7 +286,13 @@ mod grading_tests {
             column_name: Some("email".into()),
             data_type: "varchar".into(),
             is_nullable: false,
-            entity_fingerprint: compute_entity_fingerprint("public", "users", Some("email"), "varchar", false),
+            entity_fingerprint: compute_entity_fingerprint(
+                "public",
+                "users",
+                Some("email"),
+                "varchar",
+                false,
+            ),
         };
 
         mgr.save_memory(mem, &[entity_link]).await.unwrap();
@@ -314,13 +321,20 @@ mod grading_tests {
         mgr.with_connection(|conn| {
             let alerts = cascade_schema_drift("conn_test", &modified_snapshot, conn).unwrap();
             assert_eq!(alerts.len(), 1, "must detect drift for dropped column");
-            assert!(alerts[0].reason.contains("Column 'public.users.email' was dropped"));
+            assert!(alerts[0]
+                .reason
+                .contains("Column 'public.users.email' was dropped"));
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         // Memory should now be STALE_INVALID
         let active = mgr.list_memories("conn_test", false).await.unwrap();
-        assert!(active.is_empty(), "stale invalid memory must be excluded from active list");
+        assert!(
+            active.is_empty(),
+            "stale invalid memory must be excluded from active list"
+        );
 
         let all = mgr.list_memories("conn_test", true).await.unwrap();
         assert_eq!(all.len(), 1);
@@ -358,8 +372,13 @@ mod grading_tests {
             tier: crate::ai::schema_graph::IndexingTier::MetadataOnly,
         };
 
-        let err = mgr.revalidate_drift("mem_drift_1", Some(&graph_missing)).await;
-        assert!(err.is_err(), "revalidation must fail when linked column is missing");
+        let err = mgr
+            .revalidate_drift("mem_drift_1", Some(&graph_missing))
+            .await;
+        assert!(
+            err.is_err(),
+            "revalidation must fail when linked column is missing"
+        );
 
         // Now simulate schema where column 'email' was restored with updated type
         let graph_restored = crate::ai::schema_graph::SchemaGraph {
@@ -408,7 +427,9 @@ mod grading_tests {
             tier: crate::ai::schema_graph::IndexingTier::MetadataOnly,
         };
 
-        mgr.revalidate_drift("mem_drift_1", Some(&graph_restored)).await.unwrap();
+        mgr.revalidate_drift("mem_drift_1", Some(&graph_restored))
+            .await
+            .unwrap();
 
         // Memory should now be ACTIVE again
         let active = mgr.list_memories("conn_test", false).await.unwrap();
@@ -449,9 +470,15 @@ mod grading_tests {
 
         mgr.with_connection(|conn| {
             let alerts = cascade_schema_drift("conn_test", &snapshot_restored, conn).unwrap();
-            assert_eq!(alerts.len(), 0, "subsequent cascade must not trigger on revalidated memory");
+            assert_eq!(
+                alerts.len(),
+                0,
+                "subsequent cascade must not trigger on revalidated memory"
+            );
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -532,7 +559,9 @@ mod grading_tests {
         mgr.with_connection(|conn| {
             supersede_rule("rule_q3", "rule_q1", now, conn)?;
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         // Verify retrieval returns exactly ONE rule (rule_q3)
         let active = mgr.list_memories("pg_prod", false).await.unwrap();
@@ -549,9 +578,16 @@ mod grading_tests {
             )
             .await;
 
-        assert_eq!(retrieved.len(), 1, "superseded rule must not enter retrieval pool");
+        assert_eq!(
+            retrieved.len(),
+            1,
+            "superseded rule must not enter retrieval pool"
+        );
         assert_eq!(retrieved[0].id, "rule_q3");
-        assert_eq!(retrieved[0].rule_text, "Churn is defined as 60 days of inactivity");
+        assert_eq!(
+            retrieved[0].rule_text,
+            "Churn is defined as 60 days of inactivity"
+        );
     }
 
     #[test]
@@ -580,7 +616,9 @@ mod grading_tests {
 
     #[test]
     fn test_prompt_prefix_cache_stability() {
-        use crate::ai::context::{build_system_prompt, build_system_prompt_with_memories, SchemaTree};
+        use crate::ai::context::{
+            build_system_prompt, build_system_prompt_with_memories, SchemaTree,
+        };
         use crate::ai::memory::*;
 
         let tree = SchemaTree {

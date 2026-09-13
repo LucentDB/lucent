@@ -335,7 +335,8 @@ mod tests {
         let event: AiEvent = serde_json::from_str(json).unwrap();
         match event {
             AiEvent::Done {
-                applied_memory_count, ..
+                applied_memory_count,
+                ..
             } => assert_eq!(applied_memory_count, 0),
             other => panic!("expected Done, got {other:?}"),
         }

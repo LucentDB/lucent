@@ -305,7 +305,8 @@ impl AppState {
             memory_manager: Arc::new(
                 crate::ai::memory::MemoryManager::open_default().unwrap_or_else(|e| {
                     log::warn!("memory db unavailable, falling back to in-memory: {e}");
-                    crate::ai::memory::MemoryManager::open_in_memory().expect("in-memory memory db opens")
+                    crate::ai::memory::MemoryManager::open_in_memory()
+                        .expect("in-memory memory db opens")
                 }),
             ),
             approved_save_paths: Arc::new(Mutex::new(load_approved_paths())),
@@ -1162,10 +1163,7 @@ pub fn display_database(config: &lucent_protocol::ConnectionConfig) -> String {
 /// `connection_key_for` hash — the Gate 1 drift cascade must match the keys
 /// `memories.connection_key` actually holds, or it silently invalidates
 /// nothing.
-pub fn memory_connection_key_for(
-    profile_id: Option<&str>,
-    config: &ConnectionConfig,
-) -> String {
+pub fn memory_connection_key_for(profile_id: Option<&str>, config: &ConnectionConfig) -> String {
     if let Some(id) = profile_id {
         return id.to_string();
     }
@@ -2395,8 +2393,8 @@ async fn build_system_prompt_with_query(
             log::info!(
                 "Schema tree expired for {connection_id}; rendering system prompt from in-memory graph"
             );
-            let db_name =
-                current_db.unwrap_or_else(|| crate::ai::context::parse_database_name(connection_id));
+            let db_name = current_db
+                .unwrap_or_else(|| crate::ai::context::parse_database_name(connection_id));
             let version = state
                 .client_handle()
                 .await
@@ -2416,7 +2414,11 @@ async fn build_system_prompt_with_query(
     // Hot-Tier Memory Block Injection (P0 - G-1). Runs after the schema lock is
     // released; also see B-I9 for the embedder init lock. The reranker lock is
     // taken only after the schema lock is dropped (no inversion hazard).
-    let enable_memory = state.ai_config.read().await.is_memory_enabled(connection_id);
+    let enable_memory = state
+        .ai_config
+        .read()
+        .await
+        .is_memory_enabled(connection_id);
     let mut applied_memory_count = 0usize;
     if enable_memory {
         if let Some(user_query) = query {
@@ -2431,7 +2433,11 @@ async fn build_system_prompt_with_query(
                 }
             };
 
-            if let Ok(active_memories) = state.memory_manager.list_memories(connection_id, false).await {
+            if let Ok(active_memories) = state
+                .memory_manager
+                .list_memories(connection_id, false)
+                .await
+            {
                 let reranker_guard = state.reranker.lock().await;
                 let retrieved = state
                     .memory_manager
@@ -2445,7 +2451,11 @@ async fn build_system_prompt_with_query(
                     )
                     .await;
 
-                let golden = if let Ok(all_golden) = state.memory_manager.list_golden_queries(connection_id).await {
+                let golden = if let Ok(all_golden) = state
+                    .memory_manager
+                    .list_golden_queries(connection_id)
+                    .await
+                {
                     crate::ai::memory::retrieve_golden_queries(q_vec.as_deref(), &all_golden)
                 } else {
                     Vec::new()
@@ -2458,7 +2468,9 @@ async fn build_system_prompt_with_query(
                 // F-C2: report exactly the rules the block injected.
                 applied_memory_count = retrieved.len();
 
-                if let Some(mem_block) = crate::ai::context::format_memory_block(&retrieved, &golden) {
+                if let Some(mem_block) =
+                    crate::ai::context::format_memory_block(&retrieved, &golden)
+                {
                     prompt.push_str(&mem_block);
                 }
             }
@@ -3373,7 +3385,10 @@ pub async fn list_chat_conversations(
     state: State<'_, AppState>,
     connection_id: Option<String>,
 ) -> Result<Vec<crate::ai::memory::ChatConversation>, String> {
-    state.memory_manager.list_conversations(connection_id.as_deref()).await
+    state
+        .memory_manager
+        .list_conversations(connection_id.as_deref())
+        .await
 }
 
 #[tauri::command]
@@ -3389,7 +3404,10 @@ pub async fn delete_chat_conversation(
     state: State<'_, AppState>,
     conversation_id: String,
 ) -> Result<bool, String> {
-    state.memory_manager.delete_conversation(&conversation_id).await
+    state
+        .memory_manager
+        .delete_conversation(&conversation_id)
+        .await
 }
 
 #[tauri::command]
@@ -3417,18 +3435,24 @@ pub async fn save_memory_manual(
     use crate::ai::memory::security::{sanitize_rule_text, sanitize_sql_snippet, SourceTrust};
     use crate::ai::memory::{
         compute_memory_doc_hash, MemoryCategory, MemoryItem, MemoryScope, MemoryStatus,
-        USER_EXPLICIT_STABILITY_HOURS, MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME,
+        MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME, USER_EXPLICIT_STABILITY_HOURS,
     };
 
     let sanitized_rule = sanitize_rule_text(&rule_text)?;
     let sanitized_sql = sanitize_sql_snippet(sql_snippet.as_deref())?;
 
     let cat = MemoryCategory::from_str(&category);
-    let sc = scope.as_deref().map(MemoryScope::from_str).unwrap_or(MemoryScope::Connection);
+    let sc = scope
+        .as_deref()
+        .map(MemoryScope::from_str)
+        .unwrap_or(MemoryScope::Connection);
     let now = chrono::Utc::now().timestamp();
     let id = uuid::Uuid::new_v4().to_string();
 
-    let doc_text = format!("Context: {} {} | Rule: {}", category, key_phrase, sanitized_rule);
+    let doc_text = format!(
+        "Context: {} {} | Rule: {}",
+        category, key_phrase, sanitized_rule
+    );
     let doc_hash = compute_memory_doc_hash(&doc_text);
 
     let embedding = if let Some(emb) = state.get_or_init_memory_embedder().await {
@@ -3489,15 +3513,15 @@ pub async fn save_memory_manual(
         updated_at: now,
     };
 
-    state.memory_manager.save_memory(item.clone(), &entity_links).await?;
+    state
+        .memory_manager
+        .save_memory(item.clone(), &entity_links)
+        .await?;
     Ok(item)
 }
 
 #[tauri::command]
-pub async fn delete_memory(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<bool, String> {
+pub async fn delete_memory(state: State<'_, AppState>, id: String) -> Result<bool, String> {
     state.memory_manager.delete_memory(&id).await
 }
 
@@ -3519,9 +3543,15 @@ pub async fn resolve_drift(
 ) -> Result<(), String> {
     if resolution == "revalidate" {
         let graph_guard = state.schema_graph.lock().await;
-        state.memory_manager.revalidate_drift(&id, graph_guard.as_ref()).await
+        state
+            .memory_manager
+            .revalidate_drift(&id, graph_guard.as_ref())
+            .await
     } else {
-        state.memory_manager.toggle_memory_status(&id, crate::ai::memory::MemoryStatus::Archived).await
+        state
+            .memory_manager
+            .toggle_memory_status(&id, crate::ai::memory::MemoryStatus::Archived)
+            .await
     }
 }
 
@@ -3530,8 +3560,14 @@ pub async fn export_memories_markdown(
     state: State<'_, AppState>,
     connection_key: String,
 ) -> Result<String, String> {
-    let memories = state.memory_manager.list_memories(&connection_key, true).await?;
-    Ok(crate::ai::memory::rules_parser::export_to_markdown(&connection_key, &memories))
+    let memories = state
+        .memory_manager
+        .list_memories(&connection_key, true)
+        .await?;
+    Ok(crate::ai::memory::rules_parser::export_to_markdown(
+        &connection_key,
+        &memories,
+    ))
 }
 
 #[tauri::command]
@@ -3558,7 +3594,8 @@ pub async fn import_memories_markdown(
         // delimiters or blacklisted payloads straight into memory. Route it
         // through the same guard as every other write path; skip malformed
         // rules rather than aborting the whole import.
-        let sanitized_rule = match crate::ai::memory::security::sanitize_rule_text(&rule.rule_text) {
+        let sanitized_rule = match crate::ai::memory::security::sanitize_rule_text(&rule.rule_text)
+        {
             Ok(text) => text,
             Err(_) => continue,
         };
@@ -3569,13 +3606,20 @@ pub async fn import_memories_markdown(
             };
 
         let id = uuid::Uuid::new_v4().to_string();
-        let doc_hash = crate::ai::memory::compute_memory_doc_hash(&format!("{} {}", rule.key_phrase, sanitized_rule));
+        let doc_hash = crate::ai::memory::compute_memory_doc_hash(&format!(
+            "{} {}",
+            rule.key_phrase, sanitized_rule
+        ));
         let embedding = if let Some(emb) = state.get_or_init_memory_embedder().await {
-            emb.embed_query(&format!("{}: {}", rule.key_phrase, sanitized_rule)).await.unwrap_or_default()
+            emb.embed_query(&format!("{}: {}", rule.key_phrase, sanitized_rule))
+                .await
+                .unwrap_or_default()
         } else {
             let emb_guard = state.embedder.lock().await;
             if let Some(emb) = emb_guard.as_ref() {
-                emb.embed_query(&format!("{}: {}", rule.key_phrase, sanitized_rule)).await.unwrap_or_default()
+                emb.embed_query(&format!("{}: {}", rule.key_phrase, sanitized_rule))
+                    .await
+                    .unwrap_or_default()
             } else {
                 Vec::new()
             }
@@ -3620,7 +3664,12 @@ pub async fn import_memories_markdown(
             created_at: now,
             updated_at: now,
         };
-        if state.memory_manager.save_memory(item, &entity_links).await.is_ok() {
+        if state
+            .memory_manager
+            .save_memory(item, &entity_links)
+            .await
+            .is_ok()
+        {
             imported += 1;
         }
     }
@@ -3633,7 +3682,10 @@ pub async fn list_golden_queries(
     state: State<'_, AppState>,
     connection_id: String,
 ) -> Result<Vec<crate::ai::memory::GoldenQuery>, String> {
-    state.memory_manager.list_golden_queries(&connection_id).await
+    state
+        .memory_manager
+        .list_golden_queries(&connection_id)
+        .await
 }
 
 #[tauri::command]
@@ -3649,19 +3701,22 @@ pub async fn save_golden_query(
     let now = chrono::Utc::now().timestamp();
     let id = uuid::Uuid::new_v4().to_string();
     let embedding = if let Some(emb) = state.get_or_init_memory_embedder().await {
-        emb.embed_query(&format!("{natural_prompt} {sql_text}")).await.unwrap_or_default()
+        emb.embed_query(&format!("{natural_prompt} {sql_text}"))
+            .await
+            .unwrap_or_default()
     } else {
         let emb_guard = state.embedder.lock().await;
         if let Some(emb) = emb_guard.as_ref() {
-            emb.embed_query(&format!("{natural_prompt} {sql_text}")).await.unwrap_or_default()
+            emb.embed_query(&format!("{natural_prompt} {sql_text}"))
+                .await
+                .unwrap_or_default()
         } else {
             Vec::new()
         }
     };
 
-    let tables = tables_used.unwrap_or_else(|| {
-        crate::ai::memory::entity_linker::extract_tables_from_sql(&sql_text)
-    });
+    let tables = tables_used
+        .unwrap_or_else(|| crate::ai::memory::entity_linker::extract_tables_from_sql(&sql_text));
 
     let q = crate::ai::memory::GoldenQuery {
         id,
@@ -3683,10 +3738,7 @@ pub async fn save_golden_query(
 }
 
 #[tauri::command]
-pub async fn delete_golden_query(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<bool, String> {
+pub async fn delete_golden_query(state: State<'_, AppState>, id: String) -> Result<bool, String> {
     state.memory_manager.delete_golden_query(&id).await
 }
 
@@ -3696,23 +3748,28 @@ pub async fn run_consolidation(
     connection_key: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let graph_guard = state.schema_graph.lock().await;
-    let snapshot = graph_guard.as_ref().map(crate::ai::schema_graph::snapshot_from_graph);
+    let snapshot = graph_guard
+        .as_ref()
+        .map(crate::ai::schema_graph::snapshot_from_graph);
 
-    let (pruned, archived, drift_alerts) = state.memory_manager.with_connection(|conn| {
-        let p = crate::ai::memory::consolidation::prune_old_session_json(conn, 14)?;
-        let a = crate::ai::memory::consolidation::soft_archive_decayed_memories(conn)?;
-        // Per-connection scoping is mandatory (see cascade_schema_drift): a
-        // catalog diff for one connection must not invalidate another
-        // connection's memories. Without a key there is nothing to scope to,
-        // so skip rather than over-invalidate.
-        let alerts = match (connection_key.as_deref(), snapshot.as_ref()) {
-            (Some(key), Some(snap)) => {
-                crate::ai::memory::drift::cascade_schema_drift(key, snap, conn)?
-            }
-            _ => Vec::new(),
-        };
-        Ok((p, a, alerts))
-    }).await?;
+    let (pruned, archived, drift_alerts) = state
+        .memory_manager
+        .with_connection(|conn| {
+            let p = crate::ai::memory::consolidation::prune_old_session_json(conn, 14)?;
+            let a = crate::ai::memory::consolidation::soft_archive_decayed_memories(conn)?;
+            // Per-connection scoping is mandatory (see cascade_schema_drift): a
+            // catalog diff for one connection must not invalidate another
+            // connection's memories. Without a key there is nothing to scope to,
+            // so skip rather than over-invalidate.
+            let alerts = match (connection_key.as_deref(), snapshot.as_ref()) {
+                (Some(key), Some(snap)) => {
+                    crate::ai::memory::drift::cascade_schema_drift(key, snap, conn)?
+                }
+                _ => Vec::new(),
+            };
+            Ok((p, a, alerts))
+        })
+        .await?;
 
     Ok(serde_json::json!({
         "pruned_session_json_count": pruned,

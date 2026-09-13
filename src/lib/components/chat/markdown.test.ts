@@ -15,6 +15,12 @@ test('strips javascript: URLs in links', () => {
   expect(out.toLowerCase()).not.toContain('javascript:');
 });
 
+test('adds target="_blank" and rel="noopener noreferrer" to links', () => {
+  const out = renderMarkdown('[example](https://example.com)');
+  expect(out).toContain('target="_blank"');
+  expect(out).toContain('rel="noopener noreferrer"');
+});
+
 test('keeps benign markdown formatting', () => {
   const out = renderMarkdown('**bold** and `code`');
   expect(out).toContain('<strong>');

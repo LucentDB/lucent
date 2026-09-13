@@ -1,6 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { indexing, stageLabel, type SchemaIndexingStatus } from '../../stores/indexing.svelte';
+  import {
+    indexing,
+    stageLabel,
+    type SchemaIndexingStatus,
+  } from '../../stores/indexing.svelte';
 
   interface Props {
     connectionName?: string;
@@ -8,7 +12,11 @@
     onClose?: () => void;
   }
 
-  let { connectionName = 'Active Connection', databaseName = '', onClose }: Props = $props();
+  let {
+    connectionName = 'Active Connection',
+    databaseName = '',
+    onClose,
+  }: Props = $props();
 
   let backendStatus = $state<SchemaIndexingStatus | null>(null);
   let isRefreshing = $state(false);
@@ -46,11 +54,23 @@
   });
 </script>
 
-<div class="indexing-popover" role="dialog" aria-label="Schema Indexing Details">
+<div
+  class="indexing-popover"
+  role="dialog"
+  aria-label="Schema Indexing Details"
+>
   <header class="popover-header">
     <div class="header-title">
       <div class="icon-wrap">
-        <svg class="db-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <svg
+          class="db-icon"
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
           <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
           <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
           <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
@@ -67,7 +87,14 @@
       </div>
     </div>
     <button class="close-btn" onclick={onClose} aria-label="Close">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+      >
         <line x1="18" y1="6" x2="6" y2="18"></line>
         <line x1="6" y1="6" x2="18" y2="18"></line>
       </svg>
@@ -93,15 +120,28 @@
     {:else}
       <div class="status-card ready">
         <div class="status-card-header">
-          <svg class="check-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <svg
+            class="check-icon"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.5"
+          >
             <polyline points="20 6 9 17 4 12"></polyline>
           </svg>
           <span class="status-headline">Schema index is up to date</span>
-          <span class="tier-tag">{backendStatus?.tier === 'fully_enriched' ? 'Semantic Tier-2' : 'Fast Tier-1'}</span>
+          <span class="tier-tag"
+            >{backendStatus?.tier === 'fully_enriched'
+              ? 'Semantic Tier-2'
+              : 'Fast Tier-1'}</span
+          >
         </div>
         <div class="status-subtext">
           {#if backendStatus?.tableCount}
-            {backendStatus.tableCount} relations indexed ({backendStatus.columnCount} columns{#if backendStatus.viewCount > 0}, {backendStatus.viewCount} views{/if})
+            {backendStatus.tableCount} relations indexed ({backendStatus.columnCount}
+            columns{#if backendStatus.viewCount > 0}, {backendStatus.viewCount} views{/if})
           {:else}
             Delta caching active & verified
           {/if}
@@ -117,7 +157,10 @@
           <span class="delta-num">+{indexing.delta.added}</span>
           <span class="delta-name">added</span>
         </div>
-        <div class="delta-chip modified" title="Tables with altered columns/constraints">
+        <div
+          class="delta-chip modified"
+          title="Tables with altered columns/constraints"
+        >
           <span class="delta-num">~{indexing.delta.modified}</span>
           <span class="delta-name">modified</span>
         </div>
@@ -125,7 +168,10 @@
           <span class="delta-num">-{indexing.delta.deleted}</span>
           <span class="delta-name">deleted</span>
         </div>
-        <div class="delta-chip unchanged" title="Tables untouched (re-used cache)">
+        <div
+          class="delta-chip unchanged"
+          title="Tables untouched (re-used cache)"
+        >
           <span class="delta-num">={indexing.delta.unchanged}</span>
           <span class="delta-name">unchanged</span>
         </div>
@@ -140,28 +186,60 @@
           <div class="step-dot">✓</div>
           <div class="step-info">
             <div class="step-name">Catalog Discovery</div>
-            <div class="step-desc">Harvested tables, views, and foreign keys</div>
+            <div class="step-desc">
+              Harvested tables, views, and foreign keys
+            </div>
           </div>
         </div>
         <div class="step-row {indexing.stage === 'delta' ? 'running' : 'done'}">
           <div class="step-dot">{indexing.stage === 'delta' ? '•' : '✓'}</div>
           <div class="step-info">
             <div class="step-name">Differential Hashing</div>
-            <div class="step-desc">Deterministic table signature comparison</div>
+            <div class="step-desc">
+              Deterministic table signature comparison
+            </div>
           </div>
         </div>
-        <div class="step-row {indexing.stage === 'sampling' ? 'running' : (indexing.isComplete ? 'done' : 'pending')}">
-          <div class="step-dot">{indexing.stage === 'sampling' ? '•' : (indexing.isComplete ? '✓' : '○')}</div>
+        <div
+          class="step-row {indexing.stage === 'sampling'
+            ? 'running'
+            : indexing.isComplete
+              ? 'done'
+              : 'pending'}"
+        >
+          <div class="step-dot">
+            {indexing.stage === 'sampling'
+              ? '•'
+              : indexing.isComplete
+                ? '✓'
+                : '○'}
+          </div>
           <div class="step-info">
             <div class="step-name">Selective Value Sampling</div>
-            <div class="step-desc">Sampled values strictly for changed relations</div>
+            <div class="step-desc">
+              Sampled values strictly for changed relations
+            </div>
           </div>
         </div>
-        <div class="step-row {indexing.stage === 'embedding' ? 'running' : (indexing.isComplete ? 'done' : 'pending')}">
-          <div class="step-dot">{indexing.stage === 'embedding' ? '•' : (indexing.isComplete ? '✓' : '○')}</div>
+        <div
+          class="step-row {indexing.stage === 'embedding'
+            ? 'running'
+            : indexing.isComplete
+              ? 'done'
+              : 'pending'}"
+        >
+          <div class="step-dot">
+            {indexing.stage === 'embedding'
+              ? '•'
+              : indexing.isComplete
+                ? '✓'
+                : '○'}
+          </div>
           <div class="step-info">
             <div class="step-name">Vector Embeddings</div>
-            <div class="step-desc">Single-flight ONNX with BLAKE3 cache lookup</div>
+            <div class="step-desc">
+              Single-flight ONNX with BLAKE3 cache lookup
+            </div>
           </div>
         </div>
       </div>
@@ -188,10 +266,20 @@
   </div>
 
   <footer class="popover-footer">
-    <button class="action-btn secondary" onclick={handleRebuild} disabled={!indexing.isComplete || isRefreshing} title="Drop local vector cache and rebuild all embeddings">
+    <button
+      class="action-btn secondary"
+      onclick={handleRebuild}
+      disabled={!indexing.isComplete || isRefreshing}
+      title="Drop local vector cache and rebuild all embeddings"
+    >
       Rebuild Index
     </button>
-    <button class="action-btn primary" onclick={handleSyncDelta} disabled={!indexing.isComplete || isRefreshing} title="Check catalog and process only changed relations">
+    <button
+      class="action-btn primary"
+      onclick={handleSyncDelta}
+      disabled={!indexing.isComplete || isRefreshing}
+      title="Check catalog and process only changed relations"
+    >
       {#if isRefreshing}
         <span class="spinner-sm"></span> Syncing…
       {:else}
@@ -326,7 +414,8 @@
     flex: 1;
   }
 
-  .percent-tag, .tier-tag {
+  .percent-tag,
+  .tier-tag {
     font-size: 11px;
     font-weight: var(--weight-semibold);
     padding: 1px 6px;
@@ -346,7 +435,8 @@
     color: var(--success);
   }
 
-  .status-subtext, .status-detail {
+  .status-subtext,
+  .status-detail {
     font-size: var(--text-xs);
     color: var(--text-secondary);
   }
@@ -385,7 +475,9 @@
   }
 
   @keyframes spin {
-    to { transform: rotate(360deg); }
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .section {
@@ -428,10 +520,18 @@
     color: var(--text-muted);
   }
 
-  .delta-chip.added .delta-num { color: var(--success); }
-  .delta-chip.modified .delta-num { color: var(--warning); }
-  .delta-chip.deleted .delta-num { color: var(--danger); }
-  .delta-chip.unchanged .delta-num { color: var(--text-secondary); }
+  .delta-chip.added .delta-num {
+    color: var(--success);
+  }
+  .delta-chip.modified .delta-num {
+    color: var(--warning);
+  }
+  .delta-chip.deleted .delta-num {
+    color: var(--danger);
+  }
+  .delta-chip.unchanged .delta-num {
+    color: var(--text-secondary);
+  }
 
   .pipeline-steps {
     display: flex;
@@ -478,8 +578,12 @@
   }
 
   @keyframes pulse {
-    from { opacity: 0.6; }
-    to { opacity: 1; }
+    from {
+      opacity: 0.6;
+    }
+    to {
+      opacity: 1;
+    }
   }
 
   .step-info {

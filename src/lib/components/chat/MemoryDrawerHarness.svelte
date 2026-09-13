@@ -35,7 +35,12 @@
   <button data-testid="background-button" type="button">Background</button>
 </div>
 
-<button data-testid="trigger" bind:this={triggerEl} type="button" onclick={open}>
+<button
+  data-testid="trigger"
+  bind:this={triggerEl}
+  type="button"
+  onclick={open}
+>
   Open memory
 </button>
 

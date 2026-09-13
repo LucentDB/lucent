@@ -1,10 +1,10 @@
-use std::collections::HashSet;
 use sqlparser::ast::{
     Expr, GroupByExpr, JoinConstraint, JoinOperator, ObjectNamePart, OrderByKind, Query, Select,
     SelectItem, SelectItemQualifiedWildcardKind, SetExpr, Statement, TableFactor,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
+use std::collections::HashSet;
 
 use crate::ai::schema_graph::SchemaGraph;
 
@@ -92,7 +92,10 @@ pub fn extract_and_link_entities(
             let mut matched_any_column = false;
 
             for col in cols {
-                if found_columns.iter().any(|fc| fc.eq_ignore_ascii_case(&col.name)) {
+                if found_columns
+                    .iter()
+                    .any(|fc| fc.eq_ignore_ascii_case(&col.name))
+                {
                     matched_any_column = true;
                     let fp = compute_entity_fingerprint(
                         &t.schema,
@@ -134,7 +137,9 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() || haystack.is_empty() {
         return false;
     }
-    haystack.split(|c: char| !c.is_alphanumeric() && c != '_').any(|word| word.eq_ignore_ascii_case(needle))
+    haystack
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|word| word.eq_ignore_ascii_case(needle))
 }
 
 fn extract_from_statement(
@@ -247,10 +252,7 @@ pub fn extract_tables_from_sql(sql: &str) -> Vec<String> {
     found_tables.into_iter().map(|(_, t)| t).collect()
 }
 
-fn extract_from_table_factor(
-    factor: &TableFactor,
-    tables: &mut HashSet<(Option<String>, String)>,
-) {
+fn extract_from_table_factor(factor: &TableFactor, tables: &mut HashSet<(Option<String>, String)>) {
     if let TableFactor::Table { name, .. } = factor {
         let parts: Vec<String> = name
             .0
@@ -263,7 +265,10 @@ fn extract_from_table_factor(
         if parts.len() == 1 {
             tables.insert((None, parts[0].clone()));
         } else if parts.len() >= 2 {
-            tables.insert((Some(parts[parts.len() - 2].clone()), parts[parts.len() - 1].clone()));
+            tables.insert((
+                Some(parts[parts.len() - 2].clone()),
+                parts[parts.len() - 1].clone(),
+            ));
         }
     }
 }
@@ -303,7 +308,8 @@ mod tests {
         assert_eq!(fp1, fp2);
 
         // Nullability change changes fingerprint
-        let fp_nullable = compute_entity_fingerprint("public", "users", Some("email"), "varchar", true);
+        let fp_nullable =
+            compute_entity_fingerprint("public", "users", Some("email"), "varchar", true);
         assert_ne!(fp1, fp_nullable);
 
         // Column None creates table-level fingerprint
@@ -394,12 +400,20 @@ mod tests {
 
     #[test]
     fn group_by_columns_are_linked() {
-        assert_links("SELECT 1 FROM orders GROUP BY created_at", "orders", "created_at");
+        assert_links(
+            "SELECT 1 FROM orders GROUP BY created_at",
+            "orders",
+            "created_at",
+        );
     }
 
     #[test]
     fn order_by_columns_are_linked() {
-        assert_links("SELECT 1 FROM orders ORDER BY created_at", "orders", "created_at");
+        assert_links(
+            "SELECT 1 FROM orders ORDER BY created_at",
+            "orders",
+            "created_at",
+        );
     }
 
     #[test]

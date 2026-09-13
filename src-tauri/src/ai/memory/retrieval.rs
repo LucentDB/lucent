@@ -1,11 +1,11 @@
-use std::collections::HashMap;
 use rusqlite::Connection;
+use std::collections::HashMap;
 
-use crate::ai::rerank::Rerank;
-use crate::ai::schema_graph::SchemaGraph;
 use super::decay::{calculate_retention, calculate_viability};
 use super::drift::validate_live_schema_gate;
 use super::{GoldenQuery, MemoryItem, MemoryStatus, HOT_TIER_TOKEN_BUDGET};
+use crate::ai::rerank::Rerank;
+use crate::ai::schema_graph::SchemaGraph;
 
 pub const RRF_K: f32 = 60.0;
 pub const MAX_RETRIEVED_MEMORIES: usize = 3;
@@ -110,10 +110,8 @@ pub fn score_hybrid_candidates(
             if let Ok(rows) = s.query_map(rusqlite::params![&fts_expr, connection_key], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
             }) {
-                let mut rank = 1;
-                for row_res in rows.flatten() {
+                for (rank, row_res) in (1..).zip(rows.flatten()) {
                     bm25_ranks.insert(row_res.0, rank);
-                    rank += 1;
                 }
             }
         }
@@ -487,8 +485,9 @@ mod tests {
         use crate::ai::memory::{live_gate_call_count, reset_live_gate_call_count};
         let conn = Connection::open_in_memory().unwrap();
         let graph = empty_graph();
-        let memories: Vec<MemoryItem> =
-            (0..25).map(|i| sample_memory(&format!("mem_{i}"))).collect();
+        let memories: Vec<MemoryItem> = (0..25)
+            .map(|i| sample_memory(&format!("mem_{i}")))
+            .collect();
 
         reset_live_gate_call_count();
         // No embedding and no FTS table → every candidate's RRF score is 0.

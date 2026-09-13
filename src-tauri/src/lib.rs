@@ -235,11 +235,17 @@ pub fn run() {
                 let state = app_handle.state::<commands::AppState>();
                 tauri::async_runtime::block_on(state.indexing.stop_all());
                 tauri::async_runtime::block_on(async {
-                    let _ = state.memory_manager.with_connection(|conn| {
-                        let _ = crate::ai::memory::consolidation::prune_old_session_json(conn, 14);
-                        let _ = crate::ai::memory::consolidation::soft_archive_decayed_memories(conn);
-                        Ok(())
-                    }).await;
+                    let _ = state
+                        .memory_manager
+                        .with_connection(|conn| {
+                            let _ =
+                                crate::ai::memory::consolidation::prune_old_session_json(conn, 14);
+                            let _ = crate::ai::memory::consolidation::soft_archive_decayed_memories(
+                                conn,
+                            );
+                            Ok(())
+                        })
+                        .await;
                 });
             }
         });

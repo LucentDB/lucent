@@ -7,7 +7,8 @@
     databaseName?: string;
   }
 
-  let { connectionName = 'Active Connection', databaseName = '' }: Props = $props();
+  let { connectionName = 'Active Connection', databaseName = '' }: Props =
+    $props();
 
   let widgetRef = $state<HTMLElement | null>(null);
 
@@ -24,7 +25,11 @@
 
   $effect(() => {
     function onDocClick(e: MouseEvent) {
-      if (indexing.detailsOpen && widgetRef && !widgetRef.contains(e.target as Node)) {
+      if (
+        indexing.detailsOpen &&
+        widgetRef &&
+        !widgetRef.contains(e.target as Node)
+      ) {
         indexing.toggleDetails(false);
       }
     }
@@ -44,7 +49,9 @@
     class:popover-open={indexing.detailsOpen}
     onclick={handleClick}
     aria-label="Schema indexing status"
-    title={indexing.isComplete ? 'Schema indexing up to date (Click for details)' : indexing.text}
+    title={indexing.isComplete
+      ? 'Schema indexing up to date (Click for details)'
+      : indexing.text}
   >
     {#if !indexing.isComplete}
       <span class="spinner-icon" aria-hidden="true"></span>
@@ -58,10 +65,21 @@
         {/if}
       </span>
       <div class="micro-progress">
-        <div class="micro-progress-fill" style="width: {indexing.percent}%"></div>
+        <div
+          class="micro-progress-fill"
+          style="width: {indexing.percent}%"
+        ></div>
       </div>
     {:else}
-      <svg class="idle-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <svg
+        class="idle-icon"
+        width="12"
+        height="12"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+      >
         <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
         <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
         <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
@@ -103,7 +121,9 @@
     cursor: pointer;
     position: relative;
     user-select: none;
-    transition: background var(--transition-fast), color var(--transition-fast);
+    transition:
+      background var(--transition-fast),
+      color var(--transition-fast);
   }
 
   .status-widget-btn:hover,
@@ -126,7 +146,9 @@
   }
 
   @keyframes widget-spin {
-    to { transform: rotate(360deg); }
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .idle-icon {
