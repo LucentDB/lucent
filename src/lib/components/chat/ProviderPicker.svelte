@@ -36,7 +36,14 @@
   // cards fall back to this tint instead of crashing on an undefined lookup.
   const ACP_BRAND = { color: '#8b5cf6', tint: 'rgba(139,92,246,0.12)' };
 
-  let allOptions = $derived([
+  type ProviderOption = {
+    id: string;
+    label: string;
+    group: string;
+    sub?: string;
+  };
+
+  let allOptions = $derived<ProviderOption[]>([
     ...PROVIDERS,
     ...installedAgents.map((a) => ({
       id: 'acp',
@@ -57,19 +64,16 @@
 
   // Cards are keyed by agent id when present, because several ACP cards
   // share the provider id `acp`.
-  function cardKey(p: { id: string; sub?: string }) {
+  function cardKey(p: ProviderOption) {
     return p.sub ?? p.id;
   }
 
-  function pick(p: { id: string; sub?: string }) {
+  function pick(p: ProviderOption) {
     if (p.sub !== undefined) onChange(p.id, p.sub);
     else onChange(p.id);
   }
 
-  function handleGridKeydown(
-    options: { id: string; sub?: string }[],
-    e: KeyboardEvent,
-  ) {
+  function handleGridKeydown(options: ProviderOption[], e: KeyboardEvent) {
     const keys = options.map(cardKey);
     const focusedIdx = keys.findIndex(
       (k) => cards[k] === document.activeElement,
@@ -128,7 +132,9 @@
           aria-label={p.sub !== undefined ? `${p.label} — ${p.sub}` : p.label}
           bind:this={cards[cardKey(p)]}
           onclick={() => pick(p)}
-          style="--provider-tint: {(PROVIDER_BRANDS[p.id] ?? ACP_BRAND).tint};"
+          style="--provider-tint: {(
+            PROVIDER_BRANDS[p.id as keyof typeof PROVIDER_BRANDS] ?? ACP_BRAND
+          ).tint};"
         >
           <span class="logo-tile">
             <ProviderLogo provider={p.id} size={13} />
