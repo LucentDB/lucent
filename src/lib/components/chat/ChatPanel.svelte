@@ -3,11 +3,15 @@
   import ChatInput from './ChatInput.svelte';
   import ChatLanding from './ChatLanding.svelte';
   import TypingIndicator from './TypingIndicator.svelte';
+  import MemoryDrawer from './MemoryDrawer.svelte';
   import {
     chat,
     getConversationTitle,
     formatUsageLine,
   } from '../../stores/chat.svelte.ts';
+
+  let showMemoryDrawer = $state(false);
+  let memoryTriggerEl = $state<HTMLButtonElement | null>(null);
 
   let {
     onSend,
@@ -84,14 +88,21 @@
           title={getConversationTitle(c)}
         >
           <span class="conv-tab-label">{getConversationTitle(c)}</span>
-          <!-- svelte-ignore a11y_click_events_have_key_events -->
           <span
             class="conv-tab-close"
             role="button"
-            tabindex="-1"
+            tabindex="0"
+            aria-label={`Close ${getConversationTitle(c)}`}
             onclick={(e) => {
               e.stopPropagation();
               onCloseConv?.(c.id);
+            }}
+            onkeydown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                e.stopPropagation();
+                onCloseConv?.(c.id);
+              }
             }}>×</span
           >
         </button>
@@ -106,6 +117,27 @@
       </span>
     {/if}
     <div class="panel-actions">
+      <button
+        class="panel-icon-btn"
+        class:active={showMemoryDrawer}
+        bind:this={memoryTriggerEl}
+        onclick={() => (showMemoryDrawer = !showMemoryDrawer)}
+        title="AI Memory & Rules (Cmd+Shift+M)"
+      >
+        <svg
+          width="13"
+          height="13"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8z" />
+          <path d="M12 6v6l4 2" />
+        </svg>
+      </button>
       <button
         class="panel-icon-btn"
         onclick={onNewChat}
@@ -176,6 +208,7 @@
             {onCancelDml}
             {onAllowPermission}
             {onRejectPermission}
+            onOpenMemoryDrawer={() => (showMemoryDrawer = true)}
             grouped={i > 0 && conv!.messages[i - 1].role === m.role}
             conversationId={conv!.id}
           />
@@ -199,6 +232,12 @@
       />
     {/if}
   </div>
+
+  <MemoryDrawer
+    bind:isOpen={showMemoryDrawer}
+    connectionId={conv?.connectionId}
+    triggerEl={memoryTriggerEl}
+  />
 </aside>
 
 <style>

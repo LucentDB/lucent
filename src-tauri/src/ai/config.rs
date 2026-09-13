@@ -87,6 +87,19 @@ pub struct AiConfig {
     /// ACP provider selection. `None` keeps the rig/provider-key path.
     #[serde(default)]
     pub acp: Option<AcpAgentConfig>,
+    /// Global kill-switch for AI memory lifecycle subsystem.
+    #[serde(default = "default_enable_ai_memory")]
+    pub enable_ai_memory: bool,
+    /// Per-connection kill-switch: connection keys where memory retrieval/injection is disabled.
+    #[serde(default)]
+    pub disabled_memory_connections: std::collections::HashSet<String>,
+}
+
+impl AiConfig {
+    /// Checks whether AI memory is active for a given connection (both global and per-connection kill-switches).
+    pub fn is_memory_enabled(&self, connection_id: &str) -> bool {
+        self.enable_ai_memory && !self.disabled_memory_connections.contains(connection_id)
+    }
 }
 
 fn default_schema_cache_ttl() -> u64 {
@@ -100,6 +113,9 @@ fn default_sample_column_values() -> bool {
 }
 fn default_ai_query_timeout_secs() -> u64 {
     60
+}
+fn default_enable_ai_memory() -> bool {
+    true
 }
 
 impl Default for AiConfig {
@@ -118,6 +134,8 @@ impl Default for AiConfig {
             ai_query_timeout_secs: 60,
             provider_models: HashMap::new(),
             acp: None,
+            enable_ai_memory: true,
+            disabled_memory_connections: std::collections::HashSet::new(),
         }
     }
 }
@@ -269,6 +287,21 @@ mod tests {
     fn keychain_account_has_acp_arm() {
         // Loader must never be called for Acp, but the match must compile and return a marker.
         assert_eq!(keychain_account(&AiProvider::Acp), "acp-agent"); // placeholder, never consulted
+    }
+
+    #[test]
+    fn test_memory_kill_switches() {
+        let mut cfg = AiConfig::default();
+        assert!(cfg.is_memory_enabled("conn_1"));
+
+        // Per-connection kill switch
+        cfg.disabled_memory_connections.insert("conn_1".into());
+        assert!(!cfg.is_memory_enabled("conn_1"));
+        assert!(cfg.is_memory_enabled("conn_2"));
+
+        // Global kill switch overrides all
+        cfg.enable_ai_memory = false;
+        assert!(!cfg.is_memory_enabled("conn_2"));
     }
 
     #[test]

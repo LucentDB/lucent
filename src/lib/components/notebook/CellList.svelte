@@ -145,12 +145,13 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 48px 24px;
-    gap: 16px;
+    padding: 64px 32px;
+    gap: 20px;
   }
   .empty-text {
     color: var(--text-muted);
-    font-size: var(--text-sm);
+    font-size: var(--text-md);
+    letter-spacing: -0.01em;
     margin: 0;
   }
 </style>

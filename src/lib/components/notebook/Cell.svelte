@@ -275,7 +275,7 @@
     background: color-mix(in srgb, var(--accent) 2%, transparent);
   }
   .cell.selected {
-    background: color-mix(in srgb, var(--accent) 4%, transparent);
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
   }
   /* Selection state indicator, the notebook convention (Jupyter, Databricks,
      VS Code all mark the active row on its leading edge). State, not decoration. */
@@ -285,7 +285,8 @@
     left: 0;
     top: 0;
     bottom: 0;
-    width: 2px;
+    width: 3px;
+    border-radius: 0 2px 2px 0;
     background: transparent;
     transition: background 0.15s;
   }
@@ -312,6 +313,7 @@
     );
     background-size: 200% 100%;
     animation: shimmer 1.4s linear infinite;
+    filter: drop-shadow(0 0 3px var(--accent));
     z-index: 1;
   }
   @keyframes shimmer {
@@ -335,17 +337,19 @@
     flex: 1;
     min-width: 0;
     position: relative;
-    padding: 4px 10px 6px 0;
+    padding: 8px 12px 10px 0;
   }
 
   .cell-input-card {
     position: relative;
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     background: var(--bg-elevated);
+    box-shadow: var(--shadow-sm);
     transition:
       border-color var(--transition-normal),
-      background var(--transition-normal);
+      background var(--transition-normal),
+      box-shadow var(--transition-normal);
   }
   /* Selection is a border, not a glow. The 3px accent halo this replaces was
      the loudest single thing on screen and the clearest sign the app was a
@@ -371,7 +375,7 @@
   }
 
   .cell-content {
-    padding: 2px 4px 2px 4px;
+    padding: 4px 8px;
   }
 
   /* ─── Collapsed summary ──────────────────────────────────────── */
@@ -380,16 +384,18 @@
     align-items: center;
     gap: 12px;
     width: 100%;
-    min-height: 32px;
-    padding: 6px 12px;
+    min-height: 36px;
+    padding: 8px 14px;
     border: none;
     background: none;
     color: var(--text-secondary);
     text-align: left;
     cursor: pointer;
+    border-radius: var(--radius-sm);
   }
   .collapsed-summary:hover {
     color: var(--text);
+    background: color-mix(in srgb, var(--accent) 3%, transparent);
   }
   .collapsed-summary:focus-visible {
     outline: 2px solid var(--accent);
@@ -422,9 +428,9 @@
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    padding: 8px 12px;
-    margin-top: 4px;
-    border-radius: var(--radius-sm);
+    padding: 10px 14px;
+    margin-top: 6px;
+    border-radius: var(--radius-md);
     background: color-mix(in srgb, var(--danger) 8%, transparent);
     border: 1px solid color-mix(in srgb, var(--danger) 25%, transparent);
     font-size: var(--text-xs);
@@ -445,9 +451,9 @@
      themselves stay on the plain surface: the embedded grid is transparent, so
      tinting the whole region would wash over the data. */
   .cell-output {
-    margin-top: 6px;
+    margin-top: 8px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     overflow: hidden;
     background: var(--bg-surface);
   }
@@ -458,8 +464,8 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    min-height: 26px;
-    padding: 3px 10px;
+    min-height: 30px;
+    padding: 4px 12px;
     font-size: var(--text-xs);
     color: var(--text-muted);
     background: var(--bg-subtle);
@@ -477,8 +483,8 @@
     text-transform: uppercase;
     color: var(--accent);
     background: var(--accent-soft);
-    padding: 1px 6px;
-    border-radius: var(--radius-sm);
+    padding: 2px 8px;
+    border-radius: var(--radius-full);
     white-space: nowrap;
   }
   .out-duration {

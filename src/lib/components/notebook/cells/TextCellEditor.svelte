@@ -180,7 +180,7 @@
   .toolbar {
     display: flex;
     gap: 2px;
-    padding: 4px 8px;
+    padding: 5px 10px;
     border-bottom: 1px solid var(--border);
     background: var(--bg-subtle);
   }
@@ -188,8 +188,8 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 28px;
-    height: 26px;
+    min-width: 30px;
+    height: 28px;
     border: none;
     border-radius: var(--radius-sm);
     background: transparent;
@@ -207,8 +207,8 @@
   .editor {
     display: block;
     width: 100%;
-    min-height: 72px;
-    padding: 10px 14px;
+    min-height: 76px;
+    padding: 12px 16px;
     border: none;
     background: transparent;
     color: var(--text);
@@ -227,8 +227,8 @@
   .display {
     display: block;
     width: 100%;
-    padding: 10px 14px;
-    min-height: 36px;
+    padding: 12px 16px;
+    min-height: 38px;
     border: none;
     background: transparent;
     color: var(--text);

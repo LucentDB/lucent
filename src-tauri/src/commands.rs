@@ -38,6 +38,7 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
         if let crate::ai::events::AiEvent::Done {
             conversation_id,
             usage,
+            final_message,
             ..
         } = &event
         {
@@ -45,6 +46,24 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
             let mut entry = state.llm_usage.entry(conversation_id.clone()).or_default();
             let accumulated = accumulate_usage(&entry, usage);
             *entry = accumulated;
+
+            if !final_message.is_empty() {
+                let mem_mgr = state.memory_manager.clone();
+                let conv_id = conversation_id.clone();
+                let content = final_message.clone();
+                let now = chrono::Utc::now().timestamp();
+                tauri::async_runtime::spawn(async move {
+                    let msg = crate::ai::memory::ChatMessage {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        conversation_id: conv_id,
+                        role: "assistant".into(),
+                        content,
+                        session_json: None,
+                        created_at: now,
+                    };
+                    let _ = mem_mgr.save_message(msg).await;
+                });
+            }
         }
         let _ = self.channel.send(event);
     }
@@ -90,6 +109,65 @@ impl std::fmt::Display for CommandError {
     }
 }
 
+/// Test-only parking gate for the memory embedder's lazy initialization.
+/// `get_or_init_memory_embedder` records each arrival and then parks until the
+/// owning test aborts the task, so a prompt build can be observed *inside* the
+/// memory block without ever loading the real ONNX model.
+#[cfg(test)]
+pub struct MemoryEmbedderTestGate {
+    entered: std::sync::atomic::AtomicUsize,
+    parked: tokio::sync::Semaphore,
+    /// When set, embedder initialization reports "unavailable" immediately —
+    /// as if the ONNX model failed to load — so a test can exercise the
+    /// lexical-only memory block without downloading the 130 MB model.
+    unavailable: bool,
+}
+
+#[cfg(test)]
+impl MemoryEmbedderTestGate {
+    pub fn new() -> Self {
+        Self {
+            entered: std::sync::atomic::AtomicUsize::new(0),
+            // Zero permits: `acquire` never resolves, so parked builders only
+            // leave via task abort (and the model is never downloaded).
+            parked: tokio::sync::Semaphore::new(0),
+            unavailable: false,
+        }
+    }
+
+    /// A gate that makes embedder initialization fail fast (return `None`),
+    /// keeping the memory block's lexical retrieval path testable offline.
+    pub fn unavailable() -> Self {
+        Self {
+            entered: std::sync::atomic::AtomicUsize::new(0),
+            parked: tokio::sync::Semaphore::new(0),
+            unavailable: true,
+        }
+    }
+
+    /// How many builders have reached embedder initialization.
+    pub fn entered(&self) -> usize {
+        self.entered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn is_unavailable(&self) -> bool {
+        self.unavailable
+    }
+
+    async fn arrive_and_park(&self) {
+        self.entered
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.parked.acquire().await;
+    }
+}
+
+#[cfg(test)]
+impl Default for MemoryEmbedderTestGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct AppState {
     /// Connection profiles and SSH configs repository.
     pub repo: Arc<ConnectionProfileRepository>,
@@ -121,13 +199,35 @@ pub struct AppState {
     pub editor_query: Mutex<Option<(QueryId, ConnectionId)>>,
     pub current_database: Mutex<Option<String>>,
     pub current_connection_config: Mutex<Option<lucent_protocol::ConnectionConfig>>,
+    /// The connection key the memory subsystem actually uses for the live
+    /// connection: the profile id when a profile is connected, else the
+    /// frontend's inline `host:port/database` key (App.svelte's
+    /// `activeConnectionId`). Distinct from the vector-cache `connection_key`
+    /// (`cache_store::connection_key_for`); used to scope the Gate 1 drift
+    /// cascade to the keys `memories.connection_key` actually holds. `None`
+    /// when disconnected.
+    pub memory_connection_key: Mutex<Option<String>>,
     // AI module state
     pub conversations: DashMap<String, Arc<Mutex<ConversationState>>>,
     pub ai_config: Arc<RwLock<AiConfig>>,
     pub schema_cache: Arc<SchemaCache>,
     pub schema_graph: Arc<Mutex<Option<crate::ai::schema_graph::SchemaGraph>>>,
     pub embedder: Arc<Mutex<Option<crate::ai::embed::Embedder>>>,
+    /// Lazily-initialized 512-token memory embedder. `OnceCell` (not a
+    /// `Mutex<Option<_>>`) so no lock is held across the 130 MB model
+    /// download/load: concurrent readers of an already-initialized embedder
+    /// are never blocked, and a failed init leaves the cell empty so a later
+    /// call retries (see B-I9).
+    pub memory_embedder: Arc<tokio::sync::OnceCell<crate::ai::embed::Embedder>>,
+    /// Test-only seam: when set, `get_or_init_memory_embedder` parks at the
+    /// top before any lock or model work. The lock-scope (α) and concurrency
+    /// (ζ) regression tests use it to hold a prompt build inside the memory
+    /// block without triggering a real 130 MB model download. Always `None`
+    /// in production.
+    #[cfg(test)]
+    pub memory_embedder_test_gate: Option<Arc<MemoryEmbedderTestGate>>,
     pub reranker: Arc<Mutex<Option<crate::ai::rerank::Reranker>>>,
+    pub memory_manager: Arc<crate::ai::memory::MemoryManager>,
     /// Paths the user explicitly chose in a native save dialog this session or
     /// a previous one (persisted to `<config_dir>/lucent/approved_save_paths.json`).
     /// Write commands only ever touch paths in this set — the frontend is an
@@ -191,13 +291,23 @@ impl AppState {
             editor_query: Mutex::new(None),
             current_database: Mutex::new(None),
             current_connection_config: Mutex::new(None),
+            memory_connection_key: Mutex::new(None),
             driver_capabilities: Mutex::new(None),
             conversations: DashMap::new(),
             schema_cache: Arc::new(SchemaCache::new(ai_config.schema_cache_ttl_secs)),
             ai_config: Arc::new(RwLock::new(ai_config)),
             schema_graph: Arc::new(Mutex::new(None)),
             embedder: Arc::new(Mutex::new(None)),
+            memory_embedder: Arc::new(tokio::sync::OnceCell::new()),
+            #[cfg(test)]
+            memory_embedder_test_gate: None,
             reranker: Arc::new(Mutex::new(None)),
+            memory_manager: Arc::new(
+                crate::ai::memory::MemoryManager::open_default().unwrap_or_else(|e| {
+                    log::warn!("memory db unavailable, falling back to in-memory: {e}");
+                    crate::ai::memory::MemoryManager::open_in_memory().expect("in-memory memory db opens")
+                }),
+            ),
             approved_save_paths: Arc::new(Mutex::new(load_approved_paths())),
             api_key_cache: Arc::new(RwLock::new(None)),
             password_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -224,6 +334,44 @@ impl AppState {
     /// Clone the connected driver's capabilities. `None` when disconnected.
     pub async fn capabilities(&self) -> Option<lucent_protocol::DriverCapabilities> {
         self.driver_capabilities.lock().await.clone()
+    }
+
+    /// Returns or lazily initializes the 512-token memory embedder.
+    ///
+    /// The data lock is never held across the model load: `OnceCell` lets
+    /// concurrent callers share one initialization without any caller
+    /// blocking a reader of an already-loaded embedder (B-I9). A failed init
+    /// leaves the cell uninitialized, so a later call retries.
+    pub async fn get_or_init_memory_embedder(&self) -> Option<crate::ai::embed::Embedder> {
+        #[cfg(test)]
+        {
+            if let Some(gate) = &self.memory_embedder_test_gate {
+                if gate.is_unavailable() {
+                    return None;
+                }
+                gate.arrive_and_park().await;
+            }
+        }
+        match self
+            .memory_embedder
+            .get_or_try_init(|| async {
+                match tokio::task::spawn_blocking(crate::ai::embed::Embedder::new_memory).await {
+                    Ok(Ok(model)) => Ok(model),
+                    Ok(Err(e)) => {
+                        log::warn!("failed to init memory embedder: {e}");
+                        Err(())
+                    }
+                    Err(e) => {
+                        log::warn!("panic in memory embedder init: {e}");
+                        Err(())
+                    }
+                }
+            })
+            .await
+        {
+            Ok(embedder) => Some(embedder.clone()),
+            Err(()) => None,
+        }
     }
 }
 
@@ -624,6 +772,9 @@ async fn connect_impl(
         *client_lock = None;
         // The AI session dies with the old client.
         *state.ai_connection_id.lock().await = None;
+        // The memory key names the old connection; a failed reconnect must not
+        // leave it pointing at stale memories.
+        *state.memory_connection_key.lock().await = None;
     }
 
     // Invalidate schema cache for old connection
@@ -803,6 +954,14 @@ async fn connect_impl(
     // Start the background indexer now that session B exists: the sampling
     // connection id captured here is real (Some on success, None on B-failure
     // fallback), so enrich samples on B — never on the editor session.
+    //
+    // The memory subsystem keys memories by the frontend-visible connection id
+    // (profile id, else host:port/database), NOT the vector-cache hash. Store
+    // it for sync_schema_indexing and pass it to the indexer so the Gate 1
+    // drift cascade scopes to the keys memories are actually stored under.
+    let memory_connection_key = memory_connection_key_for(profile_id, &resolved);
+    *state.memory_connection_key.lock().await = Some(memory_connection_key.clone());
+
     if let Some((graph, snapshot, config, connection_key, capabilities)) = pending_index {
         let sampling_conn = *state.ai_connection_id.lock().await;
         state
@@ -820,7 +979,9 @@ async fn connect_impl(
                 None, // no override in production
                 config,
                 connection_key,
+                memory_connection_key,
                 capabilities,
+                state.memory_manager.clone(),
             )
             .await;
     }
@@ -992,6 +1153,28 @@ pub fn display_database(config: &lucent_protocol::ConnectionConfig) -> String {
         .or_else(|| config.get("path"))
         .unwrap_or("")
         .to_string()
+}
+
+/// The connection key the memory subsystem stores and retrieves under: the
+/// profile id when a profile is connected, else the frontend's inline
+/// `host:port/database` key (App.svelte's `activeConnectionId`, built from the
+/// connection form's fields). This is deliberately NOT the vector-cache
+/// `connection_key_for` hash — the Gate 1 drift cascade must match the keys
+/// `memories.connection_key` actually holds, or it silently invalidates
+/// nothing.
+pub fn memory_connection_key_for(
+    profile_id: Option<&str>,
+    config: &ConnectionConfig,
+) -> String {
+    if let Some(id) = profile_id {
+        return id.to_string();
+    }
+    format!(
+        "{}:{}/{}",
+        config.get("host").unwrap_or(""),
+        config.get("port").unwrap_or(""),
+        config.get("database").unwrap_or("")
+    )
 }
 
 /// Probe a connection config through a dedicated, short-lived worker process.
@@ -1438,9 +1621,14 @@ pub async fn execute_query(
     sql: String,
     limit: i64,
     offset: i64,
-    sort: Option<crate::query_paging::SortSpec>,
+    // The wire sort became a LIST (multi-key ORDER BY). Tauri command params
+    // cannot carry `#[serde(default)]`, and Option<T> is the framework's
+    // absent/null-tolerant form — so the list arrives wrapped and defaults to
+    // empty, which is exactly what the old Option<SortSpec> gave clients.
+    sort: Option<Vec<crate::query_paging::SortSpec>>,
     filters: Vec<crate::query_paging::FilterSpec>,
 ) -> Result<ExecuteResult, CommandError> {
+    let sort = sort.unwrap_or_default();
     let conn_id = (*state.current_connection_id.lock().await)
         .ok_or_else(|| CommandError::new("QueryError", "not connected — connect first"))?;
     let client = state
@@ -1630,6 +1818,108 @@ pub async fn get_editor_schema(
     Ok(object_details_to_editor_tables(details))
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaIndexingStatus {
+    pub has_graph: bool,
+    pub tier: Option<String>,
+    pub table_count: usize,
+    pub column_count: usize,
+    pub view_count: usize,
+    pub built_at_unix: i64,
+}
+
+#[tauri::command]
+pub async fn get_schema_indexing_status(
+    state: State<'_, AppState>,
+) -> Result<SchemaIndexingStatus, CommandError> {
+    let graph_opt = state.schema_graph.lock().await.clone();
+    match graph_opt {
+        Some(graph) => {
+            let view_count = graph
+                .tables
+                .iter()
+                .filter(|t| t.kind == "view" || t.kind == "matview")
+                .count();
+            let tier_str = match graph.tier {
+                crate::ai::schema_graph::IndexingTier::MetadataOnly => "metadata_only",
+                crate::ai::schema_graph::IndexingTier::FullyEnriched => "fully_enriched",
+            };
+            Ok(SchemaIndexingStatus {
+                has_graph: true,
+                tier: Some(tier_str.into()),
+                table_count: graph.tables.len(),
+                column_count: graph.columns.len(),
+                view_count,
+                built_at_unix: graph.built_at_unix,
+            })
+        }
+        None => Ok(SchemaIndexingStatus {
+            has_graph: false,
+            tier: None,
+            table_count: 0,
+            column_count: 0,
+            view_count: 0,
+            built_at_unix: 0,
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn sync_schema_indexing(
+    force_rebuild: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<(), CommandError> {
+    let conn_id = (*state.current_connection_id.lock().await)
+        .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
+    let client = state
+        .client_handle()
+        .await
+        .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
+    let capabilities = state
+        .capabilities()
+        .await
+        .ok_or_else(|| CommandError::new("QueryError", "capabilities not available"))?;
+    let ai_cfg = state.ai_config.read().await.clone();
+    let resolved = state
+        .current_connection_config
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| CommandError::new("QueryError", "connection config not found"))?;
+    let connection_key = crate::ai::cache_store::connection_key_for(&resolved);
+    // The memory key is captured at connect time (profile id or the inline
+    // host:port/database key) — it is NOT the cache key.
+    let memory_connection_key = state
+        .memory_connection_key
+        .lock()
+        .await
+        .clone()
+        .unwrap_or_default();
+    let sampling_conn = *state.ai_connection_id.lock().await;
+
+    state
+        .indexing
+        .sync_delta(
+            conn_id,
+            client,
+            sampling_conn,
+            state.schema_graph.clone(),
+            state.current_connection_id.clone(),
+            state.embedder.clone(),
+            Arc::new(ai_cfg),
+            connection_key,
+            memory_connection_key,
+            capabilities,
+            force_rebuild.unwrap_or(false),
+            state.memory_manager.clone(),
+        )
+        .await
+        .map_err(|e| CommandError::new("QueryError", e))?;
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn disconnect(state: State<'_, AppState>) -> Result<DisconnectResult, CommandError> {
     log::info!("Disconnecting");
@@ -1660,6 +1950,7 @@ pub async fn disconnect(state: State<'_, AppState>) -> Result<DisconnectResult, 
     *state.ai_connection_id.lock().await = None;
     *state.current_database.lock().await = None;
     *state.driver_capabilities.lock().await = None;
+    *state.memory_connection_key.lock().await = None;
 
     // Notebook sessions hold ConnectionIds into the dying worker; clear them
     // so attach/restart fails fast instead of against dead connections.
@@ -1821,9 +2112,12 @@ pub async fn browse_table(
     name: String,
     limit: i64,
     offset: i64,
-    sort: Option<crate::query_paging::SortSpec>,
+    // Same list-shaped wire sort as execute_query: Option-wrapped because
+    // tauri params cannot take #[serde(default)].
+    sort: Option<Vec<crate::query_paging::SortSpec>>,
     filters: Vec<crate::query_paging::FilterSpec>,
 ) -> Result<ExecuteResult, CommandError> {
+    let sort = sort.unwrap_or_default();
     let conn_id = (*state.current_connection_id.lock().await)
         .ok_or_else(|| CommandError::new("QueryError", "not connected"))?;
     let client = state
@@ -2054,49 +2348,124 @@ async fn build_system_prompt(
     state: &AppState,
     connection_id: &str,
 ) -> (String, crate::ai::mschema::ContextTier) {
+    let (prompt, tier, _) = build_system_prompt_with_query(state, connection_id, None).await;
+    (prompt, tier)
+}
+
+/// Returns the built prompt, the context tier, and the number of learned
+/// memory rules injected (F-C2). The count is `0` when memory is disabled or
+/// no query was supplied; it flows to the turn's `Done` event.
+async fn build_system_prompt_with_query(
+    state: &AppState,
+    connection_id: &str,
+    query: Option<&str>,
+) -> (String, crate::ai::mschema::ContextTier, usize) {
+    // Static prompt + tier selection happen under the schema_graph lock. The
+    // guard is scoped to this block and dropped before any memory work:
+    // embedding can download/run a 130 MB ONNX model, retrieval reads SQLite,
+    // and reranking runs a second ONNX model. Holding the central schema lock
+    // across any of that stalls autocomplete, the schema tree, background
+    // indexing, and tools. The graph is cloned so Gate 2's live-schema
+    // validation survives the narrowed lock.
     log::info!("Acquiring schema graph for system prompt");
-    let graph_guard = state.schema_graph.lock().await;
-    log::info!("Schema graph locked, building tier");
-    let tier = graph_guard
-        .as_ref()
-        .map(|g| crate::ai::mschema::select_tier(g).0)
-        .unwrap_or(crate::ai::mschema::ContextTier::Pull);
-    log::info!("Tier selected: {:?}", tier);
-    let capabilities = state.capabilities().await;
-    let current_db = state.current_database.lock().await.clone();
-    let prompt = if let Some(mut tree) = state.schema_cache.get(connection_id) {
-        if let Some(db) = &current_db {
-            if tree.database_name.is_empty() || tree.database_name == connection_id {
-                tree.database_name = db.clone();
+    let (mut prompt, tier, graph_snapshot) = {
+        let graph_guard = state.schema_graph.lock().await;
+        log::info!("Schema graph locked, building tier");
+        let tier = graph_guard
+            .as_ref()
+            .map(|g| crate::ai::mschema::select_tier(g).0)
+            .unwrap_or(crate::ai::mschema::ContextTier::Pull);
+        log::info!("Tier selected: {:?}", tier);
+        let capabilities = state.capabilities().await;
+        let current_db = state.current_database.lock().await.clone();
+        let prompt = if let Some(mut tree) = state.schema_cache.get(connection_id) {
+            if let Some(db) = &current_db {
+                if tree.database_name.is_empty() || tree.database_name == connection_id {
+                    tree.database_name = db.clone();
+                }
+            }
+            let p = crate::ai::context::build_system_prompt(
+                &tree,
+                graph_guard.as_ref(),
+                capabilities.as_ref(),
+            );
+            log::debug!("System prompt built ({} bytes, tier {:?})", p.len(), tier);
+            p
+        } else if let Some(g) = graph_guard.as_ref() {
+            log::info!(
+                "Schema tree expired for {connection_id}; rendering system prompt from in-memory graph"
+            );
+            let db_name =
+                current_db.unwrap_or_else(|| crate::ai::context::parse_database_name(connection_id));
+            let version = state
+                .client_handle()
+                .await
+                .and_then(|c| c.server_info.map(|s| s.version))
+                .unwrap_or_default();
+            let tree = crate::ai::context::tree_from_graph_with_version(db_name, version, g);
+            crate::ai::context::build_system_prompt(&tree, Some(g), capabilities.as_ref())
+        } else {
+            log::warn!(
+                "Schema cache miss for connection {connection_id} and no schema graph available"
+            );
+            "Database context not yet loaded.".into()
+        };
+        (prompt, tier, graph_guard.clone())
+    }; // graph_guard dropped here — no inference, SQLite, or reranker work under it
+
+    // Hot-Tier Memory Block Injection (P0 - G-1). Runs after the schema lock is
+    // released; also see B-I9 for the embedder init lock. The reranker lock is
+    // taken only after the schema lock is dropped (no inversion hazard).
+    let enable_memory = state.ai_config.read().await.is_memory_enabled(connection_id);
+    let mut applied_memory_count = 0usize;
+    if enable_memory {
+        if let Some(user_query) = query {
+            let q_vec = if let Some(emb) = state.get_or_init_memory_embedder().await {
+                emb.embed_query(user_query).await.ok()
+            } else {
+                let emb_guard = state.embedder.lock().await;
+                if let Some(emb) = emb_guard.as_ref() {
+                    emb.embed_query(user_query).await.ok()
+                } else {
+                    None
+                }
+            };
+
+            if let Ok(active_memories) = state.memory_manager.list_memories(connection_id, false).await {
+                let reranker_guard = state.reranker.lock().await;
+                let retrieved = state
+                    .memory_manager
+                    .retrieve_hybrid_memories(
+                        user_query,
+                        connection_id,
+                        q_vec.as_deref(),
+                        graph_snapshot.as_ref(),
+                        reranker_guard.as_ref(),
+                        &active_memories,
+                    )
+                    .await;
+
+                let golden = if let Ok(all_golden) = state.memory_manager.list_golden_queries(connection_id).await {
+                    crate::ai::memory::retrieve_golden_queries(q_vec.as_deref(), &all_golden)
+                } else {
+                    Vec::new()
+                };
+
+                for m in &retrieved {
+                    let _ = state.memory_manager.reinforce_memory_access(&m.id).await;
+                }
+
+                // F-C2: report exactly the rules the block injected.
+                applied_memory_count = retrieved.len();
+
+                if let Some(mem_block) = crate::ai::context::format_memory_block(&retrieved, &golden) {
+                    prompt.push_str(&mem_block);
+                }
             }
         }
-        let p = crate::ai::context::build_system_prompt(
-            &tree,
-            graph_guard.as_ref(),
-            capabilities.as_ref(),
-        );
-        log::debug!("System prompt built ({} bytes, tier {:?})", p.len(), tier);
-        p
-    } else if let Some(g) = graph_guard.as_ref() {
-        log::info!(
-            "Schema tree expired for {connection_id}; rendering system prompt from in-memory graph"
-        );
-        let db_name =
-            current_db.unwrap_or_else(|| crate::ai::context::parse_database_name(connection_id));
-        let version = state
-            .client_handle()
-            .await
-            .and_then(|c| c.server_info.map(|s| s.version))
-            .unwrap_or_default();
-        let tree = crate::ai::context::tree_from_graph_with_version(db_name, version, g);
-        crate::ai::context::build_system_prompt(&tree, Some(g), capabilities.as_ref())
-    } else {
-        log::warn!(
-            "Schema cache miss for connection {connection_id} and no schema graph available"
-        );
-        "Database context not yet loaded.".into()
-    };
-    (prompt, tier)
+    }
+
+    (prompt, tier, applied_memory_count)
 }
 
 /// Lazily initializes the cross-encoder reranker (a second ONNX model
@@ -2158,6 +2527,7 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
     conversation_id: String,
     message: String,
     system_prompt: String,
+    applied_memory_count: usize,
 ) -> Result<(), String> {
     let conv = state
         .conversations
@@ -2252,11 +2622,13 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
     let tool_ctx = AiToolContext {
         db: state.client.clone(),
         connection_id: ai_conn_id.or(*state.current_connection_id.lock().await),
+        memory_connection_key: state.memory_connection_key.lock().await.clone(),
         capabilities: state.capabilities().await,
         config: config.clone(),
         schema_graph: state.schema_graph.clone(),
         embedder: state.embedder.clone(),
         reranker: state.reranker.clone(),
+        memory_manager: state.memory_manager.clone(),
     };
 
     // Pre-flight: augment the message with value hints and retrieved schema
@@ -2308,6 +2680,7 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
             conv,
             sink,
             cancel,
+            applied_memory_count,
         ),
     )
     .await;
@@ -2467,7 +2840,39 @@ async fn ai_chat_impl(
         "ai_chat: conversation={conversation_id}, message_len={}",
         message.len()
     );
-    let (system_prompt, _context_tier) = build_system_prompt(&state, &connection_id).await;
+
+    let now = chrono::Utc::now().timestamp();
+    let conv_title = if message.len() > 40 {
+        format!("{}...", &message[..40])
+    } else {
+        message.clone()
+    };
+    let _ = state
+        .memory_manager
+        .save_conversation(crate::ai::memory::ChatConversation {
+            id: conversation_id.clone(),
+            connection_id: connection_id.clone(),
+            title: conv_title,
+            archived: false,
+            created_at: now,
+            updated_at: now,
+        })
+        .await;
+
+    let _ = state
+        .memory_manager
+        .save_message(crate::ai::memory::ChatMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            conversation_id: conversation_id.clone(),
+            role: "user".into(),
+            content: message.clone(),
+            session_json: None,
+            created_at: now,
+        })
+        .await;
+
+    let (system_prompt, _context_tier, applied_memory_count) =
+        build_system_prompt_with_query(&state, &connection_id, Some(&message)).await;
     log::info!("System prompt complete ({} bytes)", system_prompt.len());
 
     run_agent_turn(
@@ -2477,6 +2882,7 @@ async fn ai_chat_impl(
         conversation_id,
         message,
         system_prompt,
+        applied_memory_count,
     )
     .await
 }
@@ -2669,6 +3075,8 @@ pub async fn execute_dml(
         conversation_id.clone(),
         String::new(),
         system_prompt,
+        // Resume-after-DML builds no memory block, so no rules were applied.
+        0,
     )
     .await?;
 
@@ -2956,6 +3364,527 @@ pub async fn uninstall_acp_agent(agent_id: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn list_installed_acp_agents() -> Result<Vec<InstalledAgent>, String> {
     Ok(crate::ai::acp::install::list_installed())
+}
+
+// ── AI Memory Subsystem IPC Commands ──────────────────────────────────────────
+
+#[tauri::command]
+pub async fn list_chat_conversations(
+    state: State<'_, AppState>,
+    connection_id: Option<String>,
+) -> Result<Vec<crate::ai::memory::ChatConversation>, String> {
+    state.memory_manager.list_conversations(connection_id.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn load_chat_conversation(
+    state: State<'_, AppState>,
+    conversation_id: String,
+) -> Result<Vec<crate::ai::memory::ChatMessage>, String> {
+    state.memory_manager.list_messages(&conversation_id).await
+}
+
+#[tauri::command]
+pub async fn delete_chat_conversation(
+    state: State<'_, AppState>,
+    conversation_id: String,
+) -> Result<bool, String> {
+    state.memory_manager.delete_conversation(&conversation_id).await
+}
+
+#[tauri::command]
+pub async fn list_memories(
+    state: State<'_, AppState>,
+    connection_key: String,
+    include_archived: Option<bool>,
+) -> Result<Vec<crate::ai::memory::MemoryItem>, String> {
+    state
+        .memory_manager
+        .list_memories(&connection_key, include_archived.unwrap_or(false))
+        .await
+}
+
+#[tauri::command]
+pub async fn save_memory_manual(
+    state: State<'_, AppState>,
+    connection_key: String,
+    category: String,
+    key_phrase: String,
+    rule_text: String,
+    sql_snippet: Option<String>,
+    scope: Option<String>,
+) -> Result<crate::ai::memory::MemoryItem, String> {
+    use crate::ai::memory::security::{sanitize_rule_text, sanitize_sql_snippet, SourceTrust};
+    use crate::ai::memory::{
+        compute_memory_doc_hash, MemoryCategory, MemoryItem, MemoryScope, MemoryStatus,
+        USER_EXPLICIT_STABILITY_HOURS, MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME,
+    };
+
+    let sanitized_rule = sanitize_rule_text(&rule_text)?;
+    let sanitized_sql = sanitize_sql_snippet(sql_snippet.as_deref())?;
+
+    let cat = MemoryCategory::from_str(&category);
+    let sc = scope.as_deref().map(MemoryScope::from_str).unwrap_or(MemoryScope::Connection);
+    let now = chrono::Utc::now().timestamp();
+    let id = uuid::Uuid::new_v4().to_string();
+
+    let doc_text = format!("Context: {} {} | Rule: {}", category, key_phrase, sanitized_rule);
+    let doc_hash = compute_memory_doc_hash(&doc_text);
+
+    let embedding = if let Some(emb) = state.get_or_init_memory_embedder().await {
+        emb.embed_query(&doc_text).await.unwrap_or_default()
+    } else {
+        let emb_guard = state.embedder.lock().await;
+        if let Some(emb) = emb_guard.as_ref() {
+            emb.embed_query(&doc_text).await.unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    };
+
+    // Clone the graph snapshot and release the lock immediately: entity
+    // extraction is synchronous, and holding the central schema lock across the
+    // `save_memory(...).await` below would stall autocomplete, the schema tree,
+    // and background indexing for the duration of a SQLite write.
+    let graph = state.schema_graph.lock().await.clone();
+    let entity_links = if let Some(g) = graph.as_ref() {
+        crate::ai::memory::entity_linker::extract_and_link_entities(
+            &sanitized_rule,
+            sanitized_sql.as_deref(),
+            g,
+        )
+    } else {
+        Vec::new()
+    };
+
+    let item = MemoryItem {
+        id: id.clone(),
+        connection_key: connection_key.clone(),
+        scope: sc,
+        scope_key: connection_key,
+        category: cat,
+        key_phrase,
+        rule_text: sanitized_rule,
+        sql_snippet: sanitized_sql,
+        importance: 0.9,
+        stability_hours: USER_EXPLICIT_STABILITY_HOURS,
+        last_accessed_at: now,
+        access_count: 1,
+        source_trust: SourceTrust::UserExplicit,
+        source_conv_id: None,
+        source_turn_id: None,
+        source_tool_id: None,
+        status: MemoryStatus::Active,
+        supersedes_id: None,
+        valid_from: now,
+        valid_until: None,
+        learned_at: now,
+        tombstone: false,
+        tombstoned_at: None,
+        doc_hash,
+        embedding_model: MEMORY_MODEL_NAME.into(),
+        embedding_version: MEMORY_FORMAT_VERSION,
+        embedding,
+        created_at: now,
+        updated_at: now,
+    };
+
+    state.memory_manager.save_memory(item.clone(), &entity_links).await?;
+    Ok(item)
+}
+
+#[tauri::command]
+pub async fn delete_memory(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<bool, String> {
+    state.memory_manager.delete_memory(&id).await
+}
+
+#[tauri::command]
+pub async fn toggle_memory_status(
+    state: State<'_, AppState>,
+    id: String,
+    status: String,
+) -> Result<(), String> {
+    let stat = crate::ai::memory::MemoryStatus::from_str(&status);
+    state.memory_manager.toggle_memory_status(&id, stat).await
+}
+
+#[tauri::command]
+pub async fn resolve_drift(
+    state: State<'_, AppState>,
+    id: String,
+    resolution: String,
+) -> Result<(), String> {
+    if resolution == "revalidate" {
+        let graph_guard = state.schema_graph.lock().await;
+        state.memory_manager.revalidate_drift(&id, graph_guard.as_ref()).await
+    } else {
+        state.memory_manager.toggle_memory_status(&id, crate::ai::memory::MemoryStatus::Archived).await
+    }
+}
+
+#[tauri::command]
+pub async fn export_memories_markdown(
+    state: State<'_, AppState>,
+    connection_key: String,
+) -> Result<String, String> {
+    let memories = state.memory_manager.list_memories(&connection_key, true).await?;
+    Ok(crate::ai::memory::rules_parser::export_to_markdown(&connection_key, &memories))
+}
+
+#[tauri::command]
+pub async fn import_memories_markdown(
+    state: State<'_, AppState>,
+    connection_key: String,
+    content: String,
+) -> Result<usize, String> {
+    let parsed = crate::ai::memory::rules_parser::parse_markdown_rules(&content);
+    let now = chrono::Utc::now().timestamp();
+    // Snapshot the graph under the lock, then drop it: the loop below embeds
+    // each rule (ONNX inference plus a possible 130 MB model load) and writes
+    // SQLite. Holding the central schema lock across that would stall every
+    // schema consumer — same family as `build_system_prompt_with_query` (B-C1).
+    let graph_snapshot = {
+        let graph_guard = state.schema_graph.lock().await;
+        graph_guard.clone()
+    };
+
+    let mut imported = 0usize;
+    for rule in parsed {
+        // B-I3 review finding: import was the one write path that bypassed
+        // sanitization, so a hand-edited LUCENT.md could smuggle boundary
+        // delimiters or blacklisted payloads straight into memory. Route it
+        // through the same guard as every other write path; skip malformed
+        // rules rather than aborting the whole import.
+        let sanitized_rule = match crate::ai::memory::security::sanitize_rule_text(&rule.rule_text) {
+            Ok(text) => text,
+            Err(_) => continue,
+        };
+        let sanitized_sql =
+            match crate::ai::memory::security::sanitize_sql_snippet(rule.sql_snippet.as_deref()) {
+                Ok(sql) => sql,
+                Err(_) => continue,
+            };
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let doc_hash = crate::ai::memory::compute_memory_doc_hash(&format!("{} {}", rule.key_phrase, sanitized_rule));
+        let embedding = if let Some(emb) = state.get_or_init_memory_embedder().await {
+            emb.embed_query(&format!("{}: {}", rule.key_phrase, sanitized_rule)).await.unwrap_or_default()
+        } else {
+            let emb_guard = state.embedder.lock().await;
+            if let Some(emb) = emb_guard.as_ref() {
+                emb.embed_query(&format!("{}: {}", rule.key_phrase, sanitized_rule)).await.unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        };
+        let entity_links = if let Some(g) = graph_snapshot.as_ref() {
+            crate::ai::memory::entity_linker::extract_and_link_entities(
+                &sanitized_rule,
+                sanitized_sql.as_deref(),
+                g,
+            )
+        } else {
+            Vec::new()
+        };
+        let item = crate::ai::memory::MemoryItem {
+            id: id.clone(),
+            connection_key: connection_key.clone(),
+            scope: crate::ai::memory::MemoryScope::Connection,
+            scope_key: connection_key.clone(),
+            category: rule.category,
+            key_phrase: rule.key_phrase,
+            rule_text: sanitized_rule,
+            sql_snippet: sanitized_sql,
+            importance: rule.importance,
+            stability_hours: crate::ai::memory::USER_EXPLICIT_STABILITY_HOURS,
+            last_accessed_at: now,
+            access_count: 1,
+            source_trust: crate::ai::memory::security::SourceTrust::UserExplicit,
+            source_conv_id: None,
+            source_turn_id: None,
+            source_tool_id: None,
+            status: crate::ai::memory::MemoryStatus::Active,
+            supersedes_id: None,
+            valid_from: now,
+            valid_until: None,
+            learned_at: now,
+            tombstone: false,
+            tombstoned_at: None,
+            doc_hash,
+            embedding_model: crate::ai::memory::MEMORY_MODEL_NAME.into(),
+            embedding_version: crate::ai::memory::MEMORY_FORMAT_VERSION,
+            embedding,
+            created_at: now,
+            updated_at: now,
+        };
+        if state.memory_manager.save_memory(item, &entity_links).await.is_ok() {
+            imported += 1;
+        }
+    }
+
+    Ok(imported)
+}
+
+#[tauri::command]
+pub async fn list_golden_queries(
+    state: State<'_, AppState>,
+    connection_id: String,
+) -> Result<Vec<crate::ai::memory::GoldenQuery>, String> {
+    state.memory_manager.list_golden_queries(&connection_id).await
+}
+
+#[tauri::command]
+pub async fn save_golden_query(
+    state: State<'_, AppState>,
+    connection_id: String,
+    schema_name: Option<String>,
+    natural_prompt: String,
+    sql_text: String,
+    tables_used: Option<Vec<String>>,
+    verified: Option<bool>,
+) -> Result<crate::ai::memory::GoldenQuery, String> {
+    let now = chrono::Utc::now().timestamp();
+    let id = uuid::Uuid::new_v4().to_string();
+    let embedding = if let Some(emb) = state.get_or_init_memory_embedder().await {
+        emb.embed_query(&format!("{natural_prompt} {sql_text}")).await.unwrap_or_default()
+    } else {
+        let emb_guard = state.embedder.lock().await;
+        if let Some(emb) = emb_guard.as_ref() {
+            emb.embed_query(&format!("{natural_prompt} {sql_text}")).await.unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    };
+
+    let tables = tables_used.unwrap_or_else(|| {
+        crate::ai::memory::entity_linker::extract_tables_from_sql(&sql_text)
+    });
+
+    let q = crate::ai::memory::GoldenQuery {
+        id,
+        connection_id,
+        schema_name: schema_name.unwrap_or_else(|| "public".into()),
+        natural_prompt,
+        sql_text,
+        tables_used: tables,
+        verified: verified.unwrap_or(true),
+        run_count: 1,
+        last_run_at: now,
+        embedding_model: crate::ai::memory::MEMORY_MODEL_NAME.into(),
+        embedding_version: crate::ai::memory::MEMORY_FORMAT_VERSION,
+        embedding,
+        created_at: now,
+    };
+    state.memory_manager.save_golden_query(q.clone()).await?;
+    Ok(q)
+}
+
+#[tauri::command]
+pub async fn delete_golden_query(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<bool, String> {
+    state.memory_manager.delete_golden_query(&id).await
+}
+
+#[tauri::command]
+pub async fn run_consolidation(
+    state: State<'_, AppState>,
+    connection_key: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let graph_guard = state.schema_graph.lock().await;
+    let snapshot = graph_guard.as_ref().map(crate::ai::schema_graph::snapshot_from_graph);
+
+    let (pruned, archived, drift_alerts) = state.memory_manager.with_connection(|conn| {
+        let p = crate::ai::memory::consolidation::prune_old_session_json(conn, 14)?;
+        let a = crate::ai::memory::consolidation::soft_archive_decayed_memories(conn)?;
+        // Per-connection scoping is mandatory (see cascade_schema_drift): a
+        // catalog diff for one connection must not invalidate another
+        // connection's memories. Without a key there is nothing to scope to,
+        // so skip rather than over-invalidate.
+        let alerts = match (connection_key.as_deref(), snapshot.as_ref()) {
+            (Some(key), Some(snap)) => {
+                crate::ai::memory::drift::cascade_schema_drift(key, snap, conn)?
+            }
+            _ => Vec::new(),
+        };
+        Ok((p, a, alerts))
+    }).await?;
+
+    Ok(serde_json::json!({
+        "pruned_session_json_count": pruned,
+        "archived_memory_count": archived,
+        "drift_alerts": drift_alerts,
+    }))
+}
+
+#[cfg(test)]
+mod memory_embedder_lock_scope_tests {
+    use super::{build_system_prompt_with_query, AppState, MemoryEmbedderTestGate};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn state_with_parking_gate() -> Arc<AppState> {
+        let mut state = AppState::new();
+        state.memory_embedder_test_gate = Some(Arc::new(MemoryEmbedderTestGate::new()));
+        Arc::new(state)
+    }
+
+    fn gate(state: &AppState) -> Arc<MemoryEmbedderTestGate> {
+        state
+            .memory_embedder_test_gate
+            .clone()
+            .expect("test gate installed")
+    }
+
+    /// Bounded wait so the RED failure is a clear assertion, not a hang.
+    async fn wait_for_entered(gate: &MemoryEmbedderTestGate, n: usize) {
+        for _ in 0..400 {
+            if gate.entered() >= n {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!(
+            "expected {n} prompt builder(s) to reach embedder init, saw {}",
+            gate.entered()
+        );
+    }
+
+    fn spawn_builder(
+        state: Arc<AppState>,
+        connection_id: &'static str,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            build_system_prompt_with_query(&state, connection_id, Some("recent invoices")).await;
+        })
+    }
+
+    /// α) While a prompt build is parked inside the memory block (embedder
+    /// init), the central `schema_graph` mutex must be acquirable. Before
+    /// B-C1 the guard was held from the top of the function through the whole
+    /// pipeline, so `try_lock` failed here.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prompt_build_does_not_hold_schema_graph_across_memory_work() {
+        let state = state_with_parking_gate();
+        let gate = gate(&state);
+
+        let builder = spawn_builder(state.clone(), "conn-alpha");
+        wait_for_entered(&gate, 1).await;
+
+        assert!(
+            state.schema_graph.try_lock().is_ok(),
+            "schema_graph must not be held while the memory embedder runs"
+        );
+
+        builder.abort();
+    }
+
+    /// ζ) B-I9: two concurrent prompt builds must both reach embedder
+    /// initialization. Before the fix, builder A held `schema_graph` (and
+    /// `memory_embedder`) for the entire model load, so builder B blocked on
+    /// `schema_graph.lock()` and never reached init.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_prompt_builds_do_not_serialize_behind_model_load() {
+        let state = state_with_parking_gate();
+        let gate = gate(&state);
+
+        let first = spawn_builder(state.clone(), "conn-zeta-1");
+        wait_for_entered(&gate, 1).await;
+
+        let second = spawn_builder(state.clone(), "conn-zeta-2");
+        wait_for_entered(&gate, 2).await;
+
+        first.abort();
+        second.abort();
+    }
+}
+
+#[cfg(test)]
+mod applied_memory_count_tests {
+    use super::{build_system_prompt_with_query, AppState, MemoryEmbedderTestGate};
+    use crate::ai::config::AiConfig;
+    use crate::ai::memory::{
+        compute_memory_doc_hash, MemoryCategory, MemoryItem, MemoryManager, MemoryScope,
+        MemoryStatus, SourceTrust, MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME,
+    };
+    use std::sync::Arc;
+
+    /// Isolated in-memory memory DB + an embedder that reports unavailable, so
+    /// prompt building never loads an ONNX model.
+    fn state() -> Arc<AppState> {
+        let mut state = AppState::new();
+        state.memory_manager = Arc::new(MemoryManager::open_in_memory().unwrap());
+        state.memory_embedder_test_gate = Some(Arc::new(MemoryEmbedderTestGate::unavailable()));
+        Arc::new(state)
+    }
+
+    async fn seed_rule(mgr: &MemoryManager, connection_key: &str) {
+        let now = chrono::Utc::now().timestamp();
+        let rule_text = "Invoices from the last 30 days are the recent invoices set";
+        mgr.save_memory(
+            MemoryItem {
+                id: uuid::Uuid::new_v4().to_string(),
+                connection_key: connection_key.into(),
+                scope: MemoryScope::Connection,
+                scope_key: connection_key.into(),
+                category: MemoryCategory::Quirk,
+                key_phrase: "recent_invoices".into(),
+                rule_text: rule_text.into(),
+                sql_snippet: Some("created_at > now() - interval '30 days'".into()),
+                importance: 0.8,
+                stability_hours: 720.0,
+                last_accessed_at: now,
+                access_count: 1,
+                source_trust: SourceTrust::UserExplicit,
+                source_conv_id: None,
+                source_turn_id: None,
+                source_tool_id: None,
+                status: MemoryStatus::Active,
+                supersedes_id: None,
+                valid_from: now,
+                valid_until: None,
+                learned_at: now,
+                tombstone: false,
+                tombstoned_at: None,
+                doc_hash: compute_memory_doc_hash(rule_text),
+                embedding_model: MEMORY_MODEL_NAME.into(),
+                embedding_version: MEMORY_FORMAT_VERSION,
+                embedding: vec![0.0; 384],
+                created_at: now,
+                updated_at: now,
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// F-C2 producer: the count comes from the retrieval that feeds the
+    /// prompt — `1` for one retrieved rule, `0` for no query or disabled
+    /// memory. `run_agent_turn` then threads this into the `Done` event.
+    #[tokio::test]
+    async fn system_prompt_reports_applied_memory_count() {
+        let state = state();
+        *state.ai_config.write().await = AiConfig::default();
+        seed_rule(&state.memory_manager, "conn-fc2").await;
+
+        let (_prompt, _tier, count) =
+            build_system_prompt_with_query(&state, "conn-fc2", Some("recent invoices")).await;
+        assert_eq!(count, 1, "one matching rule retrieved → one applied");
+
+        let (_prompt, _tier, count) =
+            build_system_prompt_with_query(&state, "conn-fc2", None).await;
+        assert_eq!(count, 0, "no query → no retrieval");
+
+        state.ai_config.write().await.enable_ai_memory = false;
+        let (_prompt, _tier, count) =
+            build_system_prompt_with_query(&state, "conn-fc2", Some("recent invoices")).await;
+        assert_eq!(count, 0, "disabled memory applies no rules");
+    }
 }
 
 #[cfg(test)]
@@ -3337,11 +4266,13 @@ mod acp_driver_branch_tests {
         AiToolContext {
             db: Arc::new(Mutex::new(None)),
             connection_id: None,
+            memory_connection_key: None,
             capabilities: None,
             config: AiConfig::default(),
             schema_graph: Arc::new(Mutex::new(None)),
             embedder: Arc::new(Mutex::new(None)),
             reranker: Arc::new(Mutex::new(None)),
+            memory_manager: crate::ai::tools::test_memory_manager(),
         }
     }
 
@@ -3556,6 +4487,38 @@ mod acp_dml_branch_tests {
         assert!(
             matches!(outcome, RequestPermissionOutcome::Selected(_)),
             "allow selects the agent's option: {outcome:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod memory_connection_key_tests {
+    use super::memory_connection_key_for;
+    use lucent_protocol::ConnectionConfig;
+
+    #[test]
+    fn profile_id_wins_when_present() {
+        let cfg = ConnectionConfig::new("postgres")
+            .with("host", "db.internal")
+            .with("port", "5432")
+            .with("database", "analytics");
+        assert_eq!(
+            memory_connection_key_for(Some("profile-123"), &cfg),
+            "profile-123",
+            "a profile connect keys memories by the profile id"
+        );
+    }
+
+    #[test]
+    fn inline_key_matches_the_frontends_host_port_database_shape() {
+        let cfg = ConnectionConfig::new("postgres")
+            .with("host", "localhost")
+            .with("port", "5432")
+            .with("database", "analytics");
+        assert_eq!(
+            memory_connection_key_for(None, &cfg),
+            "localhost:5432/analytics",
+            "inline connects key memories by host:port/database (App.svelte)"
         );
     }
 }

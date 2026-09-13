@@ -166,6 +166,39 @@ describe('handleAiEvent', () => {
     });
   });
 
+  it('threads applied_memory_count from done into the message rulesApplied', () => {
+    const conv = seedActiveConversationWithMessage('m1');
+    handleAiEvent(conv.id, {
+      type: 'done',
+      conversation_id: conv.id,
+      final_message: 'ok',
+      cancelled: false,
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        cached_prompt_tokens: 0,
+      },
+      applied_memory_count: 3,
+    });
+    expect(getConv(conv.id).messages[0].rulesApplied).toBe(3);
+  });
+
+  it('defaults rulesApplied to 0 when done omits applied_memory_count', () => {
+    const conv = seedActiveConversationWithMessage('m1');
+    handleAiEvent(conv.id, {
+      type: 'done',
+      conversation_id: conv.id,
+      final_message: 'ok',
+      cancelled: false,
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        cached_prompt_tokens: 0,
+      },
+    });
+    expect(getConv(conv.id).messages[0].rulesApplied).toBe(0);
+  });
+
   it('fetches accumulated usage once on done and stores it on the conversation', async () => {
     const conv = seedActiveConversationWithMessage('m1');
     invokeMock.mockResolvedValue({

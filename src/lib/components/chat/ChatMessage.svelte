@@ -12,6 +12,7 @@
     onCancelDml,
     onAllowPermission,
     onRejectPermission,
+    onOpenMemoryDrawer,
     grouped = false,
     conversationId,
   }: {
@@ -20,6 +21,7 @@
     onCancelDml?: () => void;
     onAllowPermission?: () => void;
     onRejectPermission?: () => void;
+    onOpenMemoryDrawer?: () => void;
     grouped?: boolean; // consecutive message from the same role — tighter spacing
     conversationId?: string; // NEW — for updating thinking state
   } = $props();
@@ -68,7 +70,23 @@
       />
     {/if}
 
-    {#if message.usage && message.usage.promptTokens + message.usage.completionTokens > 0}
+    {#if message.role === 'assistant' && (message.rulesApplied ?? 0) > 0 && onOpenMemoryDrawer}
+      <div class="message-meta-row">
+        {#if message.usage && message.usage.promptTokens + message.usage.completionTokens > 0}
+          <div class="usage">
+            ~{message.usage.promptTokens + message.usage.completionTokens} tokens
+          </div>
+        {/if}
+        <button
+          class="memory-pill"
+          onclick={onOpenMemoryDrawer}
+          aria-label="{message.rulesApplied} {message.rulesApplied === 1 ? 'rule' : 'rules'} applied. Open Memory Drawer"
+          title="View active learned rules & database memory (Cmd+Shift+M)"
+        >
+          🧠 {message.rulesApplied} {message.rulesApplied === 1 ? 'rule' : 'rules'} applied
+        </button>
+      </div>
+    {:else if message.usage && message.usage.promptTokens + message.usage.completionTokens > 0}
       <div class="usage">
         ~{message.usage.promptTokens + message.usage.completionTokens} tokens
       </div>
@@ -96,6 +114,12 @@
     to {
       opacity: 1;
       transform: translateY(0);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .message {
+      animation: none;
     }
   }
 
@@ -272,5 +296,40 @@
     margin-top: 6px;
     padding-top: 6px;
     border-top: 1px solid var(--border-light);
+  }
+
+  .message-meta-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border-light);
+  }
+
+  .message-meta-row .usage {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: none;
+  }
+
+  .memory-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    color: var(--text-muted);
+    font-size: 10px;
+    padding: 1px 7px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .memory-pill:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(56, 189, 248, 0.1);
   }
 </style>

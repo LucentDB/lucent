@@ -349,11 +349,13 @@ async fn e2e_llm_tool_awareness() {
     let ctx = crate::ai::tools::AiToolContext {
         db: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         connection_id: None,
+        memory_connection_key: None,
         capabilities: None,
         config: crate::ai::config::AiConfig::default(),
         schema_graph: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         embedder: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         reranker: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        memory_manager: crate::ai::tools::test_memory_manager(),
     };
     let tools = crate::ai::tools::all_tools(ctx);
 

@@ -63,6 +63,8 @@ fn parse_tool_arguments(tool: &str, raw_args: Option<&str>) -> serde_json::Value
         "search_schema" => serde_json::json!({ "query": trimmed }),
         "preview_dml" => serde_json::json!({ "sql": trimmed, "description": "" }),
         "get_objects_info" => serde_json::json!({ "objects": [{ "name": trimmed }] }),
+        "search_query_history" => serde_json::json!({ "query": trimmed }),
+        "save_memory" => serde_json::json!({ "category": "quirk", "key_phrase": "rule", "rule_text": trimmed }),
         _ => serde_json::json!({ "arg": trimmed }),
     }
 }
@@ -86,9 +88,10 @@ fn usage() -> String {
          through Lucent's guardrails (read-only enforcement, row caps, DML approval).\n\
          \n\
          SHORTHAND: a bare, non-JSON argument is read as the tool's primary field —\n\
-         `run_readonly_query`/`preview_dml` take the SQL, `search_schema` the query,\n\
-         `get_objects_info` an object name. Avoids nesting JSON in shell quoting:\n\
+         `run_readonly_query`/`preview_dml` take the SQL, `search_schema`/`search_query_history` the query,\n\
+         `get_objects_info` an object name, `save_memory` the rule text. Avoids nesting JSON in shell quoting:\n\
          \x20 lucent-tool run_readonly_query \"SELECT count(*) FROM public.orders\"\n\
+         \x20 lucent-tool search_query_history \"churn\"\n\
          \n\
          TOOLS:\n",
     );
@@ -132,7 +135,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cli_tool_args = args.get(i + 2).cloned();
                 break;
             }
-            "search_schema" | "get_objects_info" | "run_readonly_query" | "preview_dml" => {
+            "search_schema"
+            | "get_objects_info"
+            | "run_readonly_query"
+            | "preview_dml"
+            | "save_memory"
+            | "search_query_history" => {
                 cli_tool = Some(args[i].clone());
                 cli_tool_args = args.get(i + 1).cloned();
                 break;

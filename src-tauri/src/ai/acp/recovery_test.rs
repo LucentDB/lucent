@@ -90,11 +90,13 @@ fn tool_ctx() -> AiToolContext {
     AiToolContext {
         db: Arc::new(AsyncMutex::new(None)),
         connection_id: None,
+        memory_connection_key: None,
         capabilities: None,
         config: AiConfig::default(),
         schema_graph: Arc::new(AsyncMutex::new(None)),
         embedder: Arc::new(AsyncMutex::new(None)),
         reranker: Arc::new(AsyncMutex::new(None)),
+        memory_manager: crate::ai::tools::test_memory_manager(),
     }
 }
 
@@ -157,6 +159,7 @@ async fn cancel_resolves_pending_permission_then_cancels() {
                 conv,
                 sink_task,
                 cancel_for_task,
+                0,
             )
             .await
     });
@@ -297,6 +300,7 @@ async fn agent_crash_surfaces_stderr_tail_and_budget_blocks_restart() {
                 conv.clone(),
                 sink,
                 tokio_util::sync::CancellationToken::new(),
+                0,
             ),
         )
         .await;

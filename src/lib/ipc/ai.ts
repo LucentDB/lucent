@@ -64,6 +64,9 @@ export type AiChannelEvent =
         completion_tokens: number;
         cached_prompt_tokens: number;
       };
+      /** Learned memory rules injected into this turn's prompt (F-C2).
+       *  Backend `#[serde(default)]`, so older events may omit it. */
+      applied_memory_count?: number;
     };
 
 export interface DmlApprovalPayload {
@@ -166,6 +169,7 @@ export function handleAiEvent(conversationId: string, e: AiChannelEvent) {
           completionTokens: e.usage.completion_tokens,
           cachedPromptTokens: e.usage.cached_prompt_tokens,
         },
+        rulesApplied: e.applied_memory_count ?? 0,
       });
       // One fetch per completed message — not continuous polling — to refresh
       // the header's conversation totals (the backend accumulates on Done).
@@ -424,4 +428,176 @@ export async function rejectPendingDml(conversationId: string): Promise<void> {
     conv.dmlError = null;
     updateLast(conversationId, { dmlApproval: undefined });
   }
+}
+
+// ── AI Memory Subsystem IPC ──────────────────────────────────────────────────
+
+export interface MemoryItem {
+  id: string;
+  connection_key: string;
+  scope: 'global' | 'connection' | 'schema';
+  scope_key?: string | null;
+  category: 'metric' | 'join' | 'quirk' | 'preference';
+  key_phrase: string;
+  rule_text: string;
+  sql_snippet?: string | null;
+  importance: number;
+  stability_hours: number;
+  last_accessed_at: number;
+  access_count: number;
+  source_trust: 'user_explicit' | 'verified_consolidation' | 'error_resolution' | 'untrusted_tool_result';
+  source_conv_id?: string | null;
+  source_turn_id?: string | null;
+  source_tool_id?: string | null;
+  status: 'active' | 'archived' | 'stale_invalid' | 'superseded';
+  supersedes_id?: string | null;
+  valid_from: number;
+  valid_until?: number | null;
+  learned_at: number;
+  tombstone: boolean;
+  tombstoned_at?: number | null;
+  doc_hash: string;
+  embedding_model: string;
+  embedding_version: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface GoldenQuery {
+  id: string;
+  connection_id: string;
+  schema_name: string;
+  natural_prompt: string;
+  sql_text: string;
+  tables_used: string[];
+  verified: boolean;
+  run_count: number;
+  last_run_at: number;
+  embedding_model: string;
+  embedding_version: number;
+  created_at: number;
+}
+
+export interface ChatConversation {
+  id: string;
+  connection_id: string;
+  title: string;
+  archived: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+/** A row from `chat_messages` in `memory.db`. Distinct from the runtime
+ *  `ChatMessage` in `stores/chat.svelte.ts`: timestamps are Unix seconds and
+ *  the work session is an opaque JSON string. */
+export interface PersistedChatMessage {
+  id: string;
+  conversation_id: string;
+  role: string;
+  content: string;
+  session_json?: string | null;
+  created_at: number;
+}
+
+export interface DriftAlert {
+  /** Frontend memory connection key the invalidated rule belongs to. Present on
+   * alerts emitted by the background indexer's `memory:drift_detected` event;
+   * optional for older fixtures/consolidation payloads. */
+  connection_key?: string;
+  memory_id: string;
+  rule_text: string;
+  reason: string;
+  schema_name: string;
+  table_name: string;
+  column_name?: string | null;
+}
+
+export interface ConsolidationReport {
+  pruned_session_json_count: number;
+  archived_memory_count: number;
+  drift_alerts: DriftAlert[];
+}
+
+export async function listChatConversations(connectionId?: string): Promise<ChatConversation[]> {
+  return invoke('list_chat_conversations', { connectionId });
+}
+
+export async function loadChatConversation(conversationId: string): Promise<PersistedChatMessage[]> {
+  return invoke('load_chat_conversation', { conversationId });
+}
+
+export async function deleteChatConversation(conversationId: string): Promise<boolean> {
+  return invoke('delete_chat_conversation', { conversationId });
+}
+
+export async function listMemories(connectionKey: string, includeArchived = false): Promise<MemoryItem[]> {
+  return invoke('list_memories', { connectionKey, includeArchived });
+}
+
+export async function saveMemoryManual(
+  connectionKey: string,
+  category: string,
+  keyPhrase: string,
+  ruleText: string,
+  sqlSnippet?: string,
+  scope?: string
+): Promise<MemoryItem> {
+  return invoke('save_memory_manual', {
+    connectionKey,
+    category,
+    keyPhrase,
+    ruleText,
+    sqlSnippet,
+    scope,
+  });
+}
+
+export async function deleteMemory(id: string): Promise<boolean> {
+  return invoke('delete_memory', { id });
+}
+
+export async function toggleMemoryStatus(id: string, status: string): Promise<void> {
+  return invoke('toggle_memory_status', { id, status });
+}
+
+export async function resolveDrift(id: string, resolution: 'revalidate' | 'dismiss'): Promise<void> {
+  return invoke('resolve_drift', { id, resolution });
+}
+
+export async function exportMemoriesMarkdown(connectionKey: string): Promise<string> {
+  return invoke('export_memories_markdown', { connectionKey });
+}
+
+export async function importMemoriesMarkdown(connectionKey: string, content: string): Promise<number> {
+  return invoke('import_memories_markdown', { connectionKey, content });
+}
+
+export async function listGoldenQueries(connectionId: string): Promise<GoldenQuery[]> {
+  return invoke('list_golden_queries', { connectionId });
+}
+
+export async function saveGoldenQuery(
+  connectionId: string,
+  naturalPrompt: string,
+  sqlText: string,
+  schemaName?: string,
+  tablesUsed?: string[],
+  verified?: boolean
+): Promise<GoldenQuery> {
+  return invoke('save_golden_query', {
+    connectionId,
+    schemaName,
+    naturalPrompt,
+    sqlText,
+    tablesUsed,
+    verified,
+  });
+}
+
+export async function deleteGoldenQuery(id: string): Promise<boolean> {
+  return invoke('delete_golden_query', { id });
+}
+
+export async function runConsolidation(connectionKey?: string): Promise<ConsolidationReport> {
+  return invoke('run_consolidation', { connectionKey });
 }

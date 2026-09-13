@@ -60,6 +60,11 @@ pub enum AiEvent {
         conversation_id: String,
         final_message: String,
         usage: TokenUsage,
+        /// How many learned memory rules were injected into this turn's system
+        /// prompt (F-C2). The frontend renders it as the "rules applied" pill
+        /// (`rulesApplied`); `0` when memory is disabled or nothing matched.
+        #[serde(default)]
+        applied_memory_count: usize,
         /// True when the turn ended with `stopReason: cancelled` — the
         /// frontend marks unresolved tool calls as `stopped` (spec D7).
         #[serde(default)]
@@ -200,15 +205,31 @@ impl crate::ai::indexer::IndexingEventSink for IndexingEmitter {
             message: message.into(),
         });
     }
+    fn emit_drift(&self, alerts: &[crate::ai::memory::drift::DriftAlert]) {
+        // Not throttled: drift is rare (a real catalog identity change) and the
+        // Memory Drawer must learn about every invalidated rule (spec §7.2).
+        self.emitter.emit_json(
+            "memory:drift_detected",
+            serde_json::to_value(alerts).unwrap_or(serde_json::Value::Null),
+        );
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexingProgressPayload {
     pub connection_id: String,
-    pub stage: String, // "model" | "metadata" | "sampling" | "embedding" | "complete"
+    pub stage: String, // "model" | "discovering" | "delta" | "metadata" | "sampling" | "embedding" | "complete"
     pub processed_tables: usize,
     pub total_tables: usize,
+    #[serde(default)]
+    pub added_tables_count: usize,
+    #[serde(default)]
+    pub modified_tables_count: usize,
+    #[serde(default)]
+    pub deleted_tables_count: usize,
+    #[serde(default)]
+    pub unchanged_tables_count: usize,
     pub cache_hits: usize,
     pub embeddings_computed: usize,
     pub is_complete: bool,
@@ -284,10 +305,40 @@ mod tests {
             conversation_id: "c1".into(),
             final_message: "done".into(),
             usage: TokenUsage::default(),
+            applied_memory_count: 0,
             cancelled: true,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["cancelled"], true);
+    }
+
+    #[test]
+    fn done_event_carries_applied_memory_count() {
+        let event = AiEvent::Done {
+            conversation_id: "c1".into(),
+            final_message: "done".into(),
+            usage: TokenUsage::default(),
+            applied_memory_count: 3,
+            cancelled: false,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            json["applied_memory_count"], 3,
+            "F-C2: the completion event must carry the applied rule count"
+        );
+    }
+
+    #[test]
+    fn done_event_defaults_missing_applied_memory_count_to_zero() {
+        // Backward compat: events persisted before F-C2 lack the field.
+        let json = r#"{"type":"done","conversation_id":"c1","final_message":"done","usage":{"prompt_tokens":1,"completion_tokens":2,"cached_prompt_tokens":0},"cancelled":false}"#;
+        let event: AiEvent = serde_json::from_str(json).unwrap();
+        match event {
+            AiEvent::Done {
+                applied_memory_count, ..
+            } => assert_eq!(applied_memory_count, 0),
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
 
     #[test]
@@ -324,6 +375,10 @@ mod tests {
             },
             processed_tables: n,
             total_tables: 200,
+            added_tables_count: 0,
+            modified_tables_count: 0,
+            deleted_tables_count: 0,
+            unchanged_tables_count: 200,
             cache_hits: 0,
             embeddings_computed: 0,
             is_complete: complete,

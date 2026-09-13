@@ -85,7 +85,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    height: 10px;
+    height: 14px;
     opacity: 0;
     transition:
       height 0.15s ease,
@@ -94,7 +94,7 @@
   .add-cell-button:hover,
   .add-cell-button:focus-within,
   .add-cell-button.open {
-    height: 26px;
+    height: 28px;
     opacity: 1;
   }
   /* A hairline that reads as an insertion point, rather than a floating circle
@@ -112,8 +112,8 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 20px;
-    height: 20px;
+    width: 22px;
+    height: 22px;
     border: 1px solid var(--border);
     border-radius: 50%;
     background: var(--bg-surface);
@@ -144,23 +144,24 @@
   .add-popup {
     background: var(--bg-surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-lg);
     box-shadow: var(--shadow-lg);
+    backdrop-filter: blur(12px);
     min-width: 160px;
-    padding: 4px;
+    padding: 5px;
   }
   .add-option {
     display: flex;
     align-items: center;
     gap: 8px;
     width: 100%;
-    padding: 8px 12px;
+    padding: 8px 14px;
     border: none;
     background: transparent;
     color: var(--text);
     font-size: var(--text-sm);
     cursor: pointer;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
   }
   .add-option:hover {
     background: var(--bg-hover);

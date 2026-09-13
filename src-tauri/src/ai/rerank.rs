@@ -1,8 +1,31 @@
+use async_trait::async_trait;
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
 use tokio::sync::Mutex as AsyncMutex;
 
 pub struct Reranker {
     model: AsyncMutex<TextRerank>,
+}
+
+/// Seam over cross-encoder reranking so callers can be tested hermetically —
+/// no ONNX model load — with a recording fake.
+#[async_trait]
+pub trait Rerank: Send + Sync {
+    async fn rerank(
+        &self,
+        query: &str,
+        candidates: &[String],
+    ) -> Result<Vec<(usize, f32)>, String>;
+}
+
+#[async_trait]
+impl Rerank for Reranker {
+    async fn rerank(
+        &self,
+        query: &str,
+        candidates: &[String],
+    ) -> Result<Vec<(usize, f32)>, String> {
+        Reranker::rerank(self, query, candidates).await
+    }
 }
 
 impl Reranker {

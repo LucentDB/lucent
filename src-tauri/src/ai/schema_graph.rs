@@ -12,7 +12,7 @@ use crate::client::ConnectorClient;
 
 /// Raw per-column tuple gathered while building the graph:
 /// (column name, data type, schema, table, is_primary_key).
-type ColumnTuple = (String, String, String, String, bool);
+type ColumnTuple = (String, String, String, String, bool, bool);
 /// Columns grouped by owning table id.
 type TableColumns = HashMap<usize, Vec<ColumnTuple>>;
 
@@ -37,6 +37,8 @@ pub struct ColumnEntry {
     pub data_type: String,
     pub is_primary_key: bool,
     #[serde(default)]
+    pub is_nullable: bool,
+    #[serde(default)]
     pub sample_values: Vec<String>,
     #[serde(default)]
     pub fk_ref: Option<String>,
@@ -50,12 +52,18 @@ pub struct TableEntry {
     pub id: usize,
     pub schema: String,
     pub name: String,
+    #[serde(default = "default_table_kind")]
+    pub kind: String,
     /// Estimated row count from the driver's catalog; 0 when unknown.
     #[serde(default)]
     pub row_count_estimate: i64,
     /// "PARTITIONED BY RANGE (created_at) — 84 partitions" for partitioned parents.
     #[serde(default)]
     pub partition_info: Option<String>,
+}
+
+pub fn default_table_kind() -> String {
+    "table".into()
 }
 
 /// Human-readable partition annotation for a partitioned parent table.
@@ -109,12 +117,14 @@ pub(crate) fn harvest_to_entries(
         }
         let schema = object.reference.namespace.join(".");
         let name = object.reference.name;
+        let kind = object.reference.kind.as_str().to_string();
         let id = tables.len();
         table_map.insert((schema.clone(), name.clone()), id);
         tables.push(TableEntry {
             id,
             schema,
             name,
+            kind,
             // The field is an i64 with a "0 when unknown" contract; the
             // Option is where the real fidelity lives if this ever widens.
             row_count_estimate: object.est_rows.unwrap_or(0) as i64,
@@ -142,6 +152,7 @@ pub(crate) fn harvest_to_entries(
                 schema.clone(),
                 table.clone(),
                 c.is_primary_key,
+                c.nullable,
             ));
         }
     }
@@ -208,7 +219,7 @@ fn build_sampling_sql(
         let Some(cols) = table_columns.get(&table_entry.id) else {
             continue;
         };
-        for (name, data_type, _, _, is_pk) in cols {
+        for (name, data_type, _, _, is_pk, _) in cols {
             if *is_pk || UNSAMPLEABLE_TYPES.contains(&data_type.as_str()) {
                 // jsonb objects hide the most human-searched values in this
                 // domain (aircraft models, airport/city names). Extract their
@@ -278,6 +289,8 @@ pub struct CatalogSnapshot {
 pub struct SnapshotTable {
     pub schema: String,
     pub name: String,
+    #[serde(default = "default_table_kind")]
+    pub kind: String,
     pub row_count_estimate: i64,
     pub partition_info: Option<String>,
 }
@@ -289,6 +302,8 @@ pub struct SnapshotColumn {
     pub name: String,
     pub data_type: String,
     pub is_primary_key: bool,
+    #[serde(default)]
+    pub is_nullable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
@@ -316,12 +331,12 @@ pub fn compute_schema_hash(snapshot: &CatalogSnapshot) -> String {
     // layout edits — neither reflects a schema identity change, and hashing
     // them would invalidate the persisted Tier-2 graph on reconnect for
     // exactly the active schemas the differential cache targets.
-    let tables: Vec<(&str, &str)> = canonical
+    let tables: Vec<(&str, &str, &str)> = canonical
         .tables
         .iter()
-        .map(|t| (t.schema.as_str(), t.name.as_str()))
+        .map(|t| (t.schema.as_str(), t.name.as_str(), t.kind.as_str()))
         .collect();
-    let columns: Vec<(&str, &str, &str, &str, bool)> = canonical
+    let columns: Vec<(&str, &str, &str, &str, bool, bool)> = canonical
         .columns
         .iter()
         .map(|c| {
@@ -331,6 +346,7 @@ pub fn compute_schema_hash(snapshot: &CatalogSnapshot) -> String {
                 c.name.as_str(),
                 c.data_type.as_str(),
                 c.is_primary_key,
+                c.is_nullable,
             )
         })
         .collect();
@@ -353,11 +369,247 @@ pub fn compute_schema_hash(snapshot: &CatalogSnapshot) -> String {
     format!("{:x}", sha2::Sha256::digest(&bytes))
 }
 
+/// Deterministic identity signature of a single table or view based on its
+/// schema, name, kind, columns (name, data_type, is_pk), and incident foreign keys.
+pub fn compute_table_signature(
+    schema: &str,
+    name: &str,
+    kind: &str,
+    columns: &[&SnapshotColumn],
+    fks: &[&SnapshotFk],
+) -> String {
+    use sha2::Digest;
+    let mut cols: Vec<(&str, &str, bool)> = columns
+        .iter()
+        .map(|c| (c.name.as_str(), c.data_type.as_str(), c.is_primary_key))
+        .collect();
+    cols.sort();
+
+    let mut related_fks: Vec<(&str, &str, &str, &str, &str, &str)> = fks
+        .iter()
+        .map(|f| {
+            (
+                f.from_schema.as_str(),
+                f.from_table.as_str(),
+                f.from_column.as_str(),
+                f.to_schema.as_str(),
+                f.to_table.as_str(),
+                f.to_column.as_str(),
+            )
+        })
+        .collect();
+    related_fks.sort();
+
+    let payload = (schema, name, kind, cols, related_fks);
+    let bytes = bincode::serialize(&payload).expect("table signature serializes");
+    format!("{:x}", sha2::Sha256::digest(&bytes))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableDeltaSummary {
+    pub schema: String,
+    pub name: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaDelta {
+    pub added: Vec<TableDeltaSummary>,
+    pub modified: Vec<TableDeltaSummary>,
+    pub deleted: Vec<TableDeltaSummary>,
+    pub unchanged: Vec<TableDeltaSummary>,
+}
+
+impl SchemaDelta {
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.modified.is_empty() && self.deleted.is_empty()
+    }
+
+    pub fn total_relations(&self) -> usize {
+        self.added.len() + self.modified.len() + self.unchanged.len()
+    }
+}
+
+pub fn compute_schema_delta(
+    previous: &CatalogSnapshot,
+    current: &CatalogSnapshot,
+) -> SchemaDelta {
+    let mut prev_cols: HashMap<(&str, &str), Vec<&SnapshotColumn>> = HashMap::new();
+    for c in &previous.columns {
+        prev_cols
+            .entry((c.schema.as_str(), c.table.as_str()))
+            .or_default()
+            .push(c);
+    }
+    let mut prev_fks: HashMap<(&str, &str), Vec<&SnapshotFk>> = HashMap::new();
+    for f in &previous.fks {
+        prev_fks
+            .entry((f.from_schema.as_str(), f.from_table.as_str()))
+            .or_default()
+            .push(f);
+        prev_fks
+            .entry((f.to_schema.as_str(), f.to_table.as_str()))
+            .or_default()
+            .push(f);
+    }
+    let mut prev_signatures: HashMap<(&str, &str), (String, &SnapshotTable)> = HashMap::new();
+    for t in &previous.tables {
+        let cols = prev_cols
+            .get(&(t.schema.as_str(), t.name.as_str()))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let fks = prev_fks
+            .get(&(t.schema.as_str(), t.name.as_str()))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let sig = compute_table_signature(&t.schema, &t.name, &t.kind, cols, fks);
+        prev_signatures.insert((t.schema.as_str(), t.name.as_str()), (sig, t));
+    }
+
+    let mut curr_cols: HashMap<(&str, &str), Vec<&SnapshotColumn>> = HashMap::new();
+    for c in &current.columns {
+        curr_cols
+            .entry((c.schema.as_str(), c.table.as_str()))
+            .or_default()
+            .push(c);
+    }
+    let mut curr_fks: HashMap<(&str, &str), Vec<&SnapshotFk>> = HashMap::new();
+    for f in &current.fks {
+        curr_fks
+            .entry((f.from_schema.as_str(), f.from_table.as_str()))
+            .or_default()
+            .push(f);
+        curr_fks
+            .entry((f.to_schema.as_str(), f.to_table.as_str()))
+            .or_default()
+            .push(f);
+    }
+    let mut curr_signatures: HashMap<(&str, &str), (String, &SnapshotTable)> = HashMap::new();
+    for t in &current.tables {
+        let cols = curr_cols
+            .get(&(t.schema.as_str(), t.name.as_str()))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let fks = curr_fks
+            .get(&(t.schema.as_str(), t.name.as_str()))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let sig = compute_table_signature(&t.schema, &t.name, &t.kind, cols, fks);
+        curr_signatures.insert((t.schema.as_str(), t.name.as_str()), (sig, t));
+    }
+
+    let mut added = Vec::new();
+    let mut modified = Vec::new();
+    let mut unchanged = Vec::new();
+
+    for ((schema, name), (curr_sig, table)) in &curr_signatures {
+        match prev_signatures.get(&(*schema, *name)) {
+            None => added.push(TableDeltaSummary {
+                schema: table.schema.clone(),
+                name: table.name.clone(),
+                kind: table.kind.clone(),
+            }),
+            Some((prev_sig, _)) => {
+                if prev_sig != curr_sig {
+                    modified.push(TableDeltaSummary {
+                        schema: table.schema.clone(),
+                        name: table.name.clone(),
+                        kind: table.kind.clone(),
+                    });
+                } else {
+                    unchanged.push(TableDeltaSummary {
+                        schema: table.schema.clone(),
+                        name: table.name.clone(),
+                        kind: table.kind.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    let mut deleted = Vec::new();
+    for ((schema, name), (_, table)) in &prev_signatures {
+        if !curr_signatures.contains_key(&(*schema, *name)) {
+            deleted.push(TableDeltaSummary {
+                schema: table.schema.clone(),
+                name: table.name.clone(),
+                kind: table.kind.clone(),
+            });
+        }
+    }
+
+    added.sort_by(|a, b| (a.schema.as_str(), a.name.as_str()).cmp(&(b.schema.as_str(), b.name.as_str())));
+    modified.sort_by(|a, b| (a.schema.as_str(), a.name.as_str()).cmp(&(b.schema.as_str(), b.name.as_str())));
+    deleted.sort_by(|a, b| (a.schema.as_str(), a.name.as_str()).cmp(&(b.schema.as_str(), b.name.as_str())));
+    unchanged.sort_by(|a, b| (a.schema.as_str(), a.name.as_str()).cmp(&(b.schema.as_str(), b.name.as_str())));
+
+    SchemaDelta {
+        added,
+        modified,
+        deleted,
+        unchanged,
+    }
+}
+
+/// Reconstruct a canonical CatalogSnapshot from a SchemaGraph.
+pub fn snapshot_from_graph(graph: &SchemaGraph) -> CatalogSnapshot {
+    let mut tables: Vec<SnapshotTable> = graph
+        .tables
+        .iter()
+        .map(|t| SnapshotTable {
+            schema: t.schema.clone(),
+            name: t.name.clone(),
+            kind: t.kind.clone(),
+            row_count_estimate: t.row_count_estimate,
+            partition_info: t.partition_info.clone(),
+        })
+        .collect();
+    let mut columns: Vec<SnapshotColumn> = graph
+        .columns
+        .iter()
+        .map(|c| SnapshotColumn {
+            schema: c.schema.clone(),
+            table: c.table.clone(),
+            name: c.name.clone(),
+            data_type: c.data_type.clone(),
+            is_primary_key: c.is_primary_key,
+            is_nullable: c.is_nullable,
+        })
+        .collect();
+    let mut fks: Vec<SnapshotFk> = graph
+        .fk_edges
+        .iter()
+        .map(|e| {
+            let from = &graph.columns[e.from_column];
+            let to = &graph.columns[e.to_column];
+            SnapshotFk {
+                from_schema: from.schema.clone(),
+                from_table: from.table.clone(),
+                from_column: from.name.clone(),
+                to_schema: to.schema.clone(),
+                to_table: to.table.clone(),
+                to_column: to.name.clone(),
+            }
+        })
+        .collect();
+    tables.sort();
+    columns.sort();
+    fks.sort();
+    CatalogSnapshot {
+        format_version: DOC_TEXT_FORMAT_VERSION,
+        tables,
+        columns,
+        fks,
+    }
+}
+
 /// Version tag for the persisted Tier-2 graph blob. Bumped whenever the
 /// serialized `SchemaGraph` layout changes so stale blobs are dropped and
 /// re-indexed instead of failing forever on the same bytes (bincode is
 /// order-sensitive — any field removal/rename breaks old blobs deliberately).
-pub const GRAPH_FORMAT_VERSION: u32 = 1;
+pub const GRAPH_FORMAT_VERSION: u32 = 2;
 
 /// Serialize a Tier-2 graph for the connection cache: `(version, graph)` so a
 /// loader can reject a blob written by an older/newer layout before
@@ -390,12 +642,29 @@ fn now_unix() -> i64 {
 /// Phases the background indexer reports through `on_progress`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IndexingStage {
+    Discovering,
+    Delta,
     Sampling,
     Embedding,
     Complete,
 }
 
 impl SchemaGraph {
+    /// Returns references to all columns belonging to the specified table_id.
+    pub fn columns_for_table(&self, table_id: usize) -> Vec<&ColumnEntry> {
+        if let Some(col_indices) = self.columns_by_table.get(&table_id) {
+            col_indices
+                .iter()
+                .filter_map(|&idx| self.columns.get(idx))
+                .collect()
+        } else {
+            self.columns
+                .iter()
+                .filter(|c| c.table_id == table_id)
+                .collect()
+        }
+    }
+
     /// Tier-1: metadata only, no sampling, no embeddings. Fast enough to run
     /// inside connect(). Returns the canonical snapshot for fingerprinting.
     pub async fn from_catalog(
@@ -407,9 +676,16 @@ impl SchemaGraph {
         // replace two hand-written Postgres queries; the FK edges come from a
         // third and are applied after embedding, as before.
         let objects = client
-            .list_all_objects(connection_id, vec![lucent_protocol::ObjectKind::Table])
+            .list_all_objects(
+                connection_id,
+                vec![
+                    lucent_protocol::ObjectKind::Table,
+                    lucent_protocol::ObjectKind::View,
+                    lucent_protocol::ObjectKind::MaterializedView,
+                ],
+            )
             .await
-            .map_err(|e| format!("table metadata: {e}"))?;
+            .map_err(|e| format!("table/view metadata: {e}"))?;
 
         let refs: Vec<lucent_protocol::ObjectRef> = objects
             .iter()
@@ -437,7 +713,7 @@ impl SchemaGraph {
 
         for (tid, col_infos) in &table_columns {
             let ids = columns_by_table.entry(*tid).or_default();
-            for (name, data_type, schema, table, is_pk) in col_infos {
+            for (name, data_type, schema, table, is_pk, is_nullable) in col_infos {
                 let cid = columns.len();
                 let doc_text = doc_text_for(schema, table, name, data_type);
                 columns.push(ColumnEntry {
@@ -448,6 +724,7 @@ impl SchemaGraph {
                     name: name.clone(),
                     data_type: data_type.clone(),
                     is_primary_key: *is_pk,
+                    is_nullable: *is_nullable,
                     sample_values: vec![],
                     fk_ref: None,
                     embedding: vec![],
@@ -517,6 +794,7 @@ impl SchemaGraph {
                 .map(|t| SnapshotTable {
                     schema: t.schema.clone(),
                     name: t.name.clone(),
+                    kind: t.kind.clone(),
                     row_count_estimate: t.row_count_estimate,
                     partition_info: t.partition_info.clone(),
                 })
@@ -529,6 +807,7 @@ impl SchemaGraph {
                     name: c.name.clone(),
                     data_type: c.data_type.clone(),
                     is_primary_key: c.is_primary_key,
+                    is_nullable: c.is_nullable,
                 })
                 .collect(),
             fks: fk_edges
@@ -672,9 +951,10 @@ impl SchemaIndexer {
     /// behavior change, so the lint is allowed at the function level.
     #[allow(clippy::too_many_arguments)]
     pub async fn enrich(
-        _connection_id: ConnectionId,
+        connection_id: ConnectionId,
         snapshot: &CatalogSnapshot,
         graph: &SchemaGraph,
+        prior_graph: Option<&SchemaGraph>,
         client: Option<&ConnectorClient>,
         sampling_connection_id: Option<ConnectionId>,
         embedder: &SingleFlightEmbedder,
@@ -682,10 +962,12 @@ impl SchemaIndexer {
         connection_key: &str,
         sample_values: bool,
         capabilities: &lucent_protocol::DriverCapabilities,
-        on_progress: &(dyn Fn(IndexingStage, usize, usize, usize, usize) + Send + Sync),
+        on_progress: &(dyn Fn(crate::ai::events::IndexingProgressPayload) + Send + Sync),
     ) -> Result<SchemaGraph, String> {
+        let conn_id_str = connection_id.0.to_string();
         let total = graph.tables.len();
         let column_count = graph.columns.len();
+        let start = std::time::Instant::now();
 
         // Fast path: unchanged schema with a persisted Tier-2 graph.
         if let Some(entry) = cache.get_connection_cache(connection_key).await? {
@@ -693,7 +975,21 @@ impl SchemaIndexer {
                 match decode_persisted_graph(&entry.graph_blob) {
                     Ok(mut tier2) => {
                         tier2.built_at_unix = now_unix();
-                        on_progress(IndexingStage::Complete, total, total, column_count, 0);
+                        on_progress(crate::ai::events::IndexingProgressPayload {
+                            connection_id: conn_id_str.clone(),
+                            stage: "complete".into(),
+                            processed_tables: total,
+                            total_tables: total,
+                            added_tables_count: 0,
+                            modified_tables_count: 0,
+                            deleted_tables_count: 0,
+                            unchanged_tables_count: total,
+                            cache_hits: column_count,
+                            embeddings_computed: 0,
+                            is_complete: true,
+                            elapsed_ms: start.elapsed().as_millis() as u64,
+                            detail: Some("Schema up to date (cached)".into()),
+                        });
                         return Ok(tier2);
                     }
                     Err(e) => {
@@ -710,95 +1006,200 @@ impl SchemaIndexer {
             }
         }
 
-        let mut tier2 = graph.clone();
-        let table_columns = graph_columns_by_table(graph);
+        // Delta Detection:
+        // Try to obtain previous snapshot/graph from prior_graph or by decoding the cached graph blob
+        let prev_graph_from_cache = match cache.get_connection_cache(connection_key).await {
+            Ok(Some(entry)) => decode_persisted_graph(&entry.graph_blob).ok(),
+            _ => None,
+        };
+        let effective_prior_graph = prior_graph.or(prev_graph_from_cache.as_ref());
 
-        // 1. Sampling — chunked 10 tables/statement on session B ONLY. The
-        //    statement timeout is scoped to a short transaction (BEGIN → SET
-        //    LOCAL → query → COMMIT/ROLLBACK) so it can never leak onto a
-        //    shared session, and there is NO fallback to the editor connection:
-        //    sampling the user's active session would mutate its timeout.
+        let delta = if let Some(pg) = effective_prior_graph {
+            let prev_snapshot = snapshot_from_graph(pg);
+            compute_schema_delta(&prev_snapshot, snapshot)
+        } else {
+            SchemaDelta {
+                added: graph
+                    .tables
+                    .iter()
+                    .map(|t| TableDeltaSummary {
+                        schema: t.schema.clone(),
+                        name: t.name.clone(),
+                        kind: t.kind.clone(),
+                    })
+                    .collect(),
+                modified: vec![],
+                deleted: vec![],
+                unchanged: vec![],
+            }
+        };
+
+        log::info!(
+            "[indexing] Delta for {}: {} added, {} modified, {} deleted, {} unchanged",
+            connection_key,
+            delta.added.len(),
+            delta.modified.len(),
+            delta.deleted.len(),
+            delta.unchanged.len()
+        );
+
+        on_progress(crate::ai::events::IndexingProgressPayload {
+            connection_id: conn_id_str.clone(),
+            stage: "delta".into(),
+            processed_tables: 0,
+            total_tables: total,
+            added_tables_count: delta.added.len(),
+            modified_tables_count: delta.modified.len(),
+            deleted_tables_count: delta.deleted.len(),
+            unchanged_tables_count: delta.unchanged.len(),
+            cache_hits: 0,
+            embeddings_computed: 0,
+            is_complete: false,
+            elapsed_ms: start.elapsed().as_millis() as u64,
+            detail: Some(format!(
+                "Delta: {} added, {} modified, {} deleted, {} unchanged",
+                delta.added.len(),
+                delta.modified.len(),
+                delta.deleted.len(),
+                delta.unchanged.len()
+            )),
+        });
+
+        let mut tier2 = graph.clone();
+
+        // 1. Copy sample values & embeddings from unchanged tables in effective_prior_graph
+        if let Some(pg) = effective_prior_graph {
+            let unchanged_set: std::collections::HashSet<(&str, &str)> = delta
+                .unchanged
+                .iter()
+                .map(|t| (t.schema.as_str(), t.name.as_str()))
+                .collect();
+
+            let mut prior_col_map = HashMap::new();
+            for c in &pg.columns {
+                prior_col_map.insert((c.schema.as_str(), c.table.as_str(), c.name.as_str()), c);
+            }
+
+            for c in &mut tier2.columns {
+                if unchanged_set.contains(&(c.schema.as_str(), c.table.as_str())) {
+                    if let Some(pc) = prior_col_map.get(&(c.schema.as_str(), c.table.as_str(), c.name.as_str())) {
+                        c.sample_values = pc.sample_values.clone();
+                        c.embedding = pc.embedding.clone();
+                    }
+                }
+            }
+        }
+
+        // 2. Selective Value Sampling: ONLY for added and modified tables!
         if sample_values {
-            if let Some(sampling_conn_id) = sampling_connection_id {
-                if let Some(client) = client {
-                    let chunks: Vec<&[TableEntry]> = graph.tables.chunks(10).collect();
-                    for (ci, chunk) in chunks.iter().enumerate() {
-                        on_progress(IndexingStage::Sampling, ci * 10 + chunk.len(), total, 0, 0);
-                        let builder = crate::sql_builder::for_driver(capabilities);
-                        let Some(sql) = build_sampling_sql(
-                            chunk,
-                            &table_columns,
-                            builder.as_ref(),
-                            &capabilities.id,
-                        ) else {
-                            continue;
-                        };
-                        // The transaction is the timeout-scoping mechanism; on
-                        // ANY failure path we roll back so session B never
-                        // retains an open sampling transaction.
-                        if let Err(e) = client.execute(sampling_conn_id, "BEGIN").await {
-                            log::warn!("sampling chunk {ci}: BEGIN failed: {e}; skipping chunk");
-                            break;
-                        }
-                        if let Err(e) = client
-                            .execute(sampling_conn_id, "SET LOCAL statement_timeout = 3000")
-                            .await
-                        {
-                            log::warn!("sampling chunk {ci}: SET LOCAL failed: {e}; rolling back");
-                            if let Err(rb) = client.execute(sampling_conn_id, "ROLLBACK").await {
-                                log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
+            let changed_set: std::collections::HashSet<(&str, &str)> = delta
+                .added
+                .iter()
+                .chain(delta.modified.iter())
+                .map(|t| (t.schema.as_str(), t.name.as_str()))
+                .collect();
+
+            let tables_to_sample: Vec<TableEntry> = graph
+                .tables
+                .iter()
+                .filter(|t| changed_set.contains(&(t.schema.as_str(), t.name.as_str())))
+                .cloned()
+                .collect();
+
+            if !tables_to_sample.is_empty() {
+                if let Some(sampling_conn_id) = sampling_connection_id {
+                    if let Some(client) = client {
+                        let sample_total = tables_to_sample.len();
+                        let table_columns = graph_columns_by_table(graph);
+                        let chunks: Vec<&[TableEntry]> = tables_to_sample.chunks(10).collect();
+
+                        for (ci, chunk) in chunks.iter().enumerate() {
+                            let processed_so_far = (ci * 10 + chunk.len()).min(sample_total);
+                            on_progress(crate::ai::events::IndexingProgressPayload {
+                                connection_id: conn_id_str.clone(),
+                                stage: "sampling".into(),
+                                processed_tables: processed_so_far,
+                                total_tables: total,
+                                added_tables_count: delta.added.len(),
+                                modified_tables_count: delta.modified.len(),
+                                deleted_tables_count: delta.deleted.len(),
+                                unchanged_tables_count: delta.unchanged.len(),
+                                cache_hits: 0,
+                                embeddings_computed: 0,
+                                is_complete: false,
+                                elapsed_ms: start.elapsed().as_millis() as u64,
+                                detail: Some(format!(
+                                    "Sampling values for changed relations ({}/{})",
+                                    processed_so_far, sample_total
+                                )),
+                            });
+
+                            let builder = crate::sql_builder::for_driver(capabilities);
+                            let Some(sql) = build_sampling_sql(
+                                chunk,
+                                &table_columns,
+                                builder.as_ref(),
+                                &capabilities.id,
+                            ) else {
+                                continue;
+                            };
+
+                            if let Err(e) = client.execute(sampling_conn_id, "BEGIN").await {
+                                log::warn!("sampling chunk {ci}: BEGIN failed: {e}; skipping chunk");
+                                break;
                             }
-                            break;
-                        }
-                        let query_id = QueryId(uuid::Uuid::new_v4());
-                        let result = tokio::time::timeout(
-                            Duration::from_secs(5),
-                            client.execute_with_id(query_id, sampling_conn_id, &sql, None),
-                        )
-                        .await;
-                        match result {
-                            Ok(Ok((res, _qid))) => {
-                                if let Err(e) = client.execute(sampling_conn_id, "COMMIT").await {
-                                    log::warn!(
-                                        "sampling chunk {ci}: COMMIT failed: {e}; rolling back"
-                                    );
-                                    if let Err(rb) =
-                                        client.execute(sampling_conn_id, "ROLLBACK").await
-                                    {
+                            if let Err(e) = client
+                                .execute(sampling_conn_id, "SET LOCAL statement_timeout = 3000")
+                                .await
+                            {
+                                log::warn!("sampling chunk {ci}: SET LOCAL failed: {e}; rolling back");
+                                if let Err(rb) = client.execute(sampling_conn_id, "ROLLBACK").await {
+                                    log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
+                                }
+                                break;
+                            }
+                            let query_id = QueryId(uuid::Uuid::new_v4());
+                            let result = tokio::time::timeout(
+                                Duration::from_secs(5),
+                                client.execute_with_id(query_id, sampling_conn_id, &sql, None),
+                            )
+                            .await;
+                            match result {
+                                Ok(Ok((res, _qid))) => {
+                                    if let Err(e) = client.execute(sampling_conn_id, "COMMIT").await {
+                                        log::warn!(
+                                            "sampling chunk {ci}: COMMIT failed: {e}; rolling back"
+                                        );
+                                        if let Err(rb) = client.execute(sampling_conn_id, "ROLLBACK").await {
+                                            log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
+                                        }
+                                        break;
+                                    }
+                                    apply_sample_values(&mut tier2, &res);
+                                }
+                                Ok(Err(e)) => {
+                                    log::warn!("sampling chunk {ci} failed: {e}");
+                                    if let Err(rb) = client.execute(sampling_conn_id, "ROLLBACK").await {
                                         log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
                                     }
                                     break;
                                 }
-                                apply_sample_values(&mut tier2, &res);
-                            }
-                            Ok(Err(e)) => {
-                                log::warn!("sampling chunk {ci} failed: {e}");
-                                if let Err(rb) = client.execute(sampling_conn_id, "ROLLBACK").await
-                                {
-                                    log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
+                                Err(_elapsed) => {
+                                    log::warn!("sampling chunk {ci} timed out; cancelling");
+                                    let _ = client.cancel(sampling_conn_id, query_id).await;
+                                    if let Err(rb) = client.execute(sampling_conn_id, "ROLLBACK").await {
+                                        log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
+                                    }
+                                    break;
                                 }
-                                break;
-                            }
-                            Err(_elapsed) => {
-                                log::warn!("sampling chunk {ci} timed out; cancelling");
-                                let _ = client.cancel(sampling_conn_id, query_id).await;
-                                if let Err(rb) = client.execute(sampling_conn_id, "ROLLBACK").await
-                                {
-                                    log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
-                                }
-                                break;
                             }
                         }
                     }
-                } else {
-                    log::info!("no DB client available; skipping value sampling");
                 }
-            } else {
-                log::info!("no dedicated session B available; skipping value sampling this run");
             }
         }
 
-        // 2. Hashes + bulk cache lookup.
+        // 3. Hashes + bulk cache lookup for embeddings
         let doc_texts: Vec<String> = tier2.columns.iter().map(|c| c.doc_text.clone()).collect();
         let hashes: Vec<String> = doc_texts
             .iter()
@@ -806,21 +1207,37 @@ impl SchemaIndexer {
             .collect();
         let cached = cache.get_embeddings(&hashes).await?;
 
-        // 3. Embed ONLY the misses.
+        // 4. Embed ONLY the misses
         let mut missing: Vec<(usize, String)> = Vec::new();
         for (i, h) in hashes.iter().enumerate() {
-            if !cached.contains_key(h) {
+            if tier2.columns[i].embedding.is_empty() && !cached.contains_key(h) {
                 missing.push((i, h.clone()));
             }
         }
+
+        let computed_count = missing.len();
+        let cache_hits_count = hashes.len().saturating_sub(computed_count);
+
         if !missing.is_empty() {
-            on_progress(
-                IndexingStage::Embedding,
-                cached.len(),
-                hashes.len(),
-                cached.len(),
-                missing.len(),
-            );
+            on_progress(crate::ai::events::IndexingProgressPayload {
+                connection_id: conn_id_str.clone(),
+                stage: "embedding".into(),
+                processed_tables: delta.unchanged.len(),
+                total_tables: total,
+                added_tables_count: delta.added.len(),
+                modified_tables_count: delta.modified.len(),
+                deleted_tables_count: delta.deleted.len(),
+                unchanged_tables_count: delta.unchanged.len(),
+                cache_hits: cache_hits_count,
+                embeddings_computed: computed_count,
+                is_complete: false,
+                elapsed_ms: start.elapsed().as_millis() as u64,
+                detail: Some(format!(
+                    "Embedding {} missing columns ({} cached)",
+                    computed_count, cache_hits_count
+                )),
+            });
+
             let missing_texts: Vec<String> =
                 missing.iter().map(|(i, _)| doc_texts[*i].clone()).collect();
             match embedder.embed_missing(&missing_texts).await {
@@ -847,11 +1264,6 @@ impl SchemaIndexer {
                     }
                 }
                 Err(e) => {
-                    // Degrade, don't fail the whole graph (spec contract: a
-                    // failed embedding must not fail the graph). The tier-2
-                    // clone keeps whatever resolved from the cache and is
-                    // still swapped; the blob is NOT persisted so the next
-                    // reconnect re-attempts the missing columns.
                     log::warn!(
                         "embedding {} missing columns failed ({e}); degrading to cached embeddings only",
                         missing.len()
@@ -859,18 +1271,16 @@ impl SchemaIndexer {
                 }
             }
         }
+
         for (i, h) in hashes.iter().enumerate() {
-            if let Some(v) = cached.get(h) {
-                tier2.columns[i].embedding = v.clone();
+            if tier2.columns[i].embedding.is_empty() {
+                if let Some(v) = cached.get(h) {
+                    tier2.columns[i].embedding = v.clone();
+                }
             }
         }
 
-        // 4. Persist the Tier-2 graph + fingerprint — only when every missing
-        //    column was embedded. A degraded run (embed failure) is swapped but
-        //    not pinned, so the next reconnect re-attempts it. The persisted
-        //    blob is version-tagged and carries NO sample values: live row
-        //    values are privacy-sensitive and never belong in the on-disk
-        //    cache (they stay in-memory for the current session only).
+        // 5. Persist the Tier-2 graph + fingerprint
         let embedded_count = tier2
             .columns
             .iter()
@@ -895,13 +1305,28 @@ impl SchemaIndexer {
                 hashes.len()
             );
         }
-        on_progress(
-            IndexingStage::Complete,
-            total,
-            total,
-            cached.len(),
-            missing.len(),
-        );
+
+        on_progress(crate::ai::events::IndexingProgressPayload {
+            connection_id: conn_id_str.clone(),
+            stage: "complete".into(),
+            processed_tables: total,
+            total_tables: total,
+            added_tables_count: delta.added.len(),
+            modified_tables_count: delta.modified.len(),
+            deleted_tables_count: delta.deleted.len(),
+            unchanged_tables_count: delta.unchanged.len(),
+            cache_hits: cache_hits_count,
+            embeddings_computed: computed_count,
+            is_complete: true,
+            elapsed_ms: start.elapsed().as_millis() as u64,
+            detail: Some(format!(
+                "Delta indexing complete in {}ms ({} hits, {} computed)",
+                start.elapsed().as_millis(),
+                cache_hits_count,
+                computed_count
+            )),
+        });
+
         Ok(tier2)
     }
 }
@@ -917,6 +1342,7 @@ fn graph_columns_by_table(graph: &SchemaGraph) -> TableColumns {
             col.schema.clone(),
             col.table.clone(),
             col.is_primary_key,
+            col.is_nullable,
         ));
     }
     table_columns
@@ -960,6 +1386,7 @@ mod sampling_sql_tests {
             id: 0,
             schema: "public".into(),
             name: "invoices".into(),
+            kind: "table".into(),
             row_count_estimate: 0,
             partition_info: None,
         }];
@@ -973,6 +1400,7 @@ mod sampling_sql_tests {
                     "public".to_string(),
                     "invoices".to_string(),
                     true,
+                    false,
                 ),
                 (
                     "status".to_string(),
@@ -980,6 +1408,7 @@ mod sampling_sql_tests {
                     "public".to_string(),
                     "invoices".to_string(),
                     false,
+                    true,
                 ),
                 (
                     "payload".to_string(),
@@ -987,6 +1416,7 @@ mod sampling_sql_tests {
                     "public".to_string(),
                     "invoices".to_string(),
                     false,
+                    true,
                 ),
                 (
                     "blob".to_string(),
@@ -994,6 +1424,7 @@ mod sampling_sql_tests {
                     "public".to_string(),
                     "invoices".to_string(),
                     false,
+                    true,
                 ),
             ],
         );
@@ -1080,6 +1511,7 @@ mod sampling_sql_tests {
             id: 0,
             schema: "public".into(),
             name: "blobs".into(),
+            kind: "table".into(),
             row_count_estimate: 0,
             partition_info: None,
         }];
@@ -1092,6 +1524,7 @@ mod sampling_sql_tests {
                 "public".to_string(),
                 "blobs".to_string(),
                 false,
+                true,
             )],
         );
         assert!(build_sampling_sql(&tables, &cols, &pg(), "postgres").is_none());
@@ -1103,6 +1536,7 @@ mod sampling_sql_tests {
             id: 0,
             schema: "public".into(),
             name: "weird\"tbl".into(),
+            kind: "table".into(),
             row_count_estimate: 0,
             partition_info: None,
         }];
@@ -1115,6 +1549,7 @@ mod sampling_sql_tests {
                 "public".to_string(),
                 "weird\"tbl".to_string(),
                 false,
+                true,
             )],
         );
         let sql = build_sampling_sql(&tables, &cols, &pg(), "postgres").unwrap();
@@ -1152,6 +1587,7 @@ mod partition_tests {
             id: 0,
             schema: "bookings".into(),
             name: "events".into(),
+            kind: "table".into(),
             row_count_estimate: 215_000,
             partition_info: Some("PARTITIONED BY RANGE (created_at) — 84 partitions".into()),
         };
@@ -1214,6 +1650,7 @@ mod tests {
                     id: c.table_id,
                     schema: c.schema.clone(),
                     name: c.table.clone(),
+                    kind: "table".into(),
                     row_count_estimate: 0,
                     partition_info: None,
                 });
@@ -1247,6 +1684,7 @@ mod tests {
             name: name.into(),
             data_type: data_type.into(),
             is_primary_key: is_pk,
+            is_nullable: false,
             sample_values: vec![],
             fk_ref: None,
             embedding,
@@ -1568,12 +2006,14 @@ mod tests {
                 SnapshotTable {
                     schema: "public".into(),
                     name: "b".into(),
+                    kind: "table".into(),
                     row_count_estimate: 0,
                     partition_info: None,
                 },
                 SnapshotTable {
                     schema: "public".into(),
                     name: "a".into(),
+                    kind: "table".into(),
                     row_count_estimate: 0,
                     partition_info: None,
                 },
@@ -1587,6 +2027,7 @@ mod tests {
         a.tables.push(SnapshotTable {
             schema: "public".into(),
             name: "c".into(),
+            kind: "table".into(),
             row_count_estimate: 0,
             partition_info: None,
         });
@@ -1595,6 +2036,20 @@ mod tests {
             compute_schema_hash(&a),
             "schema change must change the hash"
         );
+
+        let mut col_snap = a.clone();
+        col_snap.columns.push(SnapshotColumn {
+            schema: "public".into(),
+            table: "a".into(),
+            name: "col1".into(),
+            data_type: "text".into(),
+            is_primary_key: false,
+            is_nullable: false,
+        });
+        let h_col1 = compute_schema_hash(&col_snap);
+        col_snap.columns[0].is_nullable = true;
+        let h_col2 = compute_schema_hash(&col_snap);
+        assert_ne!(h_col1, h_col2, "nullability change must change schema hash");
     }
 
     #[tokio::test]
@@ -1622,12 +2077,13 @@ mod tests {
             &graph,
             None,
             None,
+            None,
             &embedder,
             &cache,
             &key,
             false,
             &fake_capabilities(),
-            &|_s, _p, _t, _h, _c| {},
+            &|_p| {},
         )
         .await
         .unwrap();
@@ -1669,12 +2125,13 @@ mod tests {
             &graph,
             None,
             None,
+            None,
             &embedder,
             &cache,
             "key2",
             false,
             &fake_capabilities(),
-            &|_s, _p, _t, _h, _c| {},
+            &|_p| {},
         )
         .await
         .unwrap();
@@ -1692,12 +2149,13 @@ mod tests {
             &graph,
             None,
             None,
+            None,
             &embedder,
             &cache,
             "key2",
             false,
             &fake_capabilities(),
-            &|_s, _p, _t, _h, _c| {},
+            &|_p| {},
         )
         .await
         .unwrap();
@@ -1733,12 +2191,13 @@ mod tests {
             &graph,
             None,
             None,
+            None,
             &embedder,
             &cache,
             &key,
             false,
             &fake_capabilities(),
-            &|_s, _p, _t, _h, _c| {},
+            &|_p| {},
         )
         .await
         .unwrap();
@@ -1778,12 +2237,13 @@ mod tests {
             &graph,
             None,
             None,
+            None,
             &embedder,
             &cache,
             "samples-key",
             false,
             &fake_capabilities(),
-            &|_s, _p, _t, _h, _c| {},
+            &|_p| {},
         )
         .await
         .unwrap();
@@ -1809,21 +2269,375 @@ mod tests {
             &graph,
             None,
             None,
+            None,
             &embedder,
             &cache,
             "samples-key",
             false,
             &fake_capabilities(),
-            &|_s, _p, _t, _h, _c| {},
+            &|_p| {},
         )
         .await
         .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1, "cache hit after first run");
         assert!(
             out2.columns[0].sample_values.is_empty(),
-            "cache-hit connections load the persisted graph with empty sample_values — the privacy fix strips samples from the blob, and the cache-hit fast path never re-harvests, so value hints stay empty until a schema change invalidates the fingerprint and triggers re-indexing"
+            "cache-hit connections load the persisted graph with empty sample_values"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_compute_schema_delta_categorizes_changes() {
+        let prev = CatalogSnapshot {
+            format_version: DOC_TEXT_FORMAT_VERSION,
+            tables: vec![
+                SnapshotTable {
+                    schema: "public".into(),
+                    name: "unchanged_t".into(),
+                    kind: "table".into(),
+                    row_count_estimate: 10,
+                    partition_info: None,
+                },
+                SnapshotTable {
+                    schema: "public".into(),
+                    name: "modified_t".into(),
+                    kind: "table".into(),
+                    row_count_estimate: 20,
+                    partition_info: None,
+                },
+                SnapshotTable {
+                    schema: "public".into(),
+                    name: "deleted_t".into(),
+                    kind: "view".into(),
+                    row_count_estimate: 0,
+                    partition_info: None,
+                },
+            ],
+            columns: vec![
+                SnapshotColumn {
+                    schema: "public".into(),
+                    table: "unchanged_t".into(),
+                    name: "id".into(),
+                    data_type: "int4".into(),
+                    is_primary_key: true,
+                    is_nullable: false,
+                },
+                SnapshotColumn {
+                    schema: "public".into(),
+                    table: "modified_t".into(),
+                    name: "id".into(),
+                    data_type: "int4".into(),
+                    is_primary_key: true,
+                    is_nullable: false,
+                },
+                SnapshotColumn {
+                    schema: "public".into(),
+                    table: "deleted_t".into(),
+                    name: "val".into(),
+                    data_type: "text".into(),
+                    is_primary_key: false,
+                    is_nullable: true,
+                },
+            ],
+            fks: vec![],
+        };
+
+        let curr = CatalogSnapshot {
+            format_version: DOC_TEXT_FORMAT_VERSION,
+            tables: vec![
+                SnapshotTable {
+                    schema: "public".into(),
+                    name: "unchanged_t".into(),
+                    kind: "table".into(),
+                    row_count_estimate: 12,
+                    partition_info: None,
+                },
+                SnapshotTable {
+                    schema: "public".into(),
+                    name: "modified_t".into(),
+                    kind: "table".into(),
+                    row_count_estimate: 25,
+                    partition_info: None,
+                },
+                SnapshotTable {
+                    schema: "public".into(),
+                    name: "added_t".into(),
+                    kind: "view".into(),
+                    row_count_estimate: 0,
+                    partition_info: None,
+                },
+            ],
+            columns: vec![
+                SnapshotColumn {
+                    schema: "public".into(),
+                    table: "unchanged_t".into(),
+                    name: "id".into(),
+                    data_type: "int4".into(),
+                    is_primary_key: true,
+                    is_nullable: false,
+                },
+                SnapshotColumn {
+                    schema: "public".into(),
+                    table: "modified_t".into(),
+                    name: "id".into(),
+                    data_type: "int4".into(),
+                    is_primary_key: true,
+                    is_nullable: false,
+                },
+                SnapshotColumn {
+                    schema: "public".into(),
+                    table: "modified_t".into(),
+                    name: "new_col".into(),
+                    data_type: "text".into(),
+                    is_primary_key: false,
+                    is_nullable: true,
+                },
+                SnapshotColumn {
+                    schema: "public".into(),
+                    table: "added_t".into(),
+                    name: "count".into(),
+                    data_type: "int8".into(),
+                    is_primary_key: false,
+                    is_nullable: true,
+                },
+            ],
+            fks: vec![],
+        };
+
+        let delta = compute_schema_delta(&prev, &curr);
+        assert_eq!(delta.added.len(), 1);
+        assert_eq!(delta.added[0].name, "added_t");
+        assert_eq!(delta.added[0].kind, "view");
+
+        assert_eq!(delta.modified.len(), 1);
+        assert_eq!(delta.modified[0].name, "modified_t");
+
+        assert_eq!(delta.deleted.len(), 1);
+        assert_eq!(delta.deleted[0].name, "deleted_t");
+
+        assert_eq!(delta.unchanged.len(), 1);
+        assert_eq!(delta.unchanged[0].name, "unchanged_t");
+    }
+
+    #[tokio::test]
+    async fn test_delta_enrich_preserves_unchanged_sample_values_and_embeddings() {
+        let dir = std::env::temp_dir().join(format!("lucent-delta-enrich-{}", std::process::id()));
+        let cache = PersistentVectorCache::open_at(dir.join("embeddings_v1.db")).unwrap();
+
+        // 1. Initial snapshot with two tables: users and products
+        let graph1 = SchemaGraph {
+            tables: vec![
+                TableEntry {
+                    id: 0,
+                    schema: "public".into(),
+                    name: "users".into(),
+                    kind: "table".into(),
+                    row_count_estimate: 100,
+                    partition_info: None,
+                },
+                TableEntry {
+                    id: 1,
+                    schema: "public".into(),
+                    name: "products".into(),
+                    kind: "table".into(),
+                    row_count_estimate: 50,
+                    partition_info: None,
+                },
+            ],
+            columns: vec![
+                ColumnEntry {
+                    id: 0,
+                    table_id: 0,
+                    schema: "public".into(),
+                    table: "users".into(),
+                    name: "name".into(),
+                    data_type: "text".into(),
+                    is_primary_key: false,
+                    is_nullable: false,
+                    sample_values: vec!["Alice".into()],
+                    fk_ref: None,
+                    embedding: vec![0.1, 0.2],
+                    doc_text: doc_text_for("public", "users", "name", "text"),
+                },
+                ColumnEntry {
+                    id: 1,
+                    table_id: 1,
+                    schema: "public".into(),
+                    table: "products".into(),
+                    name: "title".into(),
+                    data_type: "text".into(),
+                    is_primary_key: false,
+                    is_nullable: false,
+                    sample_values: vec!["Widget".into()],
+                    fk_ref: None,
+                    embedding: vec![0.3, 0.4],
+                    doc_text: doc_text_for("public", "products", "title", "text"),
+                },
+            ],
+            columns_by_table: HashMap::from([(0, vec![0]), (1, vec![1])]),
+            fk_edges: vec![],
+            table_adjacency: HashMap::new(),
+            tier: IndexingTier::FullyEnriched,
+            built_at_unix: 0,
+        };
+
+        // 2. Updated schema: users is unchanged, products has a new column 'price'
+        let graph2 = SchemaGraph {
+            tables: vec![
+                TableEntry {
+                    id: 0,
+                    schema: "public".into(),
+                    name: "users".into(),
+                    kind: "table".into(),
+                    row_count_estimate: 100,
+                    partition_info: None,
+                },
+                TableEntry {
+                    id: 1,
+                    schema: "public".into(),
+                    name: "products".into(),
+                    kind: "table".into(),
+                    row_count_estimate: 50,
+                    partition_info: None,
+                },
+            ],
+            columns: vec![
+                ColumnEntry {
+                    id: 0,
+                    table_id: 0,
+                    schema: "public".into(),
+                    table: "users".into(),
+                    name: "name".into(),
+                    data_type: "text".into(),
+                    is_primary_key: false,
+                    is_nullable: false,
+                    sample_values: vec![],
+                    fk_ref: None,
+                    embedding: vec![],
+                    doc_text: doc_text_for("public", "users", "name", "text"),
+                },
+                ColumnEntry {
+                    id: 1,
+                    table_id: 1,
+                    schema: "public".into(),
+                    table: "products".into(),
+                    name: "title".into(),
+                    data_type: "text".into(),
+                    is_primary_key: false,
+                    is_nullable: false,
+                    sample_values: vec![],
+                    fk_ref: None,
+                    embedding: vec![],
+                    doc_text: doc_text_for("public", "products", "title", "text"),
+                },
+                ColumnEntry {
+                    id: 2,
+                    table_id: 1,
+                    schema: "public".into(),
+                    table: "products".into(),
+                    name: "price".into(),
+                    data_type: "numeric".into(),
+                    is_primary_key: false,
+                    is_nullable: true,
+                    sample_values: vec![],
+                    fk_ref: None,
+                    embedding: vec![],
+                    doc_text: doc_text_for("public", "products", "price", "numeric"),
+                },
+            ],
+            columns_by_table: HashMap::from([(0, vec![0]), (1, vec![1, 2])]),
+            fk_edges: vec![],
+            table_adjacency: HashMap::new(),
+            tier: IndexingTier::MetadataOnly,
+            built_at_unix: 0,
+        };
+        let snapshot2 = snapshot_from_graph(&graph2);
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let embedder = SingleFlightEmbedder::new(Arc::new(CountingEmbed2 {
+            calls: calls.clone(),
+        }));
+
+        let out = SchemaIndexer::enrich(
+            ConnectionId(Uuid::new_v4()),
+            &snapshot2,
+            &graph2,
+            Some(&graph1),
+            None,
+            None,
+            &embedder,
+            &cache,
+            "delta-key",
+            false,
+            &fake_capabilities(),
+            &|_p| {},
+        )
+        .await
+        .unwrap();
+
+        // Unchanged table 'users' preserved its sample values and embeddings!
+        assert_eq!(out.columns[0].sample_values, vec!["Alice".to_string()]);
+        assert_eq!(out.columns[0].embedding, vec![0.1, 0.2]);
+
+        // New column was embedded
+        assert!(!out.columns[2].embedding.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_harvest_to_entries_includes_views_and_matviews() {
+        let summaries = vec![
+            ObjectSummary {
+                reference: ObjectRef {
+                    namespace: vec!["public".into()],
+                    name: "users_view".into(),
+                    kind: ObjectKind::View,
+                },
+                est_rows: Some(10),
+                comment: None,
+                partition: None,
+                is_partition_child: false,
+            },
+            ObjectSummary {
+                reference: ObjectRef {
+                    namespace: vec!["public".into()],
+                    name: "active_users_mv".into(),
+                    kind: ObjectKind::MaterializedView,
+                },
+                est_rows: Some(5),
+                comment: None,
+                partition: None,
+                is_partition_child: false,
+            },
+        ];
+
+        let details = vec![
+            ObjectDetail {
+                reference: ObjectRef {
+                    namespace: vec!["public".into()],
+                    name: "users_view".into(),
+                    kind: ObjectKind::View,
+                },
+                columns: vec![ColumnDetail {
+                    name: "email".into(),
+                    type_name: "text".into(),
+                    nullable: false,
+                    is_primary_key: false,
+                    ordinal: 1,
+                    default: None,
+                    comment: None,
+                    foreign_key: None,
+                }],
+                comment: None,
+            },
+        ];
+
+        let (tables, cols) = harvest_to_entries(summaries, details);
+        assert_eq!(tables.len(), 2);
+        assert_eq!(tables[0].kind, "view");
+        assert_eq!(tables[1].kind, "matview");
+        assert_eq!(cols.get(&tables[0].id).unwrap().len(), 1);
     }
 
     fn test_graph_and_snapshot() -> (SchemaGraph, CatalogSnapshot) {
@@ -1831,6 +2645,7 @@ mod tests {
             id: 0,
             schema: "public".into(),
             name: "users".into(),
+            kind: "table".into(),
             row_count_estimate: 0,
             partition_info: None,
         }];
@@ -1843,6 +2658,7 @@ mod tests {
                 name: "id".into(),
                 data_type: "int4".into(),
                 is_primary_key: true,
+                is_nullable: false,
                 sample_values: vec![],
                 fk_ref: None,
                 embedding: vec![],
@@ -1856,6 +2672,7 @@ mod tests {
                 name: "status".into(),
                 data_type: "text".into(),
                 is_primary_key: false,
+                is_nullable: true,
                 sample_values: vec![],
                 fk_ref: None,
                 embedding: vec![],
@@ -1876,6 +2693,7 @@ mod tests {
             tables: vec![SnapshotTable {
                 schema: "public".into(),
                 name: "users".into(),
+                kind: "table".into(),
                 row_count_estimate: 0,
                 partition_info: None,
             }],
@@ -1886,6 +2704,7 @@ mod tests {
                     name: "id".into(),
                     data_type: "int4".into(),
                     is_primary_key: true,
+                    is_nullable: false,
                 },
                 SnapshotColumn {
                     schema: "public".into(),
@@ -1893,6 +2712,7 @@ mod tests {
                     name: "status".into(),
                     data_type: "text".into(),
                     is_primary_key: false,
+                    is_nullable: true,
                 },
             ],
             fks: vec![],
@@ -1954,6 +2774,7 @@ mod tests {
                 id: i,
                 schema: "public".into(),
                 name: name.clone(),
+                kind: "table".into(),
                 row_count_estimate: 0,
                 partition_info: None,
             });
@@ -1965,6 +2786,7 @@ mod tests {
                 name: "id".into(),
                 data_type: "int4".into(),
                 is_primary_key: true,
+                is_nullable: false,
                 sample_values: vec![],
                 fk_ref: None,
                 embedding: vec![],
@@ -1988,6 +2810,7 @@ mod tests {
                 .map(|t| SnapshotTable {
                     schema: t.schema.clone(),
                     name: t.name.clone(),
+                    kind: t.kind.clone(),
                     row_count_estimate: t.row_count_estimate,
                     partition_info: t.partition_info.clone(),
                 })
@@ -2000,6 +2823,7 @@ mod tests {
                     name: c.name.clone(),
                     data_type: c.data_type.clone(),
                     is_primary_key: c.is_primary_key,
+                    is_nullable: c.is_nullable,
                 })
                 .collect(),
             fks: vec![],
@@ -2015,12 +2839,13 @@ mod tests {
             &graph,
             None,
             None,
+            None,
             &embedder,
             &cache,
             "cold-start-diagnostic-key",
             false,
             &fake_capabilities(),
-            &|_s, _p, _t, _h, _c| {},
+            &|_p| {},
         )
         .await
         .expect("enrich completes on a cold cache");

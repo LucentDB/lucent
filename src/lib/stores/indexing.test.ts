@@ -104,4 +104,58 @@ describe('indexing store', () => {
     vi.advanceTimersByTime(1500);
     expect(indexing.visible).toBe(false);
   });
+
+  it('tracks delta statistics and completed payload', async () => {
+    await initIndexingListeners();
+    const handler = (globalThis as any).__listeners['indexing:progress'];
+    handler({
+      payload: {
+        connectionId: 'c1',
+        stage: 'delta',
+        processedTables: 0,
+        totalTables: 10,
+        addedTablesCount: 2,
+        modifiedTablesCount: 1,
+        deletedTablesCount: 0,
+        unchangedTablesCount: 7,
+        cacheHits: 0,
+        embeddingsComputed: 0,
+        isComplete: false,
+        elapsedMs: 20,
+      },
+    });
+    expect(indexing.delta.added).toBe(2);
+    expect(indexing.delta.modified).toBe(1);
+    expect(indexing.delta.unchanged).toBe(7);
+
+    handler({
+      payload: {
+        connectionId: 'c1',
+        stage: 'complete',
+        processedTables: 10,
+        totalTables: 10,
+        addedTablesCount: 2,
+        modifiedTablesCount: 1,
+        deletedTablesCount: 0,
+        unchangedTablesCount: 7,
+        cacheHits: 15,
+        embeddingsComputed: 3,
+        isComplete: true,
+        elapsedMs: 85,
+      },
+    });
+
+    expect(indexing.isComplete).toBe(true);
+    expect(indexing.stats.cacheHits).toBe(15);
+    expect(indexing.stats.embeddingsComputed).toBe(3);
+    expect(indexing.lastCompletedPayload).not.toBeNull();
+  });
+
+  it('toggles details popover state', () => {
+    expect(indexing.detailsOpen).toBe(false);
+    indexing.toggleDetails();
+    expect(indexing.detailsOpen).toBe(true);
+    indexing.toggleDetails(false);
+    expect(indexing.detailsOpen).toBe(false);
+  });
 });

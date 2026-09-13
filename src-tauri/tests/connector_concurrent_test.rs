@@ -580,11 +580,18 @@ async fn test_get_objects_info_batches_columns_queries() {
     let ctx = lucent_lib::ai::tools::AiToolContext {
         db: std::sync::Arc::new(tokio::sync::Mutex::new(Some(client.clone()))),
         connection_id: Some(conn_a),
+        memory_connection_key: None,
         capabilities: None,
         config: lucent_lib::ai::config::AiConfig::default(),
         schema_graph: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         embedder: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         reranker: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        // This test exercises object info, not memory; an in-memory manager
+        // keeps it off the user's real memory.db.
+        memory_manager: std::sync::Arc::new(
+            lucent_lib::ai::memory::MemoryManager::open_in_memory()
+                .expect("in-memory memory db"),
+        ),
     };
     let tool = lucent_lib::ai::tools::objects::GetObjectsInfo::new(ctx.clone());
     let args = serde_json::json!({

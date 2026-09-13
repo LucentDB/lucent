@@ -32,7 +32,7 @@ pub fn estimate_tokens(text: &str) -> usize {
 }
 
 /// How a table's cardinality is stated. The estimate comes from the planner's
-/// statistics (`pg_class.reltuples` and equivalents), which read 0 until the
+/// statistics (catalog table estimates and equivalents), which read 0 until the
 /// table has been analyzed — so a freshly loaded database reports every table
 /// as empty. Rendering that as "~0 rows" invites the model to answer "this
 /// table has no data"; saying the count is unknown sends it to `count(*)`.
@@ -235,6 +235,7 @@ mod tests {
             name: name.into(),
             data_type: dt.into(),
             is_primary_key: pk,
+            is_nullable: false,
             sample_values: vals.into_iter().map(String::from).collect(),
             fk_ref: fk.map(String::from),
             embedding: vec![],
@@ -269,6 +270,7 @@ mod tests {
                     id: 0,
                     schema: "bookings".into(),
                     name: "flights".into(),
+                    kind: "table".into(),
                     row_count_estimate: 214_867,
                     partition_info: None,
                 },
@@ -276,6 +278,7 @@ mod tests {
                     id: 1,
                     schema: "bookings".into(),
                     name: "routes".into(),
+                    kind: "table".into(),
                     row_count_estimate: 710,
                     partition_info: None,
                 },
@@ -326,7 +329,7 @@ mod tests {
 
     #[test]
     fn unanalyzed_tables_report_an_unknown_count_not_zero() {
-        // `reltuples` (and its equivalents) read 0 until the table is
+        // Planner row estimates (and their equivalents) read 0 until the table is
         // analyzed, so a freshly loaded database reports every table as empty.
         // "~0 rows" reads as a fact and invites "this table has no data";
         // naming it unknown sends the model to count(*) instead.
@@ -397,6 +400,7 @@ mod tests {
                 id: 0,
                 schema: "bookings".into(),
                 name: "wide".into(),
+                kind: "table".into(),
                 row_count_estimate: 10,
                 partition_info: None,
             }],
@@ -452,6 +456,7 @@ mod tests {
                 id: t,
                 schema: "public".into(),
                 name: format!("table_number_{t}"),
+                kind: "table".into(),
                 row_count_estimate: 100,
                 partition_info: None,
             });
@@ -498,6 +503,7 @@ mod tests {
                 id: 0,
                 schema: "bookings".into(),
                 name: "routes".into(),
+                kind: "table".into(),
                 row_count_estimate: 710,
                 partition_info: None,
             }],

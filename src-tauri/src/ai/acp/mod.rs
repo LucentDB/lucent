@@ -677,11 +677,13 @@ mod tests {
         AiToolContext {
             db: Arc::new(Mutex::new(None)),
             connection_id: None,
+            memory_connection_key: None,
             capabilities: None,
             config: crate::ai::config::AiConfig::default(),
             schema_graph: Arc::new(Mutex::new(None)),
             embedder: Arc::new(Mutex::new(None)),
             reranker: Arc::new(Mutex::new(None)),
+            memory_manager: crate::ai::tools::test_memory_manager(),
         }
     }
 

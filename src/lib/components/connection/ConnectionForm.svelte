@@ -258,116 +258,21 @@
     handleSave();
   }}
 >
-  <div class="form-card">
-    <div class="card-section">
-      <h3 class="section-title">Database Credentials</h3>
+  <!-- Scrollable form body -->
+  <div class="form-body">
+    <div class="form-columns">
+      <!-- ─── Left column: credentials ─────────────────────────────── -->
+      <div class="col-primary">
+        <div class="field-group">
+          <span class="group-label">Connection</span>
 
-      <!-- Name -->
-      <label class="field">
-        <span class="label-text">Connection Name</span>
-        <div class="input-wrapper">
-          <svg
-            class="field-icon"
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <path
-              d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"
-            />
-            <line x1="7" y1="7" x2="7.01" y2="7" />
-          </svg>
-          <input
-            type="text"
-            bind:value={name}
-            placeholder="My Database"
-            required
-          />
-        </div>
-      </label>
-
-      <!-- Driver -->
-      <label class="field">
-        <span class="label-text">Driver</span>
-        <select
-          bind:value={driver}
-          class="styled-select"
-          onchange={resetParamsForDriver}
-        >
-          {#each drivers.data ?? [] as d (d.id)}
-            <option value={d.id}>{d.displayName}</option>
-          {/each}
-        </select>
-      </label>
-
-      <!-- Driver-defined connection parameters -->
-      {#if descriptor}
-        {#each descriptor.fields as field (field.key)}
-          <label class="field" for={`field-${field.key}`}>
-            <span class="label-text">{field.label}</span>
-            {#if field.kind === 'select'}
-              <select
-                id={`field-${field.key}`}
-                class="styled-select"
-                bind:value={params[field.key]}
-              >
-                {#each field.options as option (option)}
-                  <option value={option}>{option}</option>
-                {/each}
-              </select>
-            {:else if needsFilePicker(field)}
-              <div class="browse-row">
-                <input
-                  id={`field-${field.key}`}
-                  class="plain-input"
-                  type={fieldInputType(field)}
-                  placeholder={field.placeholder ?? ''}
-                  required={field.required}
-                  bind:value={params[field.key]}
-                />
-                <button
-                  type="button"
-                  class="browse-btn"
-                  onclick={() => browseFor(field.key)}
-                >
-                  Browse…
-                </button>
-              </div>
-            {:else}
-              <input
-                id={`field-${field.key}`}
-                class="plain-input"
-                type={fieldInputType(field)}
-                placeholder={field.placeholder ?? ''}
-                required={field.required}
-                bind:value={params[field.key]}
-              />
-            {/if}
-          </label>
-        {/each}
-      {/if}
-
-      <!-- Password (keychain secret — only drivers that use one) -->
-      {#if descriptor?.hasSecret}
-        <label class="field">
-          <span class="label-text">Password</span>
-          <div class="input-wrapper">
-            <input
-              type={showPassword ? 'text' : 'password'}
-              bind:value={password}
-              placeholder={isNew ? 'Password' : 'Leave blank to keep'}
-            />
-            <button
-              type="button"
-              class="eye-btn"
-              onclick={() => (showPassword = !showPassword)}
-              title={showPassword ? 'Hide password' : 'Show password'}
-            >
-              {#if showPassword}
+          <!-- Name + Driver on same row -->
+          <div class="field-row">
+            <label class="field flex-2">
+              <span class="label-text">Name</span>
+              <div class="input-wrapper">
                 <svg
+                  class="field-icon"
                   width="14"
                   height="14"
                   viewBox="0 0 24 24"
@@ -376,74 +281,314 @@
                   stroke-width="2"
                 >
                   <path
-                    d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"
+                    d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"
                   />
-                  <line x1="1" y1="1" x2="23" y2="23" />
+                  <line x1="7" y1="7" x2="7.01" y2="7" />
                 </svg>
-              {:else}
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                >
-                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                  <circle cx="12" cy="12" r="3" />
-                </svg>
+                <input
+                  type="text"
+                  bind:value={name}
+                  placeholder="My Database"
+                  required
+                />
+              </div>
+            </label>
+
+            <label class="field flex-1">
+              <span class="label-text">Driver</span>
+              <select
+                bind:value={driver}
+                class="styled-select"
+                onchange={resetParamsForDriver}
+              >
+                {#each drivers.data ?? [] as d (d.id)}
+                  <option value={d.id}>{d.displayName}</option>
+                {/each}
+              </select>
+            </label>
+          </div>
+
+          <!-- Driver-defined connection parameters -->
+          {#if descriptor}
+            {#if driver === 'postgres'}
+              <div class="field-row">
+                <label class="field flex-2" for="field-host">
+                  <span class="label-text">Host</span>
+                  <input
+                    id="field-host"
+                    class="plain-input"
+                    type="text"
+                    placeholder="127.0.0.1"
+                    required
+                    bind:value={params['host']}
+                  />
+                </label>
+                <label class="field flex-1" for="field-port">
+                  <span class="label-text">Port</span>
+                  <input
+                    id="field-port"
+                    class="plain-input"
+                    type="number"
+                    placeholder="5432"
+                    required
+                    bind:value={params['port']}
+                  />
+                </label>
+              </div>
+
+              <div class="field-row">
+                <label class="field flex-1" for="field-user">
+                  <span class="label-text">User</span>
+                  <input
+                    id="field-user"
+                    class="plain-input"
+                    type="text"
+                    placeholder="postgres"
+                    required
+                    bind:value={params['user']}
+                  />
+                </label>
+                <label class="field flex-1">
+                  <span class="label-text">Password</span>
+                  <div class="input-wrapper password-wrapper">
+                    <input
+                      type={showPassword ? 'text' : 'password'}
+                      class="plain-input password-input"
+                      bind:value={password}
+                      placeholder={isNew ? 'Password' : 'Leave blank to keep'}
+                    />
+                    <button
+                      type="button"
+                      class="eye-btn"
+                      onclick={() => (showPassword = !showPassword)}
+                      title={showPassword ? 'Hide password' : 'Show password'}
+                    >
+                      {#if showPassword}
+                        <svg
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="2"
+                        >
+                          <path
+                            d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"
+                          />
+                          <line x1="1" y1="1" x2="23" y2="23" />
+                        </svg>
+                      {:else}
+                        <svg
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="2"
+                        >
+                          <path
+                            d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"
+                          />
+                          <circle cx="12" cy="12" r="3" />
+                        </svg>
+                      {/if}
+                    </button>
+                  </div>
+                </label>
+              </div>
+
+              <div class="field-row">
+                <label class="field flex-1" for="field-database">
+                  <span class="label-text">Database</span>
+                  <input
+                    id="field-database"
+                    class="plain-input"
+                    type="text"
+                    placeholder="postgres"
+                    required
+                    bind:value={params['database']}
+                  />
+                </label>
+                <label class="field flex-1" for="field-ssl_mode">
+                  <span class="label-text">SSL Mode</span>
+                  <select
+                    id="field-ssl_mode"
+                    class="styled-select"
+                    bind:value={params['ssl_mode']}
+                  >
+                    <option value="disable">disable</option>
+                    <option value="prefer">prefer</option>
+                    <option value="require">require</option>
+                  </select>
+                </label>
+              </div>
+            {:else}
+              {#each descriptor.fields as field (field.key)}
+                <label class="field" for={`field-${field.key}`}>
+                  <span class="label-text">{field.label}</span>
+                  {#if field.kind === 'select'}
+                    <select
+                      id={`field-${field.key}`}
+                      class="styled-select"
+                      bind:value={params[field.key]}
+                    >
+                      {#each field.options as option (option)}
+                        <option value={option}>{option}</option>
+                      {/each}
+                    </select>
+                  {:else if needsFilePicker(field)}
+                    <div class="browse-row">
+                      <input
+                        id={`field-${field.key}`}
+                        class="plain-input"
+                        type={fieldInputType(field)}
+                        placeholder={field.placeholder ?? ''}
+                        required={field.required}
+                        bind:value={params[field.key]}
+                      />
+                      <button
+                        type="button"
+                        class="browse-btn"
+                        onclick={() => browseFor(field.key)}
+                      >
+                        Browse…
+                      </button>
+                    </div>
+                  {:else}
+                    <input
+                      id={`field-${field.key}`}
+                      class="plain-input"
+                      type={fieldInputType(field)}
+                      placeholder={field.placeholder ?? ''}
+                      required={field.required}
+                      bind:value={params[field.key]}
+                    />
+                  {/if}
+                </label>
+              {/each}
+
+              <!-- Password (keychain secret — only drivers that use one) -->
+              {#if descriptor?.hasSecret}
+                <label class="field">
+                  <span class="label-text">Password</span>
+                  <div class="input-wrapper password-wrapper">
+                    <input
+                      type={showPassword ? 'text' : 'password'}
+                      class="plain-input password-input"
+                      bind:value={password}
+                      placeholder={isNew ? 'Password' : 'Leave blank to keep'}
+                    />
+                    <button
+                      type="button"
+                      class="eye-btn"
+                      onclick={() => (showPassword = !showPassword)}
+                      title={showPassword ? 'Hide password' : 'Show password'}
+                    >
+                      {#if showPassword}
+                        <svg
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="2"
+                        >
+                          <path
+                            d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"
+                          />
+                          <line x1="1" y1="1" x2="23" y2="23" />
+                        </svg>
+                      {:else}
+                        <svg
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="2"
+                        >
+                          <path
+                            d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"
+                          />
+                          <circle cx="12" cy="12" r="3" />
+                        </svg>
+                      {/if}
+                    </button>
+                  </div>
+                </label>
               {/if}
-            </button>
-          </div>
-        </label>
-      {/if}
+            {/if}
+          {/if}
+        </div>
+      </div>
 
-      <!-- Alias — the @mention handle the AI uses to address this connection -->
-      <label class="field">
-        <span class="label-text">Alias (@mention)</span>
-        <input
-          type="text"
-          class="plain-input"
-          bind:value={alias}
-          placeholder="e.g. prod-warehouse"
-        />
-      </label>
-    </div>
+      <!-- ─── Right column: metadata ───────────────────────────────── -->
+      <div class="col-secondary">
+        <div class="field-group">
+          <span class="group-label">Metadata</span>
 
-    <div class="card-section border-top">
-      <h3 class="section-title">Environment & Tag</h3>
-      <div class="field-row align-center">
-        <label class="field flex-1">
-          <span class="label-text">Group Tag</span>
-          <input
-            type="text"
-            bind:value={group}
-            placeholder="e.g. Production, Development"
-            class="plain-input"
-          />
-        </label>
-        <label class="field flex-1">
-          <span class="label-text">Badge Color</span>
-          <div class="color-picker">
-            {#each colorPalette as c}
-              <button
-                type="button"
-                class="color-swatch"
-                class:selected={color === c}
-                style="background: {c}"
-                onclick={() => (color = c)}
-                title={c}
-              ></button>
-            {/each}
+          <!-- Alias -->
+          <label class="field">
+            <span class="label-text">Alias (@mention)</span>
+            <input
+              type="text"
+              class="plain-input"
+              bind:value={alias}
+              placeholder="e.g. prod-warehouse"
+            />
+          </label>
+
+          <!-- Group tag -->
+          <label class="field">
+            <span class="label-text">Group Tag</span>
+            <input
+              type="text"
+              bind:value={group}
+              placeholder="e.g. Production"
+              class="plain-input"
+            />
+          </label>
+
+          <!-- Badge Color -->
+          <div class="field">
+            <span class="label-text">Badge Color</span>
+            <div class="color-picker">
+              {#each colorPalette as c}
+                <button
+                  type="button"
+                  class="color-swatch"
+                  class:selected={color === c}
+                  style="background: {c}"
+                  onclick={() => (color = c)}
+                  title={c}
+                ></button>
+              {/each}
+            </div>
           </div>
-        </label>
+        </div>
       </div>
     </div>
   </div>
 
-  <!-- Actions -->
+  <!-- ─── Sticky action footer ─────────────────────────────────────── -->
   <div class="form-actions">
-    <div class="test-area">
+    <!-- Test result (if any) spans full width above buttons -->
+    {#if testResult || testError}
+      <div class="test-result-row">
+        {#if testResult}
+          <span class="test-badge test-success">
+            ✓ {testResult}
+          </span>
+        {/if}
+        {#if testError}
+          <span class="test-badge test-error">
+            ✕ {testError}
+          </span>
+        {/if}
+      </div>
+    {/if}
+
+    <div class="action-row">
       <button
         type="button"
         class="test-btn"
@@ -453,7 +598,7 @@
       >
         {#if testing}
           <span class="spinner-sm"></span>
-          Testing...
+          Testing…
         {:else}
           <svg
             width="14"
@@ -469,19 +614,9 @@
           Test Connection
         {/if}
       </button>
-      {#if testResult}
-        <span class="test-badge test-success">
-          ✓ {testResult}
-        </span>
-      {/if}
-      {#if testError}
-        <span class="test-badge test-error">
-          ✕ {testError}
-        </span>
-      {/if}
-    </div>
 
-    <div class="save-area">
+      <div class="action-spacer"></div>
+
       {#if onCancel}
         <button type="button" class="cancel-btn" onclick={() => onCancel?.()}>
           Cancel
@@ -490,7 +625,7 @@
       <button type="submit" class="save-btn" disabled={saving}>
         <span
           >{saving
-            ? 'Saving...'
+            ? 'Saving…'
             : isNew
               ? 'Connect & Save'
               : 'Save Connection'}</span
@@ -502,57 +637,77 @@
 </form>
 
 <style>
+  /* ─── Root form layout ─────────────────────────────────────────────── */
   .connection-form {
     display: flex;
     flex-direction: column;
-    gap: 16px;
-  }
-  .form-card {
     background: var(--bg-surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-card, 0 2px 8px rgba(0, 0, 0, 0.06));
-    overflow: hidden;
+    overflow: visible;
   }
-  .card-section {
-    padding: 18px 20px;
+
+  /* Form body in natural document flow */
+  .form-body {
+    padding: 16px 18px 12px;
+    overflow: visible;
+  }
+
+  /* ─── Two-column grid ──────────────────────────────────────────────── */
+  .form-columns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 18px;
+  }
+
+  .col-primary,
+  .col-secondary {
     display: flex;
     flex-direction: column;
-    gap: 14px;
   }
-  .card-section.border-top {
-    border-top: 1px solid var(--border);
-    background: color-mix(in srgb, var(--bg-surface) 95%, var(--bg-elevated));
+
+  /* ─── Field groups ─────────────────────────────────────────────────── */
+  .field-group {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
   }
-  .section-title {
-    font-size: 12px;
+
+  .group-label {
+    font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.05em;
     color: var(--text-muted);
-    margin: 0 0 2px 0;
+    margin-bottom: 2px;
   }
+
   .field {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
   }
+
   .field-row {
     display: flex;
-    gap: 12px;
+    gap: 10px;
     align-items: flex-start;
-  }
-  .field-row.align-center {
-    align-items: center;
   }
   .flex-1 {
     flex: 1;
   }
+  .flex-2 {
+    flex: 2;
+  }
+
   .label-text {
     font-size: 12px;
     font-weight: 500;
     color: var(--text-secondary);
   }
+
+  /* ─── Input controls (consistent 34px height) ──────────────────────── */
   .input-wrapper {
     position: relative;
     display: flex;
@@ -567,12 +722,11 @@
     flex-shrink: 0;
   }
 
-  /* Consistent 36px control height across all inputs & dropdowns */
   .input-wrapper input,
   .plain-input,
   .styled-select {
     width: 100%;
-    height: 36px;
+    height: 34px;
     padding: 0 10px 0 32px;
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
@@ -590,6 +744,14 @@
   .plain-input {
     padding: 0 10px;
   }
+  .password-input {
+    padding: 0 32px 0 10px;
+  }
+  .styled-select {
+    padding: 0 10px;
+    cursor: pointer;
+  }
+
   .browse-row {
     display: flex;
     gap: 8px;
@@ -600,8 +762,8 @@
     min-width: 0;
   }
   .browse-btn {
-    height: 36px;
-    padding: 0 14px;
+    height: 34px;
+    padding: 0 12px;
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: var(--bg-surface);
@@ -621,16 +783,14 @@
     color: var(--text);
     border-color: var(--border-hover, var(--border));
   }
-  .styled-select {
-    padding: 0 10px;
-    cursor: pointer;
-  }
+
   .input-wrapper input:focus,
   .plain-input:focus,
   .styled-select:focus {
     border-color: var(--accent);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent);
   }
+
   .eye-btn {
     position: absolute;
     right: 8px;
@@ -650,17 +810,18 @@
   .eye-btn:hover {
     color: var(--text);
   }
+
+  /* ─── Color picker ─────────────────────────────────────────────────── */
   .color-picker {
     display: flex;
-    gap: 6px;
+    gap: 5px;
     flex-wrap: wrap;
     align-items: center;
-    height: 36px;
-    padding: 0;
+    padding: 2px 0;
   }
   .color-swatch {
-    width: 22px;
-    height: 22px;
+    width: 20px;
+    height: 20px;
     border-radius: 50%;
     border: 2px solid transparent;
     cursor: pointer;
@@ -670,35 +831,45 @@
     padding: 0;
   }
   .color-swatch:hover {
-    transform: scale(1.2);
+    transform: scale(1.15);
   }
   .color-swatch.selected {
     border-color: var(--text);
-    transform: scale(1.2);
+    transform: scale(1.15);
     box-shadow: 0 0 0 2px var(--bg-surface);
   }
 
+  /* ─── Sticky action footer ─────────────────────────────────────────── */
   .form-actions {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: start;
-    gap: 12px;
-    padding-top: 4px;
-  }
-  .test-area {
-    min-width: 0;
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    align-items: start;
-    gap: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 18px 14px;
+    border-top: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg-surface) 95%, var(--bg-elevated));
+    flex-shrink: 0;
   }
 
-  /* Consistent 36px height across all buttons & status badges */
+  .test-result-row {
+    min-width: 0;
+  }
+
+  .action-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .action-spacer {
+    flex: 1;
+  }
+
+  /* ─── Buttons (consistent 34px height) ─────────────────────────────── */
   .test-btn,
   .cancel-btn,
   .save-btn,
   .test-badge {
-    height: 36px;
+    height: 34px;
     box-sizing: border-box;
     display: inline-flex;
     align-items: center;
@@ -710,10 +881,9 @@
 
   .test-btn {
     flex-shrink: 0;
-    justify-self: start;
     white-space: nowrap;
     gap: 6px;
-    padding: 0 14px;
+    padding: 0 12px;
     border: 1px solid var(--border);
     background: var(--bg-surface);
     color: var(--text-secondary);
@@ -731,6 +901,7 @@
   .test-btn:disabled {
     opacity: 0.6;
   }
+
   .spinner-sm {
     width: 12px;
     height: 12px;
@@ -744,15 +915,17 @@
       transform: rotate(360deg);
     }
   }
+
   .test-badge {
     min-width: 0;
-    min-height: 36px;
+    min-height: 34px;
     height: auto;
-    padding: 8px 12px;
+    padding: 6px 12px;
     justify-content: flex-start;
     text-align: left;
     line-height: 1.35;
     overflow-wrap: anywhere;
+    width: 100%;
   }
   .test-success {
     color: var(--success, #22c55e);
@@ -762,16 +935,11 @@
     color: var(--error, #ef4444);
     background: color-mix(in srgb, var(--error, #ef4444) 12%, transparent);
   }
-  .save-area {
-    display: flex;
-    flex-shrink: 0;
-    gap: 10px;
-    align-items: center;
-  }
+
   .cancel-btn {
     flex-shrink: 0;
     white-space: nowrap;
-    padding: 0 16px;
+    padding: 0 14px;
     border: 1px solid var(--border);
     background: var(--bg-surface);
     color: var(--text-secondary);
@@ -781,11 +949,12 @@
     background: var(--bg-hover);
     color: var(--text);
   }
+
   .save-btn {
     flex-shrink: 0;
     white-space: nowrap;
     gap: 8px;
-    padding: 0 18px;
+    padding: 0 16px;
     border: none;
     background: var(--accent);
     color: #fff;
@@ -803,23 +972,6 @@
     opacity: 0.6;
   }
 
-  @media (max-width: 600px) {
-    .form-actions {
-      grid-template-columns: 1fr;
-    }
-    .test-area {
-      grid-template-columns: 1fr;
-    }
-    .test-badge {
-      width: 100%;
-    }
-    .save-area {
-      width: 100%;
-      justify-content: flex-end;
-    }
-  }
-
-  /* Clean readymade text badge for keyboard shortcut */
   .btn-shortcut {
     font-size: 11px;
     font-family:
@@ -831,5 +983,19 @@
     line-height: 1;
     font-weight: 500;
     letter-spacing: 0.02em;
+  }
+
+  /* ─── Responsive: single column on narrow widths ───────────────────── */
+  @media (max-width: 560px) {
+    .form-columns {
+      grid-template-columns: 1fr;
+      gap: 14px;
+    }
+    .field-row {
+      flex-direction: column;
+    }
+    .action-row {
+      flex-wrap: wrap;
+    }
   }
 </style>

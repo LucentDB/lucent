@@ -227,11 +227,13 @@ async fn capstone_tool_roundtrip_and_dml_approval() {
     let ctx = AiToolContext {
         db: Arc::new(Mutex::new(Some(client.clone()))),
         connection_id: Some(conn_id),
+        memory_connection_key: None,
         capabilities,
         config: AiConfig::default(),
         schema_graph: Arc::new(Mutex::new(None)),
         embedder: Arc::new(Mutex::new(None)),
         reranker: Arc::new(Mutex::new(None)),
+        memory_manager: crate::ai::tools::test_memory_manager(),
     };
     let schemas = mcp_server::lucent_tools_schema(ctx.clone());
     let executor: Arc<dyn ToolExecutor> = Arc::new(ContextToolExecutor::new(ctx));
@@ -513,11 +515,13 @@ async fn agent_spawning_mcp_binary_marks_bridge_connected() {
     let ctx = crate::ai::tools::AiToolContext {
         db: Arc::new(Mutex::new(None)),
         connection_id: None,
+        memory_connection_key: None,
         capabilities: None,
         config: AiConfig::default(),
         schema_graph: Arc::new(Mutex::new(None)),
         embedder: Arc::new(Mutex::new(None)),
         reranker: Arc::new(Mutex::new(None)),
+        memory_manager: crate::ai::tools::test_memory_manager(),
     };
 
     let acp = crate::ai::acp::AcpState::new();
@@ -592,11 +596,13 @@ async fn tools_gate_claims_tools_when_the_bridge_connects() {
         crate::ai::tools::AiToolContext {
             db: Arc::new(Mutex::new(None)),
             connection_id: None,
+            memory_connection_key: None,
             capabilities: None,
             config: AiConfig::default(),
             schema_graph: Arc::new(Mutex::new(None)),
             embedder: Arc::new(Mutex::new(None)),
             reranker: Arc::new(Mutex::new(None)),
+            memory_manager: crate::ai::tools::test_memory_manager(),
         },
     );
     let sink = Arc::new(crate::ai::agent::CollectorSink(std::sync::Mutex::new(
@@ -613,6 +619,7 @@ async fn tools_gate_claims_tools_when_the_bridge_connects() {
             conv,
             sink.clone(),
             tokio_util::sync::CancellationToken::new(),
+            0,
         )
         .await
         .expect("turn completes with the bridge connected");

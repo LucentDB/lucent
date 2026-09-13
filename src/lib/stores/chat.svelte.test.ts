@@ -5,6 +5,7 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
 }));
 
+import type { PersistedChatMessage } from '../ipc/ai.ts';
 import {
   chat,
   createConversation,
@@ -18,6 +19,7 @@ import {
   markStoppedToolCalls,
   finalizeSession,
   setSessionExpanded,
+  hydrateConversations,
 } from './chat.svelte.ts';
 
 function seedMessage(messageId: string, content = '') {
@@ -371,5 +373,161 @@ describe('createConversation', () => {
     expect(conv.error).toBeNull();
     conv.error = 'boom';
     expect(conv.error).toBe('boom');
+  });
+});
+
+describe('hydrateConversations', () => {
+  const persistedConvs = [
+    {
+      id: 'conv-a',
+      connection_id: 'conn-a',
+      title: 'First',
+      archived: false,
+      created_at: 1000,
+      updated_at: 1001,
+    },
+    {
+      id: 'conv-b',
+      connection_id: 'conn-b',
+      title: 'Second',
+      archived: false,
+      created_at: 2000,
+      updated_at: 2001,
+    },
+  ];
+  const persistedMessages: Record<string, PersistedChatMessage[]> = {
+    'conv-a': [
+      {
+        id: 'm1',
+        conversation_id: 'conv-a',
+        role: 'user',
+        content: 'hello',
+        session_json: null,
+        created_at: 1001,
+      },
+      {
+        id: 'm2',
+        conversation_id: 'conv-a',
+        role: 'assistant',
+        content: 'hi there',
+        session_json: null,
+        created_at: 1002,
+      },
+    ],
+    'conv-b': [
+      {
+        id: 'm3',
+        conversation_id: 'conv-b',
+        role: 'user',
+        content: 'second',
+        session_json: null,
+        created_at: 2001,
+      },
+    ],
+  };
+
+  beforeEach(() => {
+    chat.conversations = [];
+    chat.activeConversationId = null;
+    invokeMock.mockReset();
+    invokeMock.mockImplementation(
+      async (cmd: string, args: { conversationId?: string }) => {
+        if (cmd === 'list_chat_conversations') return persistedConvs;
+        if (cmd === 'load_chat_conversation')
+          return persistedMessages[args.conversationId ?? ''] ?? [];
+        return undefined;
+      },
+    );
+  });
+
+  it('restores every persisted conversation and adapts its messages to the runtime shape', async () => {
+    await hydrateConversations();
+
+    expect(chat.conversations).toHaveLength(2);
+    expect(chat.conversations.map((c) => c.id)).toEqual(['conv-a', 'conv-b']);
+    expect(chat.activeConversationId).toBe('conv-a');
+
+    // C1 runtime shape: `createdAt` is Unix ms, not the persisted seconds;
+    // the idle conversation fields start empty.
+    const a = getConv('conv-a');
+    expect(a.connectionId).toBe('conn-a');
+    expect(a.createdAt).toBe(1_000_000);
+    expect(a.isPaused).toBe(false);
+    expect(a.pausedDml).toBeNull();
+    expect(a.pendingPermission).toBeNull();
+    expect(a.messages).toHaveLength(2);
+    expect(a.messages[0]).toEqual({
+      id: 'm1',
+      role: 'user',
+      content: 'hello',
+      createdAt: 1_001_000,
+    });
+    expect(a.messages[1]).toMatchObject({
+      id: 'm2',
+      role: 'assistant',
+      content: 'hi there',
+      createdAt: 1_002_000,
+    });
+
+    // The non-active conversation is hydrated too, so its tab renders its
+    // title and history when selected.
+    const b = getConv('conv-b');
+    expect(b.connectionId).toBe('conn-b');
+    expect(b.messages).toHaveLength(1);
+    expect(b.messages[0]).toMatchObject({
+      id: 'm3',
+      role: 'user',
+      content: 'second',
+      createdAt: 2_001_000,
+    });
+  });
+
+  it('parses persisted session_json into the runtime work session', async () => {
+    const session = {
+      segments: [{ type: 'note', content: 'remembered' }],
+      startedAt: 5,
+      active: false,
+    };
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_chat_conversations') return [persistedConvs[0]];
+      if (cmd === 'load_chat_conversation')
+        return [
+          {
+            id: 'm1',
+            conversation_id: 'conv-a',
+            role: 'assistant',
+            content: 'answer',
+            session_json: JSON.stringify(session),
+            created_at: 10,
+          },
+        ];
+      return undefined;
+    });
+
+    await hydrateConversations();
+
+    expect(getConv('conv-a').messages[0].session).toEqual(session);
+  });
+
+  it('leaves the store untouched when nothing is persisted', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_chat_conversations') return [];
+      return undefined;
+    });
+
+    await hydrateConversations();
+
+    expect(chat.conversations).toEqual([]);
+    expect(chat.activeConversationId).toBeNull();
+  });
+
+  it('swallows IPC failures instead of rejecting app startup', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    invokeMock.mockRejectedValue(new Error('memory.db is unreadable'));
+
+    await expect(hydrateConversations()).resolves.toBeUndefined();
+    expect(chat.conversations).toEqual([]);
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });

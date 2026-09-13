@@ -187,6 +187,7 @@ mod tests {
             name: name.into(),
             data_type: "TEXT".into(),
             is_primary_key: false,
+            is_nullable: false,
             sample_values: vec![],
             fk_ref: None,
             embedding,
@@ -212,6 +213,7 @@ mod tests {
                     id: c.table_id,
                     schema: c.schema.clone(),
                     name: c.table.clone(),
+                    kind: "table".into(),
                     row_count_estimate: 0,
                     partition_info: None,
                 });

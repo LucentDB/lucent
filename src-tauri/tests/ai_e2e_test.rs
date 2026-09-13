@@ -59,11 +59,18 @@ async fn e2e_text_protocol_tool_parsing() {
     let calls = lucent_lib::ai::tools::all_tools(lucent_lib::ai::tools::AiToolContext {
         db: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         connection_id: None,
+        memory_connection_key: None,
         capabilities: None,
         config: lucent_lib::ai::config::AiConfig::default(),
         schema_graph: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         embedder: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         reranker: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        // Tool construction never touches memory; an in-memory manager keeps
+        // this test off the user's real memory.db.
+        memory_manager: std::sync::Arc::new(
+            lucent_lib::ai::memory::MemoryManager::open_in_memory()
+                .expect("in-memory memory db"),
+        ),
     });
     assert!(
         calls.iter().any(|t| t.name() == "search_objects"),

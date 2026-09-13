@@ -499,6 +499,9 @@ impl AgentSink for CollectorSink {
 /// owns the agent's prompt turn. Same signature, same sink/cancel contract.
 #[async_trait::async_trait]
 pub trait AgentDriver: Send + Sync {
+    /// `applied_memory_count` is the number of learned rules injected into
+    /// `system_prompt` this turn (F-C2); the driver echoes it on its terminal
+    /// `Done` event.
     async fn chat(
         &self,
         message: String,
@@ -507,6 +510,7 @@ pub trait AgentDriver: Send + Sync {
         conv_state: Arc<Mutex<ConversationState>>,
         sink: Arc<dyn AgentSink>,
         cancel: tokio_util::sync::CancellationToken,
+        applied_memory_count: usize,
     ) -> Result<(), String>;
 
     /// Type-identity hook so tests can assert which driver a branch chose.
@@ -546,6 +550,7 @@ impl DatabaseAgent {
         conv_state: Arc<Mutex<ConversationState>>,
         sink: Arc<dyn AgentSink>,
         cancel: tokio_util::sync::CancellationToken,
+        applied_memory_count: usize,
     ) -> Result<(), String> {
         let conversation_id = conv_state.lock().await.connection_id.clone();
 
@@ -580,6 +585,7 @@ impl DatabaseAgent {
                     conversation_id: conversation_id.clone(),
                     final_message: "Reached maximum turns.".into(),
                     usage: TokenUsage::default(),
+                    applied_memory_count,
                     cancelled: false,
                 });
                 return Ok(());
@@ -649,6 +655,7 @@ impl DatabaseAgent {
                     conversation_id: conversation_id.clone(),
                     final_message: final_msg,
                     usage: response.usage,
+                    applied_memory_count,
                     cancelled: false,
                 });
                 conv_state.lock().await.state = AgentState::Idle;
@@ -955,9 +962,18 @@ impl AgentDriver for DatabaseAgent {
         conv_state: Arc<Mutex<ConversationState>>,
         sink: Arc<dyn AgentSink>,
         cancel: tokio_util::sync::CancellationToken,
+        applied_memory_count: usize,
     ) -> Result<(), String> {
-        self.chat(message, config, system_prompt, conv_state, sink, cancel)
-            .await
+        self.chat(
+            message,
+            config,
+            system_prompt,
+            conv_state,
+            sink,
+            cancel,
+            applied_memory_count,
+        )
+        .await
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

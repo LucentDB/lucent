@@ -2,6 +2,7 @@
   import { onMount, onDestroy, untrack } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
   import { initIndexingListeners } from './lib/stores/indexing.svelte';
+  import { initMemoryDriftListeners } from './lib/stores/memoryDrift.svelte';
   import Sidebar from './lib/components/sidebar/Sidebar.svelte';
   import QueryEditor from './lib/components/editor/QueryEditor.svelte';
   import ResultsGrid from './lib/grid/ResultsGrid.svelte';
@@ -49,6 +50,8 @@
   import { schemaSummary } from './lib/stores/schema-summary.svelte.ts';
   import { editorSchema } from './lib/stores/editor-schema.svelte.ts';
   import { connections } from './lib/stores/connections.svelte.ts';
+  import { indexing } from './lib/stores/indexing.svelte.ts';
+  import StatusBar from './lib/components/statusbar/StatusBar.svelte';
   import { addRecentConnection } from './lib/stores/recent.js';
   import {
     chat,
@@ -61,6 +64,7 @@
     createNewTab as createNewChatTab,
     closeTab as closeChatTab,
     switchTab as switchChatTab,
+    hydrateConversations,
   } from './lib/stores/chat.svelte.ts';
   import {
     createAiSession,
@@ -228,6 +232,13 @@
       });
     })();
     void initIndexingListeners();
+    // Gate 1 drift from the background indexer (B-C5): retain genuine alerts
+    // keyed by connection so the Memory Drawer shows them without a manual
+    // consolidation (F-I2).
+    void initMemoryDriftListeners();
+    // Restore chat conversations persisted in memory.db. Fired once here, not
+    // per panel mount, so it cannot clobber live state on re-render.
+    void hydrateConversations();
   });
 
   let unlistenMenu = null;
@@ -568,7 +579,7 @@
       // Built as a new object, not mutated — see the repo's immutability rule.
       const opts = {
         ...fetchMoreOptions(tab, CHUNK_SIZE),
-        sort: wireSortFor(tab.sorting, tab.columns)[0] ?? null,
+        sort: wireSortFor(tab.sorting, tab.columns),
       };
       const result =
         tab.kind === 'view' || tab.kind === 'table'
@@ -602,7 +613,7 @@
       // Built as a new object, not mutated — see the repo's immutability rule.
       const opts = {
         ...refetchOptions(merged, CHUNK_SIZE),
-        sort: wireSortFor(merged.sorting, merged.columns)[0] ?? null,
+        sort: wireSortFor(merged.sorting, merged.columns),
       };
       const result =
         merged.kind === 'view' || merged.kind === 'table'
@@ -885,6 +896,8 @@
     if (item.id === 'new-notebook') goToNotebook();
     if (item.id === 'toggle-theme') theme.toggle();
     if (item.id === 'disconnect') handleDisconnect();
+    if (item.id === 'sync-schema-indexing') void indexing.syncSchemaIndexing(false);
+    if (item.id === 'rebuild-schema-indexing') void indexing.syncSchemaIndexing(true);
     if (item.id === 'toggle-ai-chat') {
       if (hasTabs) showChatPanel = !showChatPanel;
       else showChatPanel = true;
@@ -967,6 +980,18 @@
             description: 'Toggle the AI Copilot panel',
             icon: 'sparkles',
             shortcut: '⌘⇧A',
+          },
+          {
+            id: 'sync-schema-indexing',
+            label: 'Sync Schema Delta',
+            description: 'Run incremental indexing for changed tables and views',
+            icon: 'database',
+          },
+          {
+            id: 'rebuild-schema-indexing',
+            label: 'Rebuild Schema Index',
+            description: 'Force full schema re-indexing and vector cache rebuild',
+            icon: 'refresh',
           },
           {
             id: 'disconnect',
@@ -1251,6 +1276,14 @@
       </div>
     {/if}
 
+    <StatusBar
+      {connected}
+      connectionName={connectionName ?? ''}
+      databaseName={databaseName ?? ''}
+      driver={config?.driver ?? ''}
+      readOnly={config?.readonly ?? false}
+    />
+
     {#if showAiSettings}
       <div class="modal-overlay" onclick={() => (showAiSettings = false)}>
         <div class="modal-content" onclick={(e) => e.stopPropagation()}>
@@ -1497,12 +1530,13 @@
   }
   .landing-full {
     flex: 1;
+    min-height: 0;
     display: flex;
     flex-direction: column;
-    overflow: auto;
+    overflow-y: auto;
+    overflow-x: hidden;
     background: var(--bg);
     width: 100%;
-    height: 100%;
   }
   .modal-overlay {
     position: fixed;

@@ -8,11 +8,22 @@ pub struct Embedder {
 }
 
 impl Embedder {
+    pub const SCHEMA_MAX_LENGTH: usize = 128;
+    pub const MEMORY_MAX_LENGTH: usize = 512;
+
     pub fn new() -> Result<Self, String> {
+        Self::with_max_length(Self::SCHEMA_MAX_LENGTH)
+    }
+
+    pub fn new_memory() -> Result<Self, String> {
+        Self::with_max_length(Self::MEMORY_MAX_LENGTH)
+    }
+
+    pub fn with_max_length(max_length: usize) -> Result<Self, String> {
         let model = TextEmbedding::try_new(
             InitOptions::new(EmbeddingModel::BGESmallENV15)
                 .with_show_download_progress(false)
-                .with_max_length(128),
+                .with_max_length(max_length),
         )
         .map_err(|e| format!("failed to init embedding model: {e}"))?;
         Ok(Self {

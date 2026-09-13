@@ -1,5 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { ToolOutputPayload, AgentPermissionPayload } from '../ipc/ai.ts';
+import {
+  listChatConversations,
+  loadChatConversation,
+  type ToolOutputPayload,
+  type AgentPermissionPayload,
+  type PersistedChatMessage,
+} from '../ipc/ai.ts';
 import { argsMissing } from './tool-args.ts';
 
 export interface TokenUsage {
@@ -54,6 +60,10 @@ export interface ChatMessage {
   /** The agent's tool-permission request awaiting an answer (ACP mode, E4). */
   permissionRequest?: AgentPermissionPayload;
   usage?: TokenUsage;
+  /** How many learned memory rules were injected into this turn's system
+   *  prompt (F-C2). 0/undefined hides the memory pill. On ACP follow-up turns
+   *  this is 0 by design — only DELIVERED rules count. */
+  rulesApplied?: number;
   createdAt: number;
 }
 
@@ -159,6 +169,70 @@ export function closeTab(convId: string) {
 
 export function switchTab(convId: string) {
   chat.activeConversationId = convId;
+}
+
+/**
+ * Maps a row from `chat_messages` onto the runtime `ChatMessage` shape.
+ *
+ * The persisted shape (`PersistedChatMessage`) stores timestamps as Unix
+ * *seconds* and the work session as an opaque `session_json` string; the
+ * runtime shape uses Unix *milliseconds* and a structured `session`. F-I5
+ * split the two types so this conversion is explicit rather than implicit.
+ */
+function adaptPersistedMessage(p: PersistedChatMessage): ChatMessage {
+  const message: ChatMessage = {
+    id: p.id,
+    role: p.role === 'assistant' ? 'assistant' : 'user',
+    content: p.content,
+    createdAt: p.created_at * 1000,
+  };
+  if (p.session_json) {
+    try {
+      const session = JSON.parse(p.session_json) as WorkSession;
+      if (session && Array.isArray(session.segments)) message.session = session;
+    } catch {
+      // A corrupt or legacy blob must not sink the rest of the hydration.
+    }
+  }
+  return message;
+}
+
+/**
+ * Restores conversations persisted in `memory.db` on app startup. Every
+ * restored conversation's messages are loaded eagerly, so each tab renders its
+ * history (and derives its title) without a further round trip. Failures are
+ * logged, never thrown: a missing or unreadable memory DB must not block boot.
+ *
+ * Call once at startup (App.svelte's `onMount`), not on every panel mount.
+ */
+export async function hydrateConversations(connectionId?: string) {
+  try {
+    const convs = await listChatConversations(connectionId);
+    if (!convs || convs.length === 0) return;
+    const restored: Conversation[] = convs.map((c) => ({
+      id: c.id,
+      connectionId: c.connection_id,
+      messages: [],
+      isPaused: false,
+      pausedDml: null,
+      pendingPermission: null,
+      dmlResult: null,
+      dmlError: null,
+      usage: null,
+      error: null,
+      createdAt: c.created_at * 1000,
+    }));
+    await Promise.all(
+      restored.map(async (conv) => {
+        const persisted = await loadChatConversation(conv.id);
+        conv.messages = persisted.map(adaptPersistedMessage);
+      }),
+    );
+    chat.conversations = restored;
+    chat.activeConversationId = restored[0].id;
+  } catch (e) {
+    console.error('Failed to hydrate chat conversations:', e);
+  }
 }
 
 export function addMessage(convId: string, msg: ChatMessage) {

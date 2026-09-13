@@ -185,7 +185,7 @@
     height: 24px;
     flex-shrink: 0;
     border: none;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     background: transparent;
     color: var(--text-muted);
     cursor: pointer;
@@ -264,7 +264,7 @@
     height: 18px;
     flex-shrink: 0;
     border: none;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     background: none;
     color: var(--text-muted);
     cursor: pointer;
@@ -299,7 +299,7 @@
     cursor: grab;
     opacity: 0;
     padding: 2px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     transition:
       opacity 0.15s,
       background 0.15s;

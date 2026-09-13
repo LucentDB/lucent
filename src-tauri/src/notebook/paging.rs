@@ -14,7 +14,10 @@ pub const DEFAULT_CELL_PAGE_SIZE: i64 = 10;
 pub struct PageRequest {
     pub limit: i64,
     pub offset: i64,
-    pub sort: Option<SortSpec>,
+    // A client that omits `sort` gets no ORDER BY — the same contract `Option`
+    // gave before the wire became a list.
+    #[serde(default)]
+    pub sort: Vec<SortSpec>,
     pub filters: Vec<FilterSpec>,
 }
 
@@ -76,10 +79,13 @@ pub async fn notebook_fetch_page(
     cells: Vec<CellModel>,
     limit: i64,
     offset: i64,
-    sort: Option<SortSpec>,
+    // List-shaped wire sort; Option-wrapped because tauri params cannot take
+    // #[serde(default)] — same treatment as execute_query/browse_table.
+    sort: Option<Vec<SortSpec>>,
     filters: Vec<FilterSpec>,
     state: State<'_, AppState>,
 ) -> Result<TableOutput, CommandError> {
+    let sort = sort.unwrap_or_default();
     let conn_id = state
         .notebook_sessions
         .get(&session_key)
@@ -225,7 +231,7 @@ mod unit_tests {
         PageRequest {
             limit,
             offset,
-            sort: None,
+            sort: vec![],
             filters: vec![],
         }
     }
@@ -251,10 +257,10 @@ mod unit_tests {
         let r = PageRequest {
             limit: 10,
             offset: 0,
-            sort: Some(SortSpec {
+            sort: vec![SortSpec {
                 column: "total".into(),
                 direction: "desc".into(),
-            }),
+            }],
             filters: vec![FilterSpec {
                 column: "region".into(),
                 operator: "eq".into(),

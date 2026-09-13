@@ -361,7 +361,7 @@ async fn run_sql_cell(
     let req = PageRequest {
         limit: DEFAULT_CELL_PAGE_SIZE,
         offset: 0,
-        sort: None,
+        sort: vec![],
         filters: vec![],
     };
     let page_sql = build_page_sql(&rewritten, &req, dialect, builder.as_ref());
@@ -843,11 +843,13 @@ async fn run_ai_cell(
     let tool_ctx = AiToolContext {
         db: state.client.clone(),
         connection_id: Some(conn_id),
+        memory_connection_key: state.memory_connection_key.lock().await.clone(),
         capabilities: state.capabilities().await,
         config: config.clone(),
         schema_graph: state.schema_graph.clone(),
         embedder: state.embedder.clone(),
         reranker: state.reranker.clone(),
+        memory_manager: state.memory_manager.clone(),
     };
 
     // ── Pre-flight: augment message with schema context ───────────────────
@@ -935,6 +937,8 @@ async fn run_ai_cell(
             conv.clone(),
             sink.clone(),
             cancel,
+            // Notebook cells build their own prompt and inject no memories.
+            0,
         ),
     )
     .await;

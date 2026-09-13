@@ -61,6 +61,7 @@ impl AcpChatDriver {
         conv_state: Arc<tokio::sync::Mutex<ConversationState>>,
         sink: Arc<dyn AgentSink>,
         cancel: tokio_util::sync::CancellationToken,
+        applied_memory_count: usize,
     ) -> Result<(), String> {
         let conversation_id = {
             let s = conv_state.lock().await;
@@ -95,6 +96,10 @@ impl AcpChatDriver {
         let mut events_rx = conn.events.subscribe();
 
         let first_prompt = session.first_prompt.swap(false, Ordering::SeqCst);
+        // ACP delivers the system prompt — and therefore its memory block — only
+        // on a session's first turn; a follow-up sends just the user message.
+        // Report the count only when the rules were actually delivered (F-C2).
+        let delivered_memory_count = if first_prompt { applied_memory_count } else { 0 };
         let mut notice: Option<String> = None;
         let prompt_text = if first_prompt {
             // Spec D4: the preamble only claims DB tools the agent actually
@@ -259,6 +264,7 @@ impl AcpChatDriver {
             conversation_id: conversation_id.clone(),
             final_message,
             usage,
+            applied_memory_count: delivered_memory_count,
             cancelled: matches!(outcome.stop_reason, StopReason::Cancelled),
         });
 
@@ -403,9 +409,18 @@ impl AgentDriver for AcpChatDriver {
         conv_state: Arc<tokio::sync::Mutex<ConversationState>>,
         sink: Arc<dyn AgentSink>,
         cancel: tokio_util::sync::CancellationToken,
+        applied_memory_count: usize,
     ) -> Result<(), String> {
-        self.chat(message, config, system_prompt, conv_state, sink, cancel)
-            .await
+        self.chat(
+            message,
+            config,
+            system_prompt,
+            conv_state,
+            sink,
+            cancel,
+            applied_memory_count,
+        )
+        .await
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -761,11 +776,13 @@ mod tests {
         AiToolContext {
             db: Arc::new(AsyncMutex::new(None)),
             connection_id: None,
+            memory_connection_key: None,
             capabilities: None,
             config: AiConfig::default(),
             schema_graph: Arc::new(AsyncMutex::new(None)),
             embedder: Arc::new(AsyncMutex::new(None)),
             reranker: Arc::new(AsyncMutex::new(None)),
+            memory_manager: crate::ai::tools::test_memory_manager(),
         }
     }
 
@@ -937,6 +954,7 @@ mod tests {
                 conv.clone(),
                 sink.clone(),
                 tokio_util::sync::CancellationToken::new(),
+                0,
             )
             .await
             .expect("scripted turn completes");
@@ -980,6 +998,7 @@ mod tests {
                         completion_tokens: 0,
                         cached_prompt_tokens: 0,
                     },
+                    applied_memory_count: 0,
                     cancelled: false,
                 },
             ],
@@ -1017,6 +1036,7 @@ mod tests {
                 conv.clone(),
                 sink.clone(),
                 tokio_util::sync::CancellationToken::new(),
+                0,
             )
             .await
             .expect("turn completes despite unknown variants");
@@ -1163,6 +1183,7 @@ mod tests {
                 conv.clone(),
                 sink.clone(),
                 tokio_util::sync::CancellationToken::new(),
+                0,
             )
             .await
             .expect("turn completes");
@@ -1198,6 +1219,7 @@ mod tests {
                 conv,
                 sink.clone(),
                 tokio_util::sync::CancellationToken::new(),
+                0,
             )
             .await
             .expect("follow-up turn completes");
@@ -1237,6 +1259,7 @@ mod tests {
                 conv.clone(),
                 sink.clone(),
                 tokio_util::sync::CancellationToken::new(),
+                3,
             )
             .await
             .expect("first turn");
@@ -1248,9 +1271,31 @@ mod tests {
                 conv.clone(),
                 sink.clone(),
                 tokio_util::sync::CancellationToken::new(),
+                7,
             )
             .await
             .expect("second turn (same session)");
+
+        // F-C2 gating: turn 1 delivers the system prompt (with its memory
+        // block); turn 2 sends only the message, so the recomputed 7 was never
+        // delivered and the event must report 0.
+        let done_counts: Vec<usize> = sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                AiEvent::Done {
+                    applied_memory_count, ..
+                } => Some(*applied_memory_count),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            done_counts,
+            vec![3, 0],
+            "only delivered memory rules are reported"
+        );
 
         let process = acp_state
             .manager
@@ -1291,6 +1336,7 @@ mod tests {
                 conv,
                 sink.clone(),
                 tokio_util::sync::CancellationToken::new(),
+                0,
             )
             .await
             .expect("turn completes");
@@ -1351,6 +1397,7 @@ mod tests {
                     conv,
                     sink_task,
                     cancel_for_task,
+                    0,
                 )
                 .await
         });
@@ -1430,6 +1477,7 @@ mod tests {
                 conv.clone(),
                 sink.clone(),
                 tokio_util::sync::CancellationToken::new(),
+                0,
             )
             .await
             .expect_err("the agent answers with an RPC error");
@@ -1463,6 +1511,7 @@ mod tests {
                 conv,
                 sink.clone(),
                 tokio_util::sync::CancellationToken::new(),
+                0,
             )
             .await
             .expect("recovered turn succeeds");
@@ -1507,6 +1556,7 @@ mod tests {
                     conv,
                     sink_task,
                     cancel_task,
+                    0,
                 )
                 .await
         });
@@ -1572,6 +1622,7 @@ mod tests {
                 conv,
                 sink.clone(),
                 tokio_util::sync::CancellationToken::new(),
+                0,
             )
             .await
             .expect("turn completes");
@@ -1656,6 +1707,7 @@ mod tests {
                 conv,
                 sink.clone(),
                 tokio_util::sync::CancellationToken::new(),
+                0,
             )
             .await
             .expect("turn completes");

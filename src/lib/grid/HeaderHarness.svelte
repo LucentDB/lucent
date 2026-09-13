@@ -9,13 +9,19 @@
     columns,
     rows,
     columnWidths = {},
-    sortIndicatorFor = () => '',
+    gutterWidth = undefined,
+    sortIndexOf = () => -1,
+    sortDirectionOf = () => false,
     onToggleSort = () => {},
     onOpenMenu = () => {},
     onResizeStart = () => {},
     onResizeKeydown = () => {},
-    onToggleCheckAll = () => {},
-    allChecked = false,
+    onToggleSelectAllPage = () => {},
+    allPageSelected = false,
+    /** Column ids to pin left before first render — drives group layout. */
+    pinLeft = [],
+    /** Column ids to pin right before first render — drives group layout. */
+    pinRight = [],
   } = $props();
 
   const engine = createGridEngine({
@@ -32,18 +38,28 @@
       return [];
     },
   });
+  for (const id of pinLeft) engine.pinColumn(id, 'left');
+  for (const id of pinRight) engine.pinColumn(id, 'right');
+
+  /** Post-render sizing hook: tests drive the real table API from outside. */
+  export function resizeTo(id, size) {
+    engine.table.setColumnSizing({ [id]: size });
+  }
+
 </script>
 
 <table>
   <GridHeader
     table={engine.table}
     {columnWidths}
-    {sortIndicatorFor}
+    {gutterWidth}
+    {sortIndexOf}
+    {sortDirectionOf}
     {onToggleSort}
     {onOpenMenu}
     {onResizeStart}
     {onResizeKeydown}
-    {onToggleCheckAll}
-    {allChecked}
+    {onToggleSelectAllPage}
+    {allPageSelected}
   />
 </table>

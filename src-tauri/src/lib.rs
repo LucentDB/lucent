@@ -148,6 +148,8 @@ pub fn run() {
             commands::get_schemas,
             commands::get_schema_objects,
             commands::get_editor_schema,
+            commands::get_schema_indexing_status,
+            commands::sync_schema_indexing,
             commands::get_function_source,
             commands::get_view_source,
             commands::get_sequence_info,
@@ -208,6 +210,21 @@ pub fn run() {
             crate::notebook::commands::notebook_resolve_refs,
             crate::notebook::paging::notebook_fetch_page,
             crate::notebook::paging::notebook_count_rows,
+            // AI Memory Subsystem commands
+            commands::list_chat_conversations,
+            commands::load_chat_conversation,
+            commands::delete_chat_conversation,
+            commands::list_memories,
+            commands::save_memory_manual,
+            commands::delete_memory,
+            commands::toggle_memory_status,
+            commands::resolve_drift,
+            commands::export_memories_markdown,
+            commands::import_memories_markdown,
+            commands::list_golden_queries,
+            commands::save_golden_query,
+            commands::delete_golden_query,
+            commands::run_consolidation,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -217,6 +234,13 @@ pub fn run() {
                 // indexer outlives the process (sampling queries, ONNX runs).
                 let state = app_handle.state::<commands::AppState>();
                 tauri::async_runtime::block_on(state.indexing.stop_all());
+                tauri::async_runtime::block_on(async {
+                    let _ = state.memory_manager.with_connection(|conn| {
+                        let _ = crate::ai::memory::consolidation::prune_old_session_json(conn, 14);
+                        let _ = crate::ai::memory::consolidation::soft_archive_decayed_memories(conn);
+                        Ok(())
+                    }).await;
+                });
             }
         });
 }

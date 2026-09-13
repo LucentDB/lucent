@@ -70,7 +70,7 @@ describe('cell view state', () => {
     const args = fetchPage.mock.calls[0];
     expect(args[3]).toBe(10); // limit
     expect(args[4]).toBe(0); // offset — a sort change must restart paging
-    expect(args[5]).toEqual({ column: 'n', direction: 'desc' }); // id resolved back to name for the wire
+    expect(args[5]).toEqual([{ column: 'n', direction: 'desc' }]); // ids resolved back to names for the wire — full list since phase ③
     expect(view.stateFor(id).rows).toEqual([[9]]);
   });
 
@@ -166,5 +166,51 @@ describe('cell view state', () => {
     const view = createCellView(model);
     await view.fetchMore(id);
     expect(fetchPage).not.toHaveBeenCalled();
+  });
+});
+
+describe('append-page fetches must not flash the table', () => {
+  it('fetchMore never sets the loading flag — dimming is for offset-0 refetches', async () => {
+    const model = createNotebookModel();
+    model.sessionKey = 'sk';
+    model.cells[0].outputs = fullPage();
+    let resolveFetch: (v: unknown) => void = () => {};
+    fetchPage.mockImplementation(
+      () =>
+        new Promise((r) => {
+          resolveFetch = r;
+        }),
+    );
+    const id = model.cells[0].id;
+    const view = createCellView(model);
+    const flight = view.fetchMore(id);
+    // MID-FLIGHT: loading must stay false. Flipping it dims the whole tbody
+    // (.table-wrapper.loading tbody { opacity: 0.5 }) — a visible blink on
+    // every page turn. The Next button disabling is the fetching affordance.
+    expect(view.stateFor(id).loading).toBe(false);
+    resolveFetch(fullPage());
+    await flight;
+    expect(view.stateFor(id).loading).toBe(false);
+    expect(view.stateFor(id).rows).toHaveLength(20);
+  });
+
+  it('offset-0 refetches still surface loading', async () => {
+    const model = createNotebookModel();
+    model.sessionKey = 'sk';
+    model.cells[0].outputs = fullPage();
+    let resolveFetch: (v: unknown) => void = () => {};
+    fetchPage.mockImplementation(
+      () =>
+        new Promise((r) => {
+          resolveFetch = r;
+        }),
+    );
+    const id = model.cells[0].id;
+    const view = createCellView(model);
+    const flight = view.applyState(id, { filters: [], sorting: [] });
+    expect(view.stateFor(id).loading).toBe(true);
+    resolveFetch(fullPage());
+    await flight;
+    expect(view.stateFor(id).loading).toBe(false);
   });
 });

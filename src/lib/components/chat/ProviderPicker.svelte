@@ -14,7 +14,14 @@
     onChange?: (id: string, agentId?: string) => void;
   } = $props();
 
-  const PROVIDERS = [
+  interface ProviderOption {
+    id: string;
+    label: string;
+    group: string;
+    sub?: string;
+  }
+
+  const PROVIDERS: ProviderOption[] = [
     { id: 'openai', label: 'OpenAI', group: 'Cloud providers' },
     { id: 'anthropic', label: 'Anthropic', group: 'Cloud providers' },
     { id: 'gemini', label: 'Gemini', group: 'Cloud providers' },
@@ -36,7 +43,7 @@
   // cards fall back to this tint instead of crashing on an undefined lookup.
   const ACP_BRAND = { color: '#8b5cf6', tint: 'rgba(139,92,246,0.12)' };
 
-  let allOptions = $derived([
+  let allOptions: ProviderOption[] = $derived([
     ...PROVIDERS,
     ...installedAgents.map((a) => ({
       id: 'acp',
@@ -128,7 +135,7 @@
           aria-label={p.sub !== undefined ? `${p.label} — ${p.sub}` : p.label}
           bind:this={cards[cardKey(p)]}
           onclick={() => pick(p)}
-          style="--provider-tint: {(PROVIDER_BRANDS[p.id] ?? ACP_BRAND).tint};"
+          style="--provider-tint: {((PROVIDER_BRANDS as Record<string, { color: string; tint: string }>)[p.id] ?? ACP_BRAND).tint};"
         >
           <span class="logo-tile">
             <ProviderLogo provider={p.id} size={13} />

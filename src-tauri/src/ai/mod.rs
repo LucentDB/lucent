@@ -7,6 +7,7 @@ pub mod embed;
 pub mod events;
 pub mod guard;
 pub mod indexer;
+pub mod memory;
 pub mod mschema;
 pub mod preflight;
 pub mod provider;

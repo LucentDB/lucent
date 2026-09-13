@@ -11,9 +11,9 @@
  *
  * Every clamp here exists because of a specific race. Read the comments before
  * changing any of them.
- *
- * MUST be called synchronously during component init — it opens $effect scopes.
  */
+import { untrack } from 'svelte';
+
 export interface PagedStreamConfig {
   readonly rows: unknown[][];
   readonly fetchedCount: number;
@@ -56,40 +56,70 @@ export function createPagedStream(config: PagedStreamConfig) {
     Math.min((page + 1) * config.pageSize, config.fetchedCount),
   );
 
+  /** Temporary paging diagnostics — enable with localStorage.lucentPagingDebug. */
+  function debugPaging(event: string, detail: Record<string, unknown>) {
+    if (typeof localStorage !== 'undefined' && localStorage.lucentPagingDebug) {
+      console.warn(`[paging] ${event}`, detail);
+    }
+  }
+
   function reset() {
+    debugPaging('reset()', { tabId: config.tabId, stack: new Error().stack?.split('\n')[2]?.trim() });
     page = 0;
     isFetchingMore = false;
     config.onScrollReset?.();
   }
 
+  let lastTabId = $state(untrack(() => config.tabId));
+
   // Reset on tab switch. Svelte reuses the component instance for the same
   // {#if} branch, so internal state persists across tab switches without this.
   $effect(() => {
-    void config.tabId;
-    reset();
+    const currentTabId = config.tabId;
+    if (currentTabId !== lastTabId) {
+      lastTabId = currentTabId;
+      reset();
+    }
   });
 
   // Reset to page 0 when a fresh fetch arrives (fetchedCount drops to <= one
   // page after a sort/filter change or a re-execute in the same tab).
+  let lastFetchedCount = $state(untrack(() => config.fetchedCount));
   $effect(() => {
-    void config.fetchedCount;
-    if (config.fetchedCount > 0 && config.fetchedCount <= config.pageSize) {
+    const currentCount = config.fetchedCount;
+    if (
+      currentCount > 0 &&
+      currentCount <= config.pageSize &&
+      currentCount < lastFetchedCount
+    ) {
+      debugPaging('fresh-fetch reset', {
+        fetchedCount: currentCount,
+        pageSize: config.pageSize,
+      });
       page = 0;
       config.onScrollReset?.();
     }
+    lastFetchedCount = currentCount;
   });
 
   // Clamp so the page never points past the fetched data. Covers goNext
   // advancing before fetchedCount catches up, and tab state resets.
   $effect(() => {
     void maxPage;
-    if (page > maxPage) page = maxPage;
+    if (page > maxPage) {
+      debugPaging('clamp', { page, maxPage });
+      page = maxPage;
+    }
   });
 
   async function goNext() {
     // Local guard against racing ahead of an in-flight fetch on rapid clicks.
-    if (isFetchingMore) return;
+    if (isFetchingMore) {
+      debugPaging('goNext ignored (fetch in flight)', { page });
+      return;
+    }
     const nextPage = page + 1;
+    debugPaging('goNext', { page, nextPage, fetchedCount: config.fetchedCount });
     if (nextPage * config.pageSize >= config.fetchedCount) {
       isFetchingMore = true;
       try {
@@ -103,11 +133,13 @@ export function createPagedStream(config: PagedStreamConfig) {
     // NEVER let us advance past the last valid page.
     if (config.fetchedCount > nextPage * config.pageSize) {
       page = nextPage;
+      config.onScrollReset?.();
     }
   }
 
   function goPrev() {
     page = Math.max(0, page - 1);
+    config.onScrollReset?.();
   }
 
   return {

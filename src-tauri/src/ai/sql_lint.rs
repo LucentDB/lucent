@@ -231,6 +231,7 @@ mod tests {
             id,
             schema: "bookings".into(),
             name: name.into(),
+            kind: "table".into(),
             row_count_estimate: 0,
             partition_info: None,
         };
@@ -242,6 +243,7 @@ mod tests {
             name: name.into(),
             data_type: dt.into(),
             is_primary_key: false,
+            is_nullable: false,
             sample_values: vec![],
             fk_ref: None,
             embedding: vec![],
@@ -404,6 +406,7 @@ mod tests {
             name: "parent_flight_id".into(),
             data_type: "integer".into(),
             is_primary_key: false,
+            is_nullable: false,
             sample_values: vec![],
             fk_ref: None,
             embedding: vec![],

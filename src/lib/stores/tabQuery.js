@@ -33,20 +33,27 @@ export function filterSpecFor(tab) {
   }));
 }
 
+/**
+ * Pagination options for appending the next chunk.
+ *
+ * Deliberately NO `sort` field: a raw engine SortState here is wrong for the
+ * IPC wire ({column, direction}), and embedding it made correctness depend on
+ * every caller remembering to override. Callers pass `sort: wireSortFor(...)`
+ * explicitly — see App.svelte's executeQuery options.
+ */
 export function fetchMoreOptions(tab, chunkSize) {
   return {
     limit: chunkSize,
     offset: tab.fetchedCount,
-    sort: sortSpecFor(tab),
     filters: filterSpecFor(tab),
   };
 }
 
+/** Same contract as fetchMoreOptions, restarting at offset 0. */
 export function refetchOptions(tab, chunkSize) {
   return {
     limit: chunkSize,
     offset: 0,
-    sort: sortSpecFor(tab),
     filters: filterSpecFor(tab),
   };
 }

@@ -110,6 +110,9 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
         Ok(())
     });
 
+    // F-C2: the count computed for the system prompt is threaded into the
+    // turn and echoed on the terminal event. The producer side (retrieval →
+    // count) is covered by `applied_memory_count_tests` in commands.rs.
     crate::commands::run_agent_turn(
         &state,
         app.handle(),
@@ -117,6 +120,7 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
         "conv-1".into(),
         "hi".into(),
         "system preamble".into(),
+        3,
     )
     .await
     .expect("the full ACP turn completes");
@@ -135,6 +139,7 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
         AiEvent::Done {
             conversation_id,
             final_message,
+            applied_memory_count,
             cancelled,
             ..
         } => {
@@ -143,6 +148,10 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
             // keeps the same contract.
             assert_eq!(conversation_id, "conn-1");
             assert_eq!(final_message, "Hello");
+            assert_eq!(
+                *applied_memory_count, 3,
+                "F-C2: the completion event carries the turn's applied-rule count"
+            );
             assert!(!cancelled, "successful turn is not cancelled");
         }
         other => panic!("expected Done, got {other:?}"),

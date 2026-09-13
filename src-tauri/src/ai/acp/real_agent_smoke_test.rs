@@ -277,11 +277,13 @@ async fn real_agent_smoke_opencode() {
     let tool_ctx = AiToolContext {
         db: Arc::new(Mutex::new(Some(client.clone()))),
         connection_id: Some(conn_id),
+        memory_connection_key: None,
         capabilities,
         config: AiConfig::default(),
         schema_graph: Arc::new(Mutex::new(None)),
         embedder: Arc::new(Mutex::new(None)),
         reranker: Arc::new(Mutex::new(None)),
+        memory_manager: crate::ai::tools::test_memory_manager(),
     };
 
     let acp_cfg = AcpAgentConfig {
@@ -314,6 +316,7 @@ async fn real_agent_smoke_opencode() {
         conv.clone(),
         sink.clone(),
         cancel.clone(),
+        0,
     ));
     // A real agent turn takes 10–90 s (LLM + tool round-trip + bridge).
     let outcome = match tokio::time::timeout(Duration::from_secs(180), &mut chat_fut).await {

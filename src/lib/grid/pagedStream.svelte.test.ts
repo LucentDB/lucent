@@ -231,6 +231,53 @@ describe('clamping', () => {
     expect(h.stream().page).toBe(0);
     h.dispose();
   });
+
+  it('does NOT reset to page 0 when parent state re-evaluates with the same tabId', async () => {
+    const h = harness({ rows: rowsOf(600), fetchedCount: 600 });
+    await h.stream().goNext();
+    await h.stream().goNext();
+    expect(h.stream().page).toBe(2);
+
+    // Parent re-renders or updates without tabId change
+    h.state.tabId = 't1';
+    await h.flush();
+    expect(h.stream().page).toBe(2);
+    h.dispose();
+  });
+
+  it('does NOT reset to page 0 when fetchedCount increases from page 0 fetch-more', async () => {
+    let resolveMore: () => void = () => {};
+    const onNeedMore = vi.fn(
+      () =>
+        new Promise<void>((r) => {
+          resolveMore = r;
+        }),
+    );
+    const h = harness({ rows: rowsOf(200), fetchedCount: 200, isEnd: false, onNeedMore });
+    expect(h.stream().page).toBe(0);
+
+    const nextPromise = h.stream().goNext();
+    // Mid-flight
+    expect(h.stream().isFetchingMore).toBe(true);
+    expect(h.stream().page).toBe(0);
+
+    // Backend returns 200 more rows
+    h.state.rows = rowsOf(400);
+    h.state.fetchedCount = 400;
+    await h.flush();
+
+    // Still stable mid-flight before resolution
+    expect(h.stream().page).toBe(0);
+
+    resolveMore();
+    await nextPromise;
+    await h.flush();
+
+    // Now cleanly advanced to page 1
+    expect(h.stream().page).toBe(1);
+    expect(h.stream().isFetchingMore).toBe(false);
+    h.dispose();
+  });
 });
 
 describe('fitsOnePage', () => {
