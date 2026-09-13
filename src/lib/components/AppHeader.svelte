@@ -60,7 +60,8 @@
     if (tab.kind === 'table') return 'table';
     if (tab.kind === 'view') return 'view';
     if (tab.kind === 'notebook') return 'notebook';
-    if (tab.kind === 'source' && tab.sourceObjectKind) return tab.sourceObjectKind;
+    if (tab.kind === 'source' && tab.sourceObjectKind)
+      return tab.sourceObjectKind;
     return 'source';
   }
   function tabLabel(tab: any) {

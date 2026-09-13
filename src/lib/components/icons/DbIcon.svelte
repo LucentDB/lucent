@@ -44,12 +44,8 @@
       ? open
         ? FolderOpen
         : Folder
-      : iconMap[kind] ?? FileCode,
+      : (iconMap[kind] ?? FileCode),
   );
 </script>
 
-<IconComponent
-  {size}
-  {strokeWidth}
-  class={className}
-/>
+<IconComponent {size} {strokeWidth} class={className} />
