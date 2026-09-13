@@ -142,5 +142,8 @@ describe('pagination stability while fetching a new page', () => {
     resolveFetch();
     await Promise.resolve();
     await Promise.resolve();
-  });
+    // 3,000 rows through fifteen sequential click-and-render cycles is real
+    // work, not a race. It takes ~1s on a developer laptop but comfortably
+    // exceeds vitest's 5s default on a shared CI vCPU.
+  }, 30_000);
 });

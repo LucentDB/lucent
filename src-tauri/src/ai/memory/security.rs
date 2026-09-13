@@ -18,7 +18,9 @@ impl SourceTrust {
     pub fn can_override(&self, other: SourceTrust) -> bool {
         match self {
             SourceTrust::UserExplicit => true,
-            SourceTrust::VerifiedConsolidation => (other as u8) <= (SourceTrust::VerifiedConsolidation as u8),
+            SourceTrust::VerifiedConsolidation => {
+                (other as u8) <= (SourceTrust::VerifiedConsolidation as u8)
+            }
             SourceTrust::ErrorResolution => (other as u8) <= (SourceTrust::ErrorResolution as u8),
             SourceTrust::UntrustedToolResult => false,
         }
@@ -33,6 +35,9 @@ impl SourceTrust {
         }
     }
 
+    // Lenient parse with an explicit error string; keeps the message richer than
+    // `FromStr`'s opaque `Err` and matches the other `from_str` helpers here.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self, String> {
         match s {
             "user_explicit" => Ok(SourceTrust::UserExplicit),

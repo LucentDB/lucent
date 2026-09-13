@@ -64,7 +64,9 @@ fn parse_tool_arguments(tool: &str, raw_args: Option<&str>) -> serde_json::Value
         "preview_dml" => serde_json::json!({ "sql": trimmed, "description": "" }),
         "get_objects_info" => serde_json::json!({ "objects": [{ "name": trimmed }] }),
         "search_query_history" => serde_json::json!({ "query": trimmed }),
-        "save_memory" => serde_json::json!({ "category": "quirk", "key_phrase": "rule", "rule_text": trimmed }),
+        "save_memory" => {
+            serde_json::json!({ "category": "quirk", "key_phrase": "rule", "rule_text": trimmed })
+        }
         _ => serde_json::json!({ "arg": trimmed }),
     }
 }

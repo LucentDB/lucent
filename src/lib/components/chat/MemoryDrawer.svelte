@@ -15,7 +15,10 @@
     type GoldenQuery,
     type DriftAlert,
   } from '../../ipc/ai.ts';
-  import { driftAlertsFor, removeDriftAlert } from '../../stores/memoryDrift.svelte.ts';
+  import {
+    driftAlertsFor,
+    removeDriftAlert,
+  } from '../../stores/memoryDrift.svelte.ts';
 
   let {
     isOpen = $bindable(false),
@@ -59,7 +62,9 @@
 
   // Add rule modal state
   let showAddModal = $state(false);
-  let newCategory = $state<'metric' | 'join' | 'quirk' | 'preference'>('metric');
+  let newCategory = $state<'metric' | 'join' | 'quirk' | 'preference'>(
+    'metric',
+  );
   let newKeyPhrase = $state('');
   let newRuleText = $state('');
   let newSqlSnippet = $state('');
@@ -118,12 +123,17 @@
       }
       const all = await listMemories(key, true);
       activeMemories = all.filter((m) => m.status === 'active' && !m.tombstone);
-      archivedMemories = all.filter((m) => m.status === 'archived' && !m.tombstone);
-      const stale = all.filter((m) => m.status === 'stale_invalid' || m.tombstone);
+      archivedMemories = all.filter(
+        (m) => m.status === 'archived' && !m.tombstone,
+      );
+      const stale = all.filter(
+        (m) => m.status === 'stale_invalid' || m.tombstone,
+      );
       const synthesizedAlerts = stale.map((m) => ({
         memory_id: m.id,
         rule_text: m.rule_text,
-        reason: 'Referenced table or column was altered or dropped in live catalog',
+        reason:
+          'Referenced table or column was altered or dropped in live catalog',
         schema_name: 'public',
         table_name: m.key_phrase,
         column_name: null,
@@ -265,7 +275,7 @@
         newKeyPhrase.trim(),
         newRuleText.trim(),
         newSqlSnippet.trim() || undefined,
-        'connection'
+        'connection',
       );
       showAddModal = false;
       newKeyPhrase = '';
@@ -308,7 +318,10 @@
     }
   }
 
-  async function handleResolveDrift(id: string, resolution: 'revalidate' | 'dismiss') {
+  async function handleResolveDrift(
+    id: string,
+    resolution: 'revalidate' | 'dismiss',
+  ) {
     try {
       await resolveDrift(id, resolution);
       // A resolved alert must not linger just because it was retained (F-I2).
@@ -355,7 +368,10 @@
   async function handleImportMarkdown() {
     if (!importMarkdownContent.trim()) return;
     try {
-      const count = await importMemoriesMarkdown(effectiveConnectionKey, importMarkdownContent);
+      const count = await importMemoriesMarkdown(
+        effectiveConnectionKey,
+        importMarkdownContent,
+      );
       statusMessage = `Successfully imported ${count} rules!`;
       showImportModal = false;
       importMarkdownContent = '';
@@ -394,7 +410,10 @@
     { id: 'active' as const, label: `Active (${activeMemories.length})` },
     { id: 'archived' as const, label: `Archived (${archivedMemories.length})` },
     { id: 'drift' as const, label: `Drift Alerts (${driftAlerts.length})` },
-    { id: 'golden' as const, label: `Golden Queries (${goldenQueries.length})` },
+    {
+      id: 'golden' as const,
+      label: `Golden Queries (${goldenQueries.length})`,
+    },
   ]);
 
   function selectTab(tab: (typeof MEMORY_TABS)[number]) {
@@ -430,262 +449,401 @@
       searchQuery
         ? m.key_phrase.toLowerCase().includes(searchQuery.toLowerCase()) ||
           m.rule_text.toLowerCase().includes(searchQuery.toLowerCase())
-        : true
-    )
+        : true,
+    ),
   );
 </script>
 
 <div class="memory-drawer-portal" data-memory-drawer-portal use:portal>
-{#if isOpen}
-  <div class="drawer-overlay" onclick={() => { isOpen = false; onClose?.(); }} role="presentation">
+  {#if isOpen}
     <div
-      class="drawer"
-      bind:this={drawerEl}
-      onclick={(e) => e.stopPropagation()}
-      role="dialog"
-      aria-modal="true"
-      aria-label="AI Memory Manager"
-      tabindex="-1"
+      class="drawer-overlay"
+      onclick={() => {
+        isOpen = false;
+        onClose?.();
+      }}
+      role="presentation"
     >
-      <header class="drawer-header">
-        <div class="drawer-title-row">
-          <div class="drawer-title">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8z" />
-              <path d="M12 6v6l4 2" />
-            </svg>
-            <h2>AI Memory Subsystem</h2>
-          </div>
-          <button class="icon-btn" onclick={() => { isOpen = false; onClose?.(); }} title="Close (Esc)">
-            ✕
-          </button>
-        </div>
-
-        {#if statusMessage}
-          <div class="status-banner">{statusMessage}</div>
-        {/if}
-
-        <div class="drawer-nav" role="tablist" aria-label="Memory views">
-          {#each memoryTabs as tab (tab.id)}
-            <button
-              class="nav-tab"
-              class:active={activeTab === tab.id}
-              id={`memory-tab-${tab.id}`}
-              role="tab"
-              aria-selected={activeTab === tab.id}
-              aria-controls="memory-panel"
-              tabindex={activeTab === tab.id ? 0 : -1}
-              onclick={() => selectTab(tab.id)}
-              onkeydown={handleTabKeydown}
-            >
-              {tab.label}
-            </button>
-          {/each}
-        </div>
-
-        <div class="action-bar">
-          <input
-            type="text"
-            class="search-input"
-            placeholder="Search rules..."
-            bind:value={searchQuery}
-            bind:this={searchInputEl}
-          />
-          <button class="action-btn primary" onclick={() => (showAddModal = true)}>
-            + Add Rule
-          </button>
-          <button class="action-btn" onclick={handleExportMarkdown} title="Copy LUCENT.md to clipboard">
-            Export MD
-          </button>
-          <button class="action-btn" onclick={() => (showImportModal = true)}>
-            Import MD
-          </button>
-          <button class="action-btn secondary" onclick={handleRunConsolidation} title="Prune decayed memories & audit schema drift">
-            Consolidate
-          </button>
-        </div>
-      </header>
-
       <div
-        class="drawer-body"
-        role="tabpanel"
-        id="memory-panel"
-        aria-labelledby={`memory-tab-${activeTab}`}
+        class="drawer"
+        bind:this={drawerEl}
+        onclick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="AI Memory Manager"
+        tabindex="-1"
       >
-        {#if loading}
-          <div class="loading-state">Loading AI memories...</div>
-        {:else if activeTab === 'active'}
-          {#if filteredActive.length === 0}
-            <div class="empty-state">
-              No active memories found. Use "+ Add Rule" or let the AI discover domain rules as you chat.
+        <header class="drawer-header">
+          <div class="drawer-title-row">
+            <div class="drawer-title">
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path
+                  d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8z"
+                />
+                <path d="M12 6v6l4 2" />
+              </svg>
+              <h2>AI Memory Subsystem</h2>
             </div>
-          {:else}
-            <div class="card-list">
-              {#each filteredActive as m (m.id)}
-                <div class="memory-card">
-                  <div class="card-header">
-                    <span class="category-badge {m.category}">{m.category}</span>
-                    <span class="key-phrase">{m.key_phrase}</span>
-                    <span class="trust-pill {m.source_trust}">{m.source_trust}</span>
-                  </div>
-                  <div class="rule-text">{m.rule_text}</div>
-                  {#if m.sql_snippet}
-                    <pre class="sql-snippet"><code>{m.sql_snippet}</code></pre>
-                  {/if}
-                  <div class="card-footer">
-                    <span class="meta">Access: {m.access_count}x · Stability: {m.stability_hours.toFixed(0)}h</span>
-                    <div class="card-actions">
-                      <button class="text-btn" onclick={() => handleToggleStatus(m.id, 'archived')}>Archive</button>
-                      <button class="text-btn danger" onclick={() => requestDeleteMemory(m.id)}>
-                        {confirmDeleteId === m.id ? 'Confirm?' : 'Delete'}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              {/each}
-            </div>
+            <button
+              class="icon-btn"
+              onclick={() => {
+                isOpen = false;
+                onClose?.();
+              }}
+              title="Close (Esc)"
+            >
+              ✕
+            </button>
+          </div>
+
+          {#if statusMessage}
+            <div class="status-banner">{statusMessage}</div>
           {/if}
-        {:else if activeTab === 'archived'}
-          {#if archivedMemories.length === 0}
-            <div class="empty-state">No archived memories. Decayed memories are soft-archived here.</div>
-          {:else}
-            <div class="card-list">
-              {#each archivedMemories as m (m.id)}
-                <div class="memory-card archived">
-                  <div class="card-header">
-                    <span class="category-badge {m.category}">{m.category}</span>
-                    <span class="key-phrase">{m.key_phrase}</span>
-                    <span class="archived-tag">ARCHIVED</span>
-                  </div>
-                  <div class="rule-text">{m.rule_text}</div>
-                  <div class="card-footer">
-                    <span class="meta">Last accessed: {new Date(m.last_accessed_at * 1000).toLocaleDateString()}</span>
-                    <div class="card-actions">
-                      <button class="text-btn" onclick={() => handleToggleStatus(m.id, 'active')}>Restore</button>
-                      <button class="text-btn danger" onclick={() => requestDeleteMemory(m.id)}>
-                        {confirmDeleteId === m.id ? 'Confirm?' : 'Delete'}
-                      </button>
+
+          <div class="drawer-nav" role="tablist" aria-label="Memory views">
+            {#each memoryTabs as tab (tab.id)}
+              <button
+                class="nav-tab"
+                class:active={activeTab === tab.id}
+                id={`memory-tab-${tab.id}`}
+                role="tab"
+                aria-selected={activeTab === tab.id}
+                aria-controls="memory-panel"
+                tabindex={activeTab === tab.id ? 0 : -1}
+                onclick={() => selectTab(tab.id)}
+                onkeydown={handleTabKeydown}
+              >
+                {tab.label}
+              </button>
+            {/each}
+          </div>
+
+          <div class="action-bar">
+            <input
+              type="text"
+              class="search-input"
+              placeholder="Search rules..."
+              bind:value={searchQuery}
+              bind:this={searchInputEl}
+            />
+            <button
+              class="action-btn primary"
+              onclick={() => (showAddModal = true)}
+            >
+              + Add Rule
+            </button>
+            <button
+              class="action-btn"
+              onclick={handleExportMarkdown}
+              title="Copy LUCENT.md to clipboard"
+            >
+              Export MD
+            </button>
+            <button class="action-btn" onclick={() => (showImportModal = true)}>
+              Import MD
+            </button>
+            <button
+              class="action-btn secondary"
+              onclick={handleRunConsolidation}
+              title="Prune decayed memories & audit schema drift"
+            >
+              Consolidate
+            </button>
+          </div>
+        </header>
+
+        <div
+          class="drawer-body"
+          role="tabpanel"
+          id="memory-panel"
+          aria-labelledby={`memory-tab-${activeTab}`}
+        >
+          {#if loading}
+            <div class="loading-state">Loading AI memories...</div>
+          {:else if activeTab === 'active'}
+            {#if filteredActive.length === 0}
+              <div class="empty-state">
+                No active memories found. Use "+ Add Rule" or let the AI
+                discover domain rules as you chat.
+              </div>
+            {:else}
+              <div class="card-list">
+                {#each filteredActive as m (m.id)}
+                  <div class="memory-card">
+                    <div class="card-header">
+                      <span class="category-badge {m.category}"
+                        >{m.category}</span
+                      >
+                      <span class="key-phrase">{m.key_phrase}</span>
+                      <span class="trust-pill {m.source_trust}"
+                        >{m.source_trust}</span
+                      >
                     </div>
-                  </div>
-                </div>
-              {/each}
-            </div>
-          {/if}
-        {:else if activeTab === 'drift'}
-          {#if driftAlerts.length === 0}
-            <div class="empty-state green">All memory entity links are valid and synced with the active schema catalog.</div>
-          {:else}
-            <div class="card-list">
-              {#each driftAlerts as alert (alert.memory_id)}
-                <div class="memory-card drift">
-                  <div class="card-header">
-                    <span class="drift-badge">SCHEMA DRIFT</span>
-                    <span class="key-phrase">{alert.table_name}</span>
-                  </div>
-                  <div class="drift-reason">{alert.reason}</div>
-                  <div class="rule-text">{alert.rule_text}</div>
-                  <div class="card-footer">
-                    <div class="card-actions">
-                      <button class="action-btn primary small" onclick={() => handleResolveDrift(alert.memory_id, 'revalidate')}>
-                        Revalidate
-                      </button>
-                      <button class="action-btn small" onclick={() => handleResolveDrift(alert.memory_id, 'dismiss')}>
-                        Dismiss
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              {/each}
-            </div>
-          {/if}
-        {:else if activeTab === 'golden'}
-          {#if goldenQueries.length === 0}
-            <div class="empty-state">No golden queries saved yet. Click "⭐ Save as Golden Query" on query result cards.</div>
-          {:else}
-            <div class="card-list">
-              {#each goldenQueries as q (q.id)}
-                <div class="memory-card golden">
-                  <div class="card-header">
-                    <span class="golden-badge">⭐ Golden Query</span>
-                    <span class="key-phrase">{q.schema_name}</span>
-                    {#if q.verified}
-                      <span class="verified-tag">VERIFIED</span>
+                    <div class="rule-text">{m.rule_text}</div>
+                    {#if m.sql_snippet}
+                      <pre class="sql-snippet"><code>{m.sql_snippet}</code
+                        ></pre>
                     {/if}
-                  </div>
-                  <div class="prompt-text"><strong>Prompt:</strong> {q.natural_prompt}</div>
-                  <pre class="sql-snippet"><code>{q.sql_text}</code></pre>
-                  <div class="card-footer">
-                    <span class="meta">Runs: {q.run_count} · Tables: {q.tables_used.join(', ')}</span>
-                    <div class="card-actions">
-                      <button class="text-btn danger" onclick={() => requestDeleteGolden(q.id)}>
-                        {confirmDeleteId === q.id ? 'Confirm?' : 'Delete'}
-                      </button>
+                    <div class="card-footer">
+                      <span class="meta"
+                        >Access: {m.access_count}x · Stability: {m.stability_hours.toFixed(
+                          0,
+                        )}h</span
+                      >
+                      <div class="card-actions">
+                        <button
+                          class="text-btn"
+                          onclick={() => handleToggleStatus(m.id, 'archived')}
+                          >Archive</button
+                        >
+                        <button
+                          class="text-btn danger"
+                          onclick={() => requestDeleteMemory(m.id)}
+                        >
+                          {confirmDeleteId === m.id ? 'Confirm?' : 'Delete'}
+                        </button>
+                      </div>
                     </div>
                   </div>
-                </div>
-              {/each}
-            </div>
+                {/each}
+              </div>
+            {/if}
+          {:else if activeTab === 'archived'}
+            {#if archivedMemories.length === 0}
+              <div class="empty-state">
+                No archived memories. Decayed memories are soft-archived here.
+              </div>
+            {:else}
+              <div class="card-list">
+                {#each archivedMemories as m (m.id)}
+                  <div class="memory-card archived">
+                    <div class="card-header">
+                      <span class="category-badge {m.category}"
+                        >{m.category}</span
+                      >
+                      <span class="key-phrase">{m.key_phrase}</span>
+                      <span class="archived-tag">ARCHIVED</span>
+                    </div>
+                    <div class="rule-text">{m.rule_text}</div>
+                    <div class="card-footer">
+                      <span class="meta"
+                        >Last accessed: {new Date(
+                          m.last_accessed_at * 1000,
+                        ).toLocaleDateString()}</span
+                      >
+                      <div class="card-actions">
+                        <button
+                          class="text-btn"
+                          onclick={() => handleToggleStatus(m.id, 'active')}
+                          >Restore</button
+                        >
+                        <button
+                          class="text-btn danger"
+                          onclick={() => requestDeleteMemory(m.id)}
+                        >
+                          {confirmDeleteId === m.id ? 'Confirm?' : 'Delete'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          {:else if activeTab === 'drift'}
+            {#if driftAlerts.length === 0}
+              <div class="empty-state green">
+                All memory entity links are valid and synced with the active
+                schema catalog.
+              </div>
+            {:else}
+              <div class="card-list">
+                {#each driftAlerts as alert (alert.memory_id)}
+                  <div class="memory-card drift">
+                    <div class="card-header">
+                      <span class="drift-badge">SCHEMA DRIFT</span>
+                      <span class="key-phrase">{alert.table_name}</span>
+                    </div>
+                    <div class="drift-reason">{alert.reason}</div>
+                    <div class="rule-text">{alert.rule_text}</div>
+                    <div class="card-footer">
+                      <div class="card-actions">
+                        <button
+                          class="action-btn primary small"
+                          onclick={() =>
+                            handleResolveDrift(alert.memory_id, 'revalidate')}
+                        >
+                          Revalidate
+                        </button>
+                        <button
+                          class="action-btn small"
+                          onclick={() =>
+                            handleResolveDrift(alert.memory_id, 'dismiss')}
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          {:else if activeTab === 'golden'}
+            {#if goldenQueries.length === 0}
+              <div class="empty-state">
+                No golden queries saved yet. Click "⭐ Save as Golden Query" on
+                query result cards.
+              </div>
+            {:else}
+              <div class="card-list">
+                {#each goldenQueries as q (q.id)}
+                  <div class="memory-card golden">
+                    <div class="card-header">
+                      <span class="golden-badge">⭐ Golden Query</span>
+                      <span class="key-phrase">{q.schema_name}</span>
+                      {#if q.verified}
+                        <span class="verified-tag">VERIFIED</span>
+                      {/if}
+                    </div>
+                    <div class="prompt-text">
+                      <strong>Prompt:</strong>
+                      {q.natural_prompt}
+                    </div>
+                    <pre class="sql-snippet"><code>{q.sql_text}</code></pre>
+                    <div class="card-footer">
+                      <span class="meta"
+                        >Runs: {q.run_count} · Tables: {q.tables_used.join(
+                          ', ',
+                        )}</span
+                      >
+                      <div class="card-actions">
+                        <button
+                          class="text-btn danger"
+                          onclick={() => requestDeleteGolden(q.id)}
+                        >
+                          {confirmDeleteId === q.id ? 'Confirm?' : 'Delete'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/if}
           {/if}
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if showAddModal}
+    <div
+      class="modal-overlay"
+      onclick={() => (showAddModal = false)}
+      role="presentation"
+    >
+      <div
+        class="modal-content"
+        bind:this={addModalEl}
+        onclick={(e) => e.stopPropagation()}
+        role="dialog"
+      >
+        <h3>Add Learned Rule</h3>
+        {#if addError}
+          <div class="error-banner">{addError}</div>
         {/if}
+        <div class="form-group">
+          <label for="newCategory">Category</label>
+          <select id="newCategory" bind:value={newCategory}>
+            <option value="metric">Metric (Calculations, formulas)</option>
+            <option value="join"
+              >Join (Idiosyncratic keys, multi-table paths)</option
+            >
+            <option value="quirk">Quirk (Schema oddities, soft-deletes)</option>
+            <option value="preference"
+              >Preference (User habits, dialect styles)</option
+            >
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="newKeyPhrase">Key Phrase</label>
+          <input
+            id="newKeyPhrase"
+            type="text"
+            placeholder="e.g. active_subscribers"
+            bind:value={newKeyPhrase}
+          />
+        </div>
+        <div class="form-group">
+          <label for="newRuleText">Rule Explanation (Max 500 chars)</label>
+          <textarea
+            id="newRuleText"
+            rows="3"
+            placeholder="Explain the domain constraint or rule..."
+            bind:value={newRuleText}></textarea>
+        </div>
+        <div class="form-group">
+          <label for="newSqlSnippet"
+            >Optional SQL Snippet (Max 1000 chars)</label
+          >
+          <textarea
+            id="newSqlSnippet"
+            rows="2"
+            placeholder="e.g. status = 'active' AND canceled_at IS NULL"
+            bind:value={newSqlSnippet}></textarea>
+        </div>
+        <div class="modal-actions">
+          <button class="action-btn" onclick={() => (showAddModal = false)}
+            >Cancel</button
+          >
+          <button class="action-btn primary" onclick={handleAddRule}
+            >Save Rule</button
+          >
+        </div>
       </div>
     </div>
-  </div>
-{/if}
+  {/if}
 
-{#if showAddModal}
-  <div class="modal-overlay" onclick={() => (showAddModal = false)} role="presentation">
-    <div class="modal-content" bind:this={addModalEl} onclick={(e) => e.stopPropagation()} role="dialog">
-      <h3>Add Learned Rule</h3>
-      {#if addError}
-        <div class="error-banner">{addError}</div>
-      {/if}
-      <div class="form-group">
-        <label for="newCategory">Category</label>
-        <select id="newCategory" bind:value={newCategory}>
-          <option value="metric">Metric (Calculations, formulas)</option>
-          <option value="join">Join (Idiosyncratic keys, multi-table paths)</option>
-          <option value="quirk">Quirk (Schema oddities, soft-deletes)</option>
-          <option value="preference">Preference (User habits, dialect styles)</option>
-        </select>
-      </div>
-      <div class="form-group">
-        <label for="newKeyPhrase">Key Phrase</label>
-        <input id="newKeyPhrase" type="text" placeholder="e.g. active_subscribers" bind:value={newKeyPhrase} />
-      </div>
-      <div class="form-group">
-        <label for="newRuleText">Rule Explanation (Max 500 chars)</label>
-        <textarea id="newRuleText" rows="3" placeholder="Explain the domain constraint or rule..." bind:value={newRuleText}></textarea>
-      </div>
-      <div class="form-group">
-        <label for="newSqlSnippet">Optional SQL Snippet (Max 1000 chars)</label>
-        <textarea id="newSqlSnippet" rows="2" placeholder="e.g. status = 'active' AND canceled_at IS NULL" bind:value={newSqlSnippet}></textarea>
-      </div>
-      <div class="modal-actions">
-        <button class="action-btn" onclick={() => (showAddModal = false)}>Cancel</button>
-        <button class="action-btn primary" onclick={handleAddRule}>Save Rule</button>
-      </div>
-    </div>
-  </div>
-{/if}
-
-{#if showImportModal}
-  <div class="modal-overlay" onclick={() => (showImportModal = false)} role="presentation">
-    <div class="modal-content" bind:this={importModalEl} onclick={(e) => e.stopPropagation()} role="dialog">
-      <h3>Import Markdown Rules (LUCENT.md)</h3>
-      {#if importError}
-        <div class="error-banner">{importError}</div>
-      {/if}
-      <div class="form-group">
-        <label for="importMarkdown">Paste Markdown Content</label>
-        <textarea id="importMarkdown" rows="8" placeholder="# Lucent Database Rules..." bind:value={importMarkdownContent}></textarea>
-      </div>
-      <div class="modal-actions">
-        <button class="action-btn" onclick={() => (showImportModal = false)}>Cancel</button>
-        <button class="action-btn primary" onclick={handleImportMarkdown}>Import Rules</button>
+  {#if showImportModal}
+    <div
+      class="modal-overlay"
+      onclick={() => (showImportModal = false)}
+      role="presentation"
+    >
+      <div
+        class="modal-content"
+        bind:this={importModalEl}
+        onclick={(e) => e.stopPropagation()}
+        role="dialog"
+      >
+        <h3>Import Markdown Rules (LUCENT.md)</h3>
+        {#if importError}
+          <div class="error-banner">{importError}</div>
+        {/if}
+        <div class="form-group">
+          <label for="importMarkdown">Paste Markdown Content</label>
+          <textarea
+            id="importMarkdown"
+            rows="8"
+            placeholder="# Lucent Database Rules..."
+            bind:value={importMarkdownContent}></textarea>
+        </div>
+        <div class="modal-actions">
+          <button class="action-btn" onclick={() => (showImportModal = false)}
+            >Cancel</button
+          >
+          <button class="action-btn primary" onclick={handleImportMarkdown}
+            >Import Rules</button
+          >
+        </div>
       </div>
     </div>
-  </div>
-{/if}
+  {/if}
 </div>
 
 <style>
@@ -710,8 +868,12 @@
     animation: slideIn 0.2s ease-out;
   }
   @keyframes slideIn {
-    from { transform: translateX(100%); }
-    to { transform: translateX(0); }
+    from {
+      transform: translateX(100%);
+    }
+    to {
+      transform: translateX(0);
+    }
   }
   @media (prefers-reduced-motion: reduce) {
     .drawer {
@@ -875,10 +1037,18 @@
     border-radius: 4px;
     background: rgba(255, 255, 255, 0.1);
   }
-  .category-badge.metric { color: #38bdf8; }
-  .category-badge.join { color: #a855f7; }
-  .category-badge.quirk { color: #f59e0b; }
-  .category-badge.preference { color: #10b981; }
+  .category-badge.metric {
+    color: #38bdf8;
+  }
+  .category-badge.join {
+    color: #a855f7;
+  }
+  .category-badge.quirk {
+    color: #f59e0b;
+  }
+  .category-badge.preference {
+    color: #10b981;
+  }
   .key-phrase {
     font-weight: 600;
     font-size: var(--text-xs, 12px);

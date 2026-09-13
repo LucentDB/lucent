@@ -88,7 +88,9 @@ function refresh() {
 
   if (active.length === 0) {
     // All done: find the latest completed event
-    const completed = [...indexing.byConnection.values()].filter((p) => p.isComplete);
+    const completed = [...indexing.byConnection.values()].filter(
+      (p) => p.isComplete,
+    );
     if (completed.length > 0) {
       const latest = completed[completed.length - 1];
       indexing.lastCompletedPayload = latest;

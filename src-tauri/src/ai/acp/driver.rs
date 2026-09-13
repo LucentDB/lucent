@@ -53,6 +53,7 @@ impl AcpChatDriver {
     /// `session/request_permission` requests through the sink, and resolve
     /// the prompt response into `Done`. Follow-up messages reuse the session
     /// — real multi-turn continuity, agent-side context (spec §3 D4).
+    #[allow(clippy::too_many_arguments)] // AgentDriver seam signature
     pub async fn chat(
         &self,
         message: String,
@@ -99,7 +100,11 @@ impl AcpChatDriver {
         // ACP delivers the system prompt — and therefore its memory block — only
         // on a session's first turn; a follow-up sends just the user message.
         // Report the count only when the rules were actually delivered (F-C2).
-        let delivered_memory_count = if first_prompt { applied_memory_count } else { 0 };
+        let delivered_memory_count = if first_prompt {
+            applied_memory_count
+        } else {
+            0
+        };
         let mut notice: Option<String> = None;
         let prompt_text = if first_prompt {
             // Spec D4: the preamble only claims DB tools the agent actually
@@ -1286,7 +1291,8 @@ mod tests {
             .iter()
             .filter_map(|e| match e {
                 AiEvent::Done {
-                    applied_memory_count, ..
+                    applied_memory_count,
+                    ..
                 } => Some(*applied_memory_count),
                 _ => None,
             })

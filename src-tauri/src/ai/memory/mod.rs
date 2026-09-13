@@ -6,10 +6,10 @@ pub mod retrieval;
 pub mod rules_parser;
 pub mod security;
 
-use std::path::PathBuf;
-use std::sync::Arc;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub use consolidation::*;
@@ -53,8 +53,10 @@ pub fn embedding_to_blob(vec: &[f32]) -> Vec<u8> {
 
 pub fn blob_to_embedding(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect()
 }
 
@@ -75,6 +77,9 @@ impl MemoryScope {
         }
     }
 
+    // Lenient parse: unknown strings fall back to `Global` rather than erroring,
+    // so this deliberately stays an inherent method instead of `FromStr`.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "connection" => MemoryScope::Connection,
@@ -103,6 +108,9 @@ impl MemoryCategory {
         }
     }
 
+    // Lenient parse: unknown strings fall back to `Quirk` rather than erroring,
+    // so this deliberately stays an inherent method instead of `FromStr`.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "metric" => MemoryCategory::Metric,
@@ -132,6 +140,9 @@ impl MemoryStatus {
         }
     }
 
+    // Lenient parse: unknown strings fall back to `Active` rather than erroring,
+    // so this deliberately stays an inherent method instead of `FromStr`.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         if s.eq_ignore_ascii_case("SUPERSEDED") {
             MemoryStatus::Superseded
@@ -408,7 +419,11 @@ impl MemoryManager {
         Ok(())
     }
 
-    pub async fn save_memory(&self, item: MemoryItem, entity_links: &[EntityRef]) -> Result<(), String> {
+    pub async fn save_memory(
+        &self,
+        item: MemoryItem,
+        entity_links: &[EntityRef],
+    ) -> Result<(), String> {
         let mut guard = self.conn.lock().await;
         let emb_blob = embedding_to_blob(&item.embedding);
         let tx = guard
@@ -481,12 +496,16 @@ impl MemoryManager {
         tx.execute(
             "INSERT INTO memories_fts (id, content) VALUES (?1, ?2)",
             params![item.id, fts_content],
-        ).map_err(|e| format!("failed to update fts: {e}"))?;
+        )
+        .map_err(|e| format!("failed to update fts: {e}"))?;
 
         // Entity links update. `column_name` is NOT NULL DEFAULT '' (B-I8);
         // table-level links are stored as the empty string.
-        tx.execute("DELETE FROM memory_entity_links WHERE memory_id = ?1", params![item.id])
-            .map_err(|e| format!("failed to clear entity links: {e}"))?;
+        tx.execute(
+            "DELETE FROM memory_entity_links WHERE memory_id = ?1",
+            params![item.id],
+        )
+        .map_err(|e| format!("failed to clear entity links: {e}"))?;
         for link in entity_links {
             tx.execute(
                 "INSERT INTO memory_entity_links (memory_id, schema_name, table_name, column_name, entity_fingerprint)
@@ -545,7 +564,8 @@ impl MemoryManager {
                     stability_hours: row.get::<_, f64>(9)? as f32,
                     last_accessed_at: row.get(10)?,
                     access_count: row.get(11)?,
-                    source_trust: SourceTrust::from_str(&row.get::<_, String>(12)?).unwrap_or(SourceTrust::UntrustedToolResult),
+                    source_trust: SourceTrust::from_str(&row.get::<_, String>(12)?)
+                        .unwrap_or(SourceTrust::UntrustedToolResult),
                     source_conv_id: row.get(13)?,
                     source_turn_id: row.get(14)?,
                     source_tool_id: row.get(15)?,
@@ -578,8 +598,11 @@ impl MemoryManager {
             .map_err(|e| format!("failed to begin delete_memory transaction: {e}"))?;
         tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![id])
             .map_err(|e| format!("failed to delete fts entry: {e}"))?;
-        tx.execute("DELETE FROM memory_entity_links WHERE memory_id = ?1", params![id])
-            .map_err(|e| format!("failed to delete entity links: {e}"))?;
+        tx.execute(
+            "DELETE FROM memory_entity_links WHERE memory_id = ?1",
+            params![id],
+        )
+        .map_err(|e| format!("failed to delete entity links: {e}"))?;
         let affected = tx
             .execute("DELETE FROM memories WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
@@ -591,11 +614,17 @@ impl MemoryManager {
     pub async fn toggle_memory_status(&self, id: &str, status: MemoryStatus) -> Result<(), String> {
         let guard = self.conn.lock().await;
         let now = chrono::Utc::now().timestamp();
-        let tombstone = if status == MemoryStatus::StaleInvalid { 1 } else { 0 };
-        guard.execute(
-            "UPDATE memories SET status = ?1, tombstone = ?2, updated_at = ?3 WHERE id = ?4",
-            params![status.as_str(), tombstone, now, id],
-        ).map_err(|e| e.to_string())?;
+        let tombstone = if status == MemoryStatus::StaleInvalid {
+            1
+        } else {
+            0
+        };
+        guard
+            .execute(
+                "UPDATE memories SET status = ?1, tombstone = ?2, updated_at = ?3 WHERE id = ?4",
+                params![status.as_str(), tombstone, now, id],
+            )
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -623,12 +652,13 @@ impl MemoryManager {
 
         if let Some(g) = graph {
             for (schema, table, col_opt) in &links {
-                let table_entry = g
-                    .tables
-                    .iter()
-                    .find(|t| t.schema.eq_ignore_ascii_case(schema) && t.name.eq_ignore_ascii_case(table));
+                let table_entry = g.tables.iter().find(|t| {
+                    t.schema.eq_ignore_ascii_case(schema) && t.name.eq_ignore_ascii_case(table)
+                });
                 let Some(t) = table_entry else {
-                    return Err(format!("Cannot revalidate: table '{schema}.{table}' does not exist in schema"));
+                    return Err(format!(
+                        "Cannot revalidate: table '{schema}.{table}' does not exist in schema"
+                    ));
                 };
 
                 if let Some(col_name) = col_opt {
@@ -650,11 +680,7 @@ impl MemoryManager {
                     ).map_err(|e| e.to_string())?;
                 } else {
                     let new_fp = crate::ai::memory::entity_linker::compute_entity_fingerprint(
-                        schema,
-                        table,
-                        None,
-                        "",
-                        false,
+                        schema, table, None, "", false,
                     );
                     guard.execute(
                         "UPDATE memory_entity_links SET entity_fingerprint = ?1 WHERE memory_id = ?2 AND schema_name = ?3 AND table_name = ?4 AND column_name = ''",
@@ -677,7 +703,9 @@ impl MemoryManager {
         let guard = self.conn.lock().await;
         let now = chrono::Utc::now().timestamp();
         let mut stmt = guard
-            .prepare("SELECT last_accessed_at, stability_hours, importance FROM memories WHERE id = ?1")
+            .prepare(
+                "SELECT last_accessed_at, stability_hours, importance FROM memories WHERE id = ?1",
+            )
             .map_err(|e| e.to_string())?;
 
         let res = stmt.query_row(params![id], |row| {
@@ -731,8 +759,9 @@ impl MemoryManager {
         let tables_json = serde_json::to_string(&q.tables_used).unwrap_or_else(|_| "[]".into());
         let emb_blob = embedding_to_blob(&q.embedding);
 
-        guard.execute(
-            "INSERT INTO golden_queries (
+        guard
+            .execute(
+                "INSERT INTO golden_queries (
                 id, connection_id, schema_name, natural_prompt, sql_text, tables_used,
                 verified, run_count, last_run_at, embedding_model, embedding_version,
                 embedding_blob, created_at
@@ -745,65 +774,74 @@ impl MemoryManager {
                 run_count = excluded.run_count,
                 last_run_at = excluded.last_run_at,
                 embedding_blob = excluded.embedding_blob",
-            params![
-                q.id,
-                q.connection_id,
-                q.schema_name,
-                q.natural_prompt,
-                q.sql_text,
-                tables_json,
-                q.verified as i64,
-                q.run_count,
-                q.last_run_at,
-                q.embedding_model,
-                q.embedding_version,
-                emb_blob,
-                q.created_at,
-            ],
-        ).map_err(|e| e.to_string())?;
+                params![
+                    q.id,
+                    q.connection_id,
+                    q.schema_name,
+                    q.natural_prompt,
+                    q.sql_text,
+                    tables_json,
+                    q.verified as i64,
+                    q.run_count,
+                    q.last_run_at,
+                    q.embedding_model,
+                    q.embedding_version,
+                    emb_blob,
+                    q.created_at,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 
-    pub async fn list_golden_queries(&self, connection_id: &str) -> Result<Vec<GoldenQuery>, String> {
+    pub async fn list_golden_queries(
+        &self,
+        connection_id: &str,
+    ) -> Result<Vec<GoldenQuery>, String> {
         let guard = self.conn.lock().await;
-        let mut stmt = guard.prepare(
-            "SELECT id, connection_id, schema_name, natural_prompt, sql_text, tables_used,
+        let mut stmt = guard
+            .prepare(
+                "SELECT id, connection_id, schema_name, natural_prompt, sql_text, tables_used,
                     verified, run_count, last_run_at, embedding_model, embedding_version,
                     embedding_blob, created_at
              FROM golden_queries
              WHERE connection_id = ?1
              ORDER BY last_run_at DESC",
-        ).map_err(|e| e.to_string())?;
+            )
+            .map_err(|e| e.to_string())?;
 
-        let rows = stmt.query_map(params![connection_id], |row| {
-            let tables_str: String = row.get(5)?;
-            let tables: Vec<String> = serde_json::from_str(&tables_str).unwrap_or_default();
-            let emb_bytes: Vec<u8> = row.get(11)?;
-            Ok(GoldenQuery {
-                id: row.get(0)?,
-                connection_id: row.get(1)?,
-                schema_name: row.get(2)?,
-                natural_prompt: row.get(3)?,
-                sql_text: row.get(4)?,
-                tables_used: tables,
-                verified: row.get::<_, i64>(6)? != 0,
-                run_count: row.get(7)?,
-                last_run_at: row.get(8)?,
-                embedding_model: row.get(9)?,
-                embedding_version: row.get(10)?,
-                embedding: blob_to_embedding(&emb_bytes),
-                created_at: row.get(12)?,
+        let rows = stmt
+            .query_map(params![connection_id], |row| {
+                let tables_str: String = row.get(5)?;
+                let tables: Vec<String> = serde_json::from_str(&tables_str).unwrap_or_default();
+                let emb_bytes: Vec<u8> = row.get(11)?;
+                Ok(GoldenQuery {
+                    id: row.get(0)?,
+                    connection_id: row.get(1)?,
+                    schema_name: row.get(2)?,
+                    natural_prompt: row.get(3)?,
+                    sql_text: row.get(4)?,
+                    tables_used: tables,
+                    verified: row.get::<_, i64>(6)? != 0,
+                    run_count: row.get(7)?,
+                    last_run_at: row.get(8)?,
+                    embedding_model: row.get(9)?,
+                    embedding_version: row.get(10)?,
+                    embedding: blob_to_embedding(&emb_bytes),
+                    created_at: row.get(12)?,
+                })
             })
-        }).map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
 
         Ok(rows)
     }
 
     pub async fn delete_golden_query(&self, id: &str) -> Result<bool, String> {
         let guard = self.conn.lock().await;
-        let affected = guard.execute("DELETE FROM golden_queries WHERE id = ?1", params![id])
+        let affected = guard
+            .execute("DELETE FROM golden_queries WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
         Ok(affected > 0)
     }
@@ -823,7 +861,10 @@ impl MemoryManager {
         Ok(())
     }
 
-    pub async fn list_conversations(&self, connection_id: Option<&str>) -> Result<Vec<ChatConversation>, String> {
+    pub async fn list_conversations(
+        &self,
+        connection_id: Option<&str>,
+    ) -> Result<Vec<ChatConversation>, String> {
         let guard = self.conn.lock().await;
         let (sql, params_vec): (String, Vec<rusqlite::types::Value>) = match connection_id {
             Some(cid) => (
@@ -837,25 +878,28 @@ impl MemoryManager {
         };
 
         let mut stmt = guard.prepare(&sql).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(params_vec.iter()), |row| {
-            Ok(ChatConversation {
-                id: row.get(0)?,
-                connection_id: row.get(1)?,
-                title: row.get(2)?,
-                archived: row.get::<_, i64>(3)? != 0,
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params_vec.iter()), |row| {
+                Ok(ChatConversation {
+                    id: row.get(0)?,
+                    connection_id: row.get(1)?,
+                    title: row.get(2)?,
+                    archived: row.get::<_, i64>(3)? != 0,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
             })
-        }).map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
 
         Ok(rows)
     }
 
     pub async fn delete_conversation(&self, id: &str) -> Result<bool, String> {
         let guard = self.conn.lock().await;
-        let affected = guard.execute("DELETE FROM chat_conversations WHERE id = ?1", params![id])
+        let affected = guard
+            .execute("DELETE FROM chat_conversations WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
         Ok(affected > 0)
     }
@@ -875,25 +919,29 @@ impl MemoryManager {
 
     pub async fn list_messages(&self, conversation_id: &str) -> Result<Vec<ChatMessage>, String> {
         let guard = self.conn.lock().await;
-        let mut stmt = guard.prepare(
-            "SELECT id, conversation_id, role, content, session_json, created_at
+        let mut stmt = guard
+            .prepare(
+                "SELECT id, conversation_id, role, content, session_json, created_at
              FROM chat_messages
              WHERE conversation_id = ?1
              ORDER BY created_at ASC",
-        ).map_err(|e| e.to_string())?;
+            )
+            .map_err(|e| e.to_string())?;
 
-        let rows = stmt.query_map(params![conversation_id], |row| {
-            Ok(ChatMessage {
-                id: row.get(0)?,
-                conversation_id: row.get(1)?,
-                role: row.get(2)?,
-                content: row.get(3)?,
-                session_json: row.get(4)?,
-                created_at: row.get(5)?,
+        let rows = stmt
+            .query_map(params![conversation_id], |row| {
+                Ok(ChatMessage {
+                    id: row.get(0)?,
+                    conversation_id: row.get(1)?,
+                    role: row.get(2)?,
+                    content: row.get(3)?,
+                    session_json: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
             })
-        }).map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
 
         Ok(rows)
     }
@@ -918,12 +966,12 @@ mod tests {
     /// now, and this invariant fails if they ever invert again.
     #[test]
     fn user_explicit_rules_must_not_decay_faster_than_tool_rules() {
-        assert!(
-            USER_EXPLICIT_STABILITY_HOURS > TOOL_RULE_STABILITY_HOURS,
-            "user-explicit rules ({}h) must outlive tool-derived rules ({}h)",
-            USER_EXPLICIT_STABILITY_HOURS,
-            TOOL_RULE_STABILITY_HOURS
-        );
+        const {
+            assert!(
+                USER_EXPLICIT_STABILITY_HOURS > TOOL_RULE_STABILITY_HOURS,
+                "user-explicit rules must outlive tool-derived rules"
+            );
+        }
         assert_eq!(
             USER_EXPLICIT_STABILITY_HOURS, 2160.0,
             "the audit mandates 90 days of stability for user-explicit rules"
@@ -1065,8 +1113,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(memories, 0, "memory row must roll back with the failed FTS insert");
-        assert_eq!(entity_links, 0, "entity links must roll back with the failed FTS insert");
+        assert_eq!(
+            memories, 0,
+            "memory row must roll back with the failed FTS insert"
+        );
+        assert_eq!(
+            entity_links, 0,
+            "entity links must roll back with the failed FTS insert"
+        );
     }
 
     /// B-I1/ε: the connection must be configured with a non-zero busy timeout
@@ -1081,7 +1135,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(timeout, 5000, "PRAGMA busy_timeout must be set on connection init");
+        assert_eq!(
+            timeout, 5000,
+            "PRAGMA busy_timeout must be set on connection init"
+        );
     }
 
     /// B-I8: a table-level link (`column_name: None`) is persisted as `''`
@@ -1125,7 +1182,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(stored, "", "table-level links must be stored as ''");
-        assert_eq!(normalized, None, "the read boundary must normalize '' back to None");
+        assert_eq!(
+            normalized, None,
+            "the read boundary must normalize '' back to None"
+        );
     }
 
     /// B-I8: an existing database has the old nullable `column_name` in the

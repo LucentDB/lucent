@@ -445,7 +445,11 @@ export interface MemoryItem {
   stability_hours: number;
   last_accessed_at: number;
   access_count: number;
-  source_trust: 'user_explicit' | 'verified_consolidation' | 'error_resolution' | 'untrusted_tool_result';
+  source_trust:
+    | 'user_explicit'
+    | 'verified_consolidation'
+    | 'error_resolution'
+    | 'untrusted_tool_result';
   source_conv_id?: string | null;
   source_turn_id?: string | null;
   source_tool_id?: string | null;
@@ -518,19 +522,28 @@ export interface ConsolidationReport {
   drift_alerts: DriftAlert[];
 }
 
-export async function listChatConversations(connectionId?: string): Promise<ChatConversation[]> {
+export async function listChatConversations(
+  connectionId?: string,
+): Promise<ChatConversation[]> {
   return invoke('list_chat_conversations', { connectionId });
 }
 
-export async function loadChatConversation(conversationId: string): Promise<PersistedChatMessage[]> {
+export async function loadChatConversation(
+  conversationId: string,
+): Promise<PersistedChatMessage[]> {
   return invoke('load_chat_conversation', { conversationId });
 }
 
-export async function deleteChatConversation(conversationId: string): Promise<boolean> {
+export async function deleteChatConversation(
+  conversationId: string,
+): Promise<boolean> {
   return invoke('delete_chat_conversation', { conversationId });
 }
 
-export async function listMemories(connectionKey: string, includeArchived = false): Promise<MemoryItem[]> {
+export async function listMemories(
+  connectionKey: string,
+  includeArchived = false,
+): Promise<MemoryItem[]> {
   return invoke('list_memories', { connectionKey, includeArchived });
 }
 
@@ -540,7 +553,7 @@ export async function saveMemoryManual(
   keyPhrase: string,
   ruleText: string,
   sqlSnippet?: string,
-  scope?: string
+  scope?: string,
 ): Promise<MemoryItem> {
   return invoke('save_memory_manual', {
     connectionKey,
@@ -556,23 +569,36 @@ export async function deleteMemory(id: string): Promise<boolean> {
   return invoke('delete_memory', { id });
 }
 
-export async function toggleMemoryStatus(id: string, status: string): Promise<void> {
+export async function toggleMemoryStatus(
+  id: string,
+  status: string,
+): Promise<void> {
   return invoke('toggle_memory_status', { id, status });
 }
 
-export async function resolveDrift(id: string, resolution: 'revalidate' | 'dismiss'): Promise<void> {
+export async function resolveDrift(
+  id: string,
+  resolution: 'revalidate' | 'dismiss',
+): Promise<void> {
   return invoke('resolve_drift', { id, resolution });
 }
 
-export async function exportMemoriesMarkdown(connectionKey: string): Promise<string> {
+export async function exportMemoriesMarkdown(
+  connectionKey: string,
+): Promise<string> {
   return invoke('export_memories_markdown', { connectionKey });
 }
 
-export async function importMemoriesMarkdown(connectionKey: string, content: string): Promise<number> {
+export async function importMemoriesMarkdown(
+  connectionKey: string,
+  content: string,
+): Promise<number> {
   return invoke('import_memories_markdown', { connectionKey, content });
 }
 
-export async function listGoldenQueries(connectionId: string): Promise<GoldenQuery[]> {
+export async function listGoldenQueries(
+  connectionId: string,
+): Promise<GoldenQuery[]> {
   return invoke('list_golden_queries', { connectionId });
 }
 
@@ -582,7 +608,7 @@ export async function saveGoldenQuery(
   sqlText: string,
   schemaName?: string,
   tablesUsed?: string[],
-  verified?: boolean
+  verified?: boolean,
 ): Promise<GoldenQuery> {
   return invoke('save_golden_query', {
     connectionId,
@@ -598,6 +624,8 @@ export async function deleteGoldenQuery(id: string): Promise<boolean> {
   return invoke('delete_golden_query', { id });
 }
 
-export async function runConsolidation(connectionKey?: string): Promise<ConsolidationReport> {
+export async function runConsolidation(
+  connectionKey?: string,
+): Promise<ConsolidationReport> {
   return invoke('run_consolidation', { connectionKey });
 }

@@ -80,10 +80,13 @@
         <button
           class="memory-pill"
           onclick={onOpenMemoryDrawer}
-          aria-label="{message.rulesApplied} {message.rulesApplied === 1 ? 'rule' : 'rules'} applied. Open Memory Drawer"
+          aria-label="{message.rulesApplied} {message.rulesApplied === 1
+            ? 'rule'
+            : 'rules'} applied. Open Memory Drawer"
           title="View active learned rules & database memory (Cmd+Shift+M)"
         >
-          🧠 {message.rulesApplied} {message.rulesApplied === 1 ? 'rule' : 'rules'} applied
+          🧠 {message.rulesApplied}
+          {message.rulesApplied === 1 ? 'rule' : 'rules'} applied
         </button>
       </div>
     {:else if message.usage && message.usage.promptTokens + message.usage.completionTokens > 0}

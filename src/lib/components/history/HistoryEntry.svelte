@@ -51,7 +51,12 @@
   class:error={entry.status === 'error'}
   class:favorite={entry.favorite}
 >
-  <div class="entry-main" onclick={() => onRerun?.(entry.sql)}>
+  <button
+    type="button"
+    class="entry-main"
+    aria-label="Rerun query: {truncateSql(entry.sql)}"
+    onclick={() => onRerun?.(entry.sql)}
+  >
     <div class="entry-sql">{truncateSql(entry.sql)}</div>
     <div class="entry-meta">
       <span class="meta-duration" class:slow={entry.durationMs > 1000}>
@@ -71,11 +76,13 @@
         <span class="meta-conn">{entry.connectionName}</span>
       {/if}
     </div>
-  </div>
+  </button>
   <div class="entry-actions">
     <button
+      type="button"
       class="action-btn"
       class:faved={entry.favorite}
+      aria-label={entry.favorite ? 'Unfavorite query' : 'Favorite query'}
       title={entry.favorite ? 'Unfavorite' : 'Favorite'}
       onclick={() => onToggleFavorite?.(entry.id)}
     >
@@ -93,7 +100,9 @@
       </svg>
     </button>
     <button
+      type="button"
       class="action-btn"
+      aria-label="Copy SQL"
       title="Copy SQL"
       onclick={() => onCopy?.(entry.sql)}
     >
@@ -110,7 +119,9 @@
       </svg>
     </button>
     <button
+      type="button"
       class="action-btn danger"
+      aria-label="Delete query from history"
       title="Delete"
       onclick={() => onDelete?.(entry.id)}
     >
@@ -153,6 +164,13 @@
   .entry-main {
     flex: 1;
     min-width: 0;
+    background: transparent;
+    border: none;
+    padding: 0;
+    text-align: left;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
   }
   .entry-sql {
     font-family: var(--font-mono);
@@ -186,8 +204,6 @@
   }
   .meta-rows {
     color: var(--text-secondary);
-  }
-  .meta-time {
   }
   .meta-conn {
     color: var(--text-secondary);

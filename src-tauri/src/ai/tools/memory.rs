@@ -3,10 +3,9 @@ use uuid::Uuid;
 
 use super::{AiToolContext, ToolError, ToolOutput};
 use crate::ai::memory::{
-    compute_memory_doc_hash, extract_and_link_entities, sanitize_rule_text,
-    sanitize_sql_snippet, MemoryCategory, MemoryItem,
-    MemoryScope, MemoryStatus, SourceTrust, TOOL_RULE_STABILITY_HOURS, MEMORY_FORMAT_VERSION,
-    MEMORY_MODEL_NAME,
+    compute_memory_doc_hash, extract_and_link_entities, sanitize_rule_text, sanitize_sql_snippet,
+    MemoryCategory, MemoryItem, MemoryScope, MemoryStatus, SourceTrust, MEMORY_FORMAT_VERSION,
+    MEMORY_MODEL_NAME, TOOL_RULE_STABILITY_HOURS,
 };
 use crate::query_history;
 
@@ -94,7 +93,8 @@ impl SaveMemory {
 
         // Contextual chunk enrichment at extraction:
         // Prepend contextual prefix to enrich vector embedding representation
-        let context_enriched_doc = format!("Context: {category_str} {key_phrase} | Rule: {rule_text}");
+        let context_enriched_doc =
+            format!("Context: {category_str} {key_phrase} | Rule: {rule_text}");
         let doc_hash = compute_memory_doc_hash(&context_enriched_doc);
 
         // Generate embedding vector
@@ -229,11 +229,17 @@ impl SearchQueryHistory {
         let mut results_md = String::new();
 
         // 1. Search Golden Queries from the app's manager (B-C2).
-        if let Ok(golden) = ctx.memory_manager.list_golden_queries(&connection_key).await {
+        if let Ok(golden) = ctx
+            .memory_manager
+            .list_golden_queries(&connection_key)
+            .await
+        {
             let matching_golden: Vec<_> = golden
                 .into_iter()
                 .filter(|g| {
-                    g.natural_prompt.to_lowercase().contains(&query.to_lowercase())
+                    g.natural_prompt
+                        .to_lowercase()
+                        .contains(&query.to_lowercase())
                         || g.sql_text.to_lowercase().contains(&query.to_lowercase())
                 })
                 .take(limit)
@@ -273,7 +279,8 @@ impl SearchQueryHistory {
         }
 
         if results_md.is_empty() {
-            results_md = format!("No matching query history or golden queries found for '{query}'.");
+            results_md =
+                format!("No matching query history or golden queries found for '{query}'.");
         }
 
         Ok(ToolOutput::Text {
@@ -332,10 +339,7 @@ mod tests {
             .await
             .expect("save succeeds with memory enabled");
 
-        let stored = mgr
-            .list_memories(&conn.0.to_string(), false)
-            .await
-            .unwrap();
+        let stored = mgr.list_memories(&conn.0.to_string(), false).await.unwrap();
         assert_eq!(
             stored.len(),
             1,
@@ -389,8 +393,10 @@ mod tests {
     async fn save_memory_refuses_when_memory_disabled() {
         let mgr = Arc::new(MemoryManager::open_in_memory().unwrap());
         let conn = ConnectionId(Uuid::nil());
-        let mut config = AiConfig::default();
-        config.enable_ai_memory = false;
+        let config = AiConfig {
+            enable_ai_memory: false,
+            ..Default::default()
+        };
         let ctx = ctx(mgr.clone(), conn, config, None);
 
         let err = SaveMemory::new(ctx.clone())
@@ -415,8 +421,10 @@ mod tests {
     async fn search_query_history_refuses_when_memory_disabled() {
         let mgr = Arc::new(MemoryManager::open_in_memory().unwrap());
         let conn = ConnectionId(Uuid::nil());
-        let mut config = AiConfig::default();
-        config.enable_ai_memory = false;
+        let config = AiConfig {
+            enable_ai_memory: false,
+            ..Default::default()
+        };
         let ctx = ctx(mgr, conn, config, None);
 
         let err = SearchQueryHistory::new(ctx.clone())
@@ -436,7 +444,9 @@ mod tests {
         let mgr = Arc::new(MemoryManager::open_in_memory().unwrap());
         let conn = ConnectionId(Uuid::nil());
         let mut config = AiConfig::default();
-        config.disabled_memory_connections.insert(conn.0.to_string());
+        config
+            .disabled_memory_connections
+            .insert(conn.0.to_string());
         let ctx = ctx(mgr, conn, config, None);
 
         let err = SearchQueryHistory::new(ctx.clone())
@@ -455,7 +465,9 @@ mod tests {
         let mgr = Arc::new(MemoryManager::open_in_memory().unwrap());
         let conn = ConnectionId(Uuid::nil());
         let mut config = AiConfig::default();
-        config.disabled_memory_connections.insert(conn.0.to_string());
+        config
+            .disabled_memory_connections
+            .insert(conn.0.to_string());
         let ctx = ctx(mgr, conn, config, None);
 
         let err = SaveMemory::new(ctx.clone())
@@ -477,12 +489,7 @@ mod tests {
     async fn save_memory_uses_frontend_memory_key_when_present() {
         let mgr = Arc::new(MemoryManager::open_in_memory().unwrap());
         let conn = ConnectionId(Uuid::nil());
-        let ctx = ctx(
-            mgr.clone(),
-            conn,
-            AiConfig::default(),
-            Some("frontend-key"),
-        );
+        let ctx = ctx(mgr.clone(), conn, AiConfig::default(), Some("frontend-key"));
 
         SaveMemory::new(ctx.clone())
             .call(save_args(), &ctx)
@@ -561,12 +568,7 @@ mod tests {
         .await
         .unwrap();
 
-        let ctx = ctx(
-            mgr,
-            conn,
-            AiConfig::default(),
-            Some("frontend-key"),
-        );
+        let ctx = ctx(mgr, conn, AiConfig::default(), Some("frontend-key"));
         let out = SearchQueryHistory::new(ctx.clone())
             .call(json!({ "query": "revenue" }), &ctx)
             .await

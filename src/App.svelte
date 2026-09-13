@@ -896,8 +896,10 @@
     if (item.id === 'new-notebook') goToNotebook();
     if (item.id === 'toggle-theme') theme.toggle();
     if (item.id === 'disconnect') handleDisconnect();
-    if (item.id === 'sync-schema-indexing') void indexing.syncSchemaIndexing(false);
-    if (item.id === 'rebuild-schema-indexing') void indexing.syncSchemaIndexing(true);
+    if (item.id === 'sync-schema-indexing')
+      void indexing.syncSchemaIndexing(false);
+    if (item.id === 'rebuild-schema-indexing')
+      void indexing.syncSchemaIndexing(true);
     if (item.id === 'toggle-ai-chat') {
       if (hasTabs) showChatPanel = !showChatPanel;
       else showChatPanel = true;
@@ -984,13 +986,15 @@
           {
             id: 'sync-schema-indexing',
             label: 'Sync Schema Delta',
-            description: 'Run incremental indexing for changed tables and views',
+            description:
+              'Run incremental indexing for changed tables and views',
             icon: 'database',
           },
           {
             id: 'rebuild-schema-indexing',
             label: 'Rebuild Schema Index',
-            description: 'Force full schema re-indexing and vector cache rebuild',
+            description:
+              'Force full schema re-indexing and vector cache rebuild',
             icon: 'refresh',
           },
           {

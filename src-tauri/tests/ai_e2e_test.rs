@@ -68,8 +68,7 @@ async fn e2e_text_protocol_tool_parsing() {
         // Tool construction never touches memory; an in-memory manager keeps
         // this test off the user's real memory.db.
         memory_manager: std::sync::Arc::new(
-            lucent_lib::ai::memory::MemoryManager::open_in_memory()
-                .expect("in-memory memory db"),
+            lucent_lib::ai::memory::MemoryManager::open_in_memory().expect("in-memory memory db"),
         ),
     });
     assert!(

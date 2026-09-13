@@ -1,5 +1,5 @@
-/// Ebbinghaus decay and spaced repetition model for Lucent AI memory.
-/// Ad-hoc noise decays quickly; recurring, verified facts gain stability into permanent rules.
+//! Ebbinghaus decay and spaced repetition model for Lucent AI memory.
+//! Ad-hoc noise decays quickly; recurring, verified facts gain stability into permanent rules.
 
 pub const DEFAULT_STABILITY_HOURS: f32 = 720.0; // 30 days
 pub const MAX_STABILITY_HOURS: f32 = 50_000.0; // ~5.7 years (permanent fact)

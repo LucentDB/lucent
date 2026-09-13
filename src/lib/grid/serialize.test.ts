@@ -3,7 +3,12 @@ import { toTsv, toCsv } from './serialize.js';
 
 describe('toTsv', () => {
   it('joins cells with tabs and rows with newlines', () => {
-    expect(toTsv([[1, 'a'], [2, 'b']])).toBe('1\ta\n2\tb');
+    expect(
+      toTsv([
+        [1, 'a'],
+        [2, 'b'],
+      ]),
+    ).toBe('1\ta\n2\tb');
   });
 
   it('renders numbers verbatim, matching what is on screen', () => {

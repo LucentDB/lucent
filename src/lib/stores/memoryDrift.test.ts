@@ -65,7 +65,10 @@ describe('memoryDrift store (B-C5)', () => {
   });
 
   it('removeDriftAlert forgets a single row and prunes the bucket', () => {
-    recordDriftAlerts('conn-a', [alert({ memory_id: 'm1' }), alert({ memory_id: 'm2' })]);
+    recordDriftAlerts('conn-a', [
+      alert({ memory_id: 'm1' }),
+      alert({ memory_id: 'm2' }),
+    ]);
     expect(driftAlertsFor('conn-a')).toHaveLength(2);
 
     removeDriftAlert('conn-a', 'm1');

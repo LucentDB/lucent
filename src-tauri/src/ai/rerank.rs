@@ -10,11 +10,8 @@ pub struct Reranker {
 /// no ONNX model load — with a recording fake.
 #[async_trait]
 pub trait Rerank: Send + Sync {
-    async fn rerank(
-        &self,
-        query: &str,
-        candidates: &[String],
-    ) -> Result<Vec<(usize, f32)>, String>;
+    async fn rerank(&self, query: &str, candidates: &[String])
+        -> Result<Vec<(usize, f32)>, String>;
 }
 
 #[async_trait]

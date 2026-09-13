@@ -38,7 +38,10 @@ export function driftAlertsFor(connectionKey: string): DriftAlert[] {
 }
 
 /** Forget a single alert (e.g. after the rule is deleted or the drift resolved). */
-export function removeDriftAlert(connectionKey: string, memoryId: string): void {
+export function removeDriftAlert(
+  connectionKey: string,
+  memoryId: string,
+): void {
   const existing = memoryDrift.byConnection.get(connectionKey);
   if (!existing) return;
   const remaining = existing.filter((a) => a.memory_id !== memoryId);

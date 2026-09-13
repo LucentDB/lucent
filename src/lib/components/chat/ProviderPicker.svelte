@@ -135,7 +135,11 @@
           aria-label={p.sub !== undefined ? `${p.label} — ${p.sub}` : p.label}
           bind:this={cards[cardKey(p)]}
           onclick={() => pick(p)}
-          style="--provider-tint: {((PROVIDER_BRANDS as Record<string, { color: string; tint: string }>)[p.id] ?? ACP_BRAND).tint};"
+          style="--provider-tint: {(
+            (
+              PROVIDER_BRANDS as Record<string, { color: string; tint: string }>
+            )[p.id] ?? ACP_BRAND
+          ).tint};"
         >
           <span class="logo-tile">
             <ProviderLogo provider={p.id} size={13} />

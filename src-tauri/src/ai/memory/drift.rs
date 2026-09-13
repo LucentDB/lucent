@@ -1,8 +1,8 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
-use crate::ai::schema_graph::{CatalogSnapshot, SchemaGraph};
 use super::entity_linker::compute_entity_fingerprint;
+use crate::ai::schema_graph::{CatalogSnapshot, SchemaGraph};
 
 #[cfg(test)]
 thread_local! {
@@ -162,11 +162,7 @@ pub fn cascade_schema_drift(
 /// Gate 2: Live Retrieval Re-Validation.
 /// Verifies entity dependencies directly against the live in-memory SchemaGraph
 /// at query time. If any linked table or column is missing, returns false.
-pub fn validate_live_schema_gate(
-    memory_id: &str,
-    graph: &SchemaGraph,
-    conn: &Connection,
-) -> bool {
+pub fn validate_live_schema_gate(memory_id: &str, graph: &SchemaGraph, conn: &Connection) -> bool {
     #[cfg(test)]
     LIVE_GATE_CALLS.with(|c| c.set(c.get() + 1));
 
@@ -197,10 +193,9 @@ pub fn validate_live_schema_gate(
     }
 
     for (schema, table, col_opt) in links {
-        let table_entry = graph
-            .tables
-            .iter()
-            .find(|t| t.schema.eq_ignore_ascii_case(&schema) && t.name.eq_ignore_ascii_case(&table));
+        let table_entry = graph.tables.iter().find(|t| {
+            t.schema.eq_ignore_ascii_case(&schema) && t.name.eq_ignore_ascii_case(&table)
+        });
 
         let Some(t) = table_entry else {
             return false;

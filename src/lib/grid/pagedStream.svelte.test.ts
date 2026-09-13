@@ -253,7 +253,12 @@ describe('clamping', () => {
           resolveMore = r;
         }),
     );
-    const h = harness({ rows: rowsOf(200), fetchedCount: 200, isEnd: false, onNeedMore });
+    const h = harness({
+      rows: rowsOf(200),
+      fetchedCount: 200,
+      isEnd: false,
+      onNeedMore,
+    });
     expect(h.stream().page).toBe(0);
 
     const nextPromise = h.stream().goNext();

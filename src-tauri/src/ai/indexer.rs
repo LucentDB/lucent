@@ -333,11 +333,7 @@ async fn run_schema_drift_cascade(
 
     match memory_manager
         .with_connection(|conn| {
-            crate::ai::memory::drift::cascade_schema_drift(
-                memory_connection_key,
-                snapshot,
-                conn,
-            )
+            crate::ai::memory::drift::cascade_schema_drift(memory_connection_key, snapshot, conn)
         })
         .await
     {
@@ -346,9 +342,7 @@ async fn run_schema_drift_cascade(
                 sink.emit_drift(&alerts);
             }
         }
-        Err(e) => log::warn!(
-            "Gate 1 schema-drift cascade failed for {conn_id_for_task}: {e}"
-        ),
+        Err(e) => log::warn!("Gate 1 schema-drift cascade failed for {conn_id_for_task}: {e}"),
     }
 }
 
@@ -852,18 +846,22 @@ mod tests {
         );
 
         // Upward seam: the indexer reported the drift.
-        let drift = sink.drift.lock().unwrap();
-        assert_eq!(drift.len(), 1, "expected one drift alert, got {drift:?}");
-        assert_eq!(drift[0].memory_id, "mem_drift_1");
-        assert!(
-            drift[0].reason.contains("public.users"),
-            "alert names the dropped table: {}",
-            drift[0].reason
-        );
-        drop(drift);
+        {
+            let drift = sink.drift.lock().unwrap();
+            assert_eq!(drift.len(), 1, "expected one drift alert, got {drift:?}");
+            assert_eq!(drift[0].memory_id, "mem_drift_1");
+            assert!(
+                drift[0].reason.contains("public.users"),
+                "alert names the dropped table: {}",
+                drift[0].reason
+            );
+        }
 
         // Downward effect: the dependent memory is invalidated and tombstoned.
-        let all = memory_manager.list_memories(memory_key, true).await.unwrap();
+        let all = memory_manager
+            .list_memories(memory_key, true)
+            .await
+            .unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].status, MemoryStatus::StaleInvalid);
         assert!(all[0].tombstone, "invalidated memory must be tombstoned");
@@ -890,10 +888,8 @@ mod tests {
         use crate::ai::memory::entity_linker::{compute_entity_fingerprint, EntityRef};
         use crate::ai::memory::{MemoryManager, MemoryStatus};
 
-        let dir = std::env::temp_dir().join(format!(
-            "lucent-indexer-drift-scope-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("lucent-indexer-drift-scope-{}", std::process::id()));
         let cache = PersistentVectorCache::open_at(dir.join("embeddings_v1.db")).unwrap();
         let sink = Arc::new(RecordingSink::default());
         let manager = IndexingManager::new(cache, sink.clone());
@@ -960,7 +956,10 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(manager.tasks.lock().await.is_empty(), "indexer task completed");
+        assert!(
+            manager.tasks.lock().await.is_empty(),
+            "indexer task completed"
+        );
 
         // The indexed connection's memory is invalidated…
         let indexed = memory_manager.list_memories(key_a, true).await.unwrap();
@@ -1062,16 +1061,20 @@ mod tests {
             "the embedder-unavailable path must still reach terminal state"
         );
 
-        let drift = sink.drift.lock().unwrap();
-        assert_eq!(
-            drift.len(),
-            1,
-            "drift must be reported even with no embedder: {drift:?}"
-        );
-        assert_eq!(drift[0].memory_id, "mem_offline");
-        drop(drift);
+        {
+            let drift = sink.drift.lock().unwrap();
+            assert_eq!(
+                drift.len(),
+                1,
+                "drift must be reported even with no embedder: {drift:?}"
+            );
+            assert_eq!(drift[0].memory_id, "mem_offline");
+        }
 
-        let all = memory_manager.list_memories(memory_key, true).await.unwrap();
+        let all = memory_manager
+            .list_memories(memory_key, true)
+            .await
+            .unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(
             all[0].status,

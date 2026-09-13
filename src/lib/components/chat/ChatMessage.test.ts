@@ -25,8 +25,11 @@ describe('ChatMessage memory pill (F-C2)', () => {
     const pill = screen.getByRole('button', {
       name: '1 rule applied. Open Memory Drawer',
     });
-    expect(pill.textContent).toMatch(/1 rule applied/);
-    expect(pill.textContent).not.toMatch(/1 rules applied/);
+    // Svelte/Prettier may reflow the markup, so collapse whitespace before
+    // asserting on the visible label.
+    const text = (pill.textContent ?? '').replace(/\s+/g, ' ').trim();
+    expect(text).toMatch(/1 rule applied/);
+    expect(text).not.toMatch(/1 rules applied/);
   });
 
   it('renders the plural label and aria when several rules applied', () => {
@@ -37,7 +40,8 @@ describe('ChatMessage memory pill (F-C2)', () => {
     const pill = screen.getByRole('button', {
       name: '3 rules applied. Open Memory Drawer',
     });
-    expect(pill.textContent).toMatch(/3 rules applied/);
+    const text = (pill.textContent ?? '').replace(/\s+/g, ' ').trim();
+    expect(text).toMatch(/3 rules applied/);
   });
 
   it('hides the pill when rulesApplied is 0', () => {
@@ -83,7 +87,11 @@ describe('ChatMessage memory pill (F-C2)', () => {
     render(ChatMessage, {
       message: assistantMsg({
         rulesApplied: 0,
-        usage: { promptTokens: 90, completionTokens: 10, cachedPromptTokens: 0 },
+        usage: {
+          promptTokens: 90,
+          completionTokens: 10,
+          cachedPromptTokens: 0,
+        },
       }),
       onOpenMemoryDrawer: vi.fn(),
     });

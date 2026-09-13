@@ -225,7 +225,10 @@
     const payload =
       cells.length > 0
         ? cells
-        : engine.selectedRowIndices().map((i) => rows[i]).filter(Boolean);
+        : engine
+            .selectedRowIndices()
+            .map((i) => rows[i])
+            .filter(Boolean);
     if (payload.length === 0) return false;
     const text = format === 'csv' ? toCsv(payload) : toTsv(payload);
     navigator.clipboard?.writeText(text).catch(() => {});
@@ -741,8 +744,8 @@
           onToggleSelectAllPage={toggleSelectAllPage}
           openColumnId={columnMenu?.id ?? null}
           allPageSelected={stream.pageRows.length > 0 &&
-            stream.pageRows.every(
-              (_, i) => selectedRows.has(stream.page * pageSize + i),
+            stream.pageRows.every((_, i) =>
+              selectedRows.has(stream.page * pageSize + i),
             )}
         />
         <GridBody

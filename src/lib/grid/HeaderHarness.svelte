@@ -45,7 +45,6 @@
   export function resizeTo(id, size) {
     engine.table.setColumnSizing({ [id]: size });
   }
-
 </script>
 
 <table>

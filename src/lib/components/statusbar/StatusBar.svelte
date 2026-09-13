@@ -35,9 +35,7 @@
         </div>
       {/if}
       {#if readOnly}
-        <div class="status-item readonly-badge">
-          RO
-        </div>
+        <div class="status-item readonly-badge">RO</div>
       {/if}
     {:else}
       <div class="status-item disconnected">
@@ -73,7 +71,8 @@
     flex-shrink: 0;
   }
 
-  .status-left, .status-right {
+  .status-left,
+  .status-right {
     display: flex;
     align-items: center;
     height: 100%;
@@ -121,7 +120,8 @@
     color: var(--text-secondary);
   }
 
-  .driver-badge, .readonly-badge {
+  .driver-badge,
+  .readonly-badge {
     padding: 0 4px;
     height: 16px;
     line-height: 16px;

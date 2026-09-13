@@ -502,6 +502,7 @@ pub trait AgentDriver: Send + Sync {
     /// `applied_memory_count` is the number of learned rules injected into
     /// `system_prompt` this turn (F-C2); the driver echoes it on its terminal
     /// `Done` event.
+    #[allow(clippy::too_many_arguments)] // AgentDriver seam signature
     async fn chat(
         &self,
         message: String,
@@ -542,6 +543,7 @@ impl DatabaseAgent {
     /// Uses Rig's native tool framework. After tool execution, pushes a follow-up
     /// user message to prompt the model's response, so the API never receives
     /// tool results without a subsequent user turn.
+    #[allow(clippy::too_many_arguments)] // AgentDriver seam signature
     pub async fn chat(
         &self,
         message: String,

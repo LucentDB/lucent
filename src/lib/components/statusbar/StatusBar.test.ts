@@ -79,7 +79,9 @@ describe('IndexingStatusWidget Component', () => {
       databaseName: 'main',
     });
 
-    const button = screen.getByRole('button', { name: /schema indexing status/i });
+    const button = screen.getByRole('button', {
+      name: /schema indexing status/i,
+    });
     expect(indexing.detailsOpen).toBe(false);
 
     await fireEvent.click(button);

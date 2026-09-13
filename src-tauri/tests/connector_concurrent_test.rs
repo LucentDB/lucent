@@ -315,6 +315,7 @@ async fn test_preflight_probe_cannot_leak_statement_timeout() {
             id: 0,
             schema: "public".into(),
             name: "big_probe_target".into(),
+            kind: "view".into(),
             row_count_estimate: 1,
             partition_info: None,
         }],
@@ -326,6 +327,7 @@ async fn test_preflight_probe_cannot_leak_statement_timeout() {
             name: "v".into(),
             data_type: "text".into(),
             is_primary_key: true,
+            is_nullable: true,
             sample_values: vec![],
             fk_ref: None,
             embedding: vec![],
@@ -589,8 +591,7 @@ async fn test_get_objects_info_batches_columns_queries() {
         // This test exercises object info, not memory; an in-memory manager
         // keeps it off the user's real memory.db.
         memory_manager: std::sync::Arc::new(
-            lucent_lib::ai::memory::MemoryManager::open_in_memory()
-                .expect("in-memory memory db"),
+            lucent_lib::ai::memory::MemoryManager::open_in_memory().expect("in-memory memory db"),
         ),
     };
     let tool = lucent_lib::ai::tools::objects::GetObjectsInfo::new(ctx.clone());
