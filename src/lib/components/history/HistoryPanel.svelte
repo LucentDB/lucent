@@ -57,7 +57,11 @@
   <!-- Header -->
   <div class="panel-header">
     <h2 class="panel-title">Query History</h2>
-    <button class="close-btn" onclick={() => onClose?.()}>
+    <button
+      class="close-btn"
+      aria-label="Close query history"
+      onclick={() => onClose?.()}
+    >
       <svg
         width="16"
         height="16"
@@ -90,7 +94,12 @@
       }}>Saved</button
     >
     {#if activeTab === 'history'}
-      <button class="clear-btn" onclick={handleClear} title="Clear all history">
+      <button
+        class="clear-btn"
+        aria-label="Clear all history"
+        onclick={handleClear}
+        title="Clear all history"
+      >
         <svg
           width="14"
           height="14"
@@ -125,12 +134,17 @@
     <input
       bind:this={searchInput}
       type="text"
+      aria-label="Search queries"
       placeholder="Search queries...  (/)"
       value={history.searchQuery}
       oninput={(e) => handleSearch((e.target as HTMLInputElement).value)}
     />
     {#if history.searchQuery}
-      <button class="clear-search" onclick={() => handleSearch('')}>
+      <button
+        class="clear-search"
+        aria-label="Clear search text"
+        onclick={() => handleSearch('')}
+      >
         <svg
           width="14"
           height="14"
@@ -320,8 +334,6 @@
   .state-sub {
     font-size: 12px;
     margin-top: 4px;
-  }
-  .date-group {
   }
   .group-header {
     display: flex;
