@@ -53,4 +53,21 @@ describe('toCsv', () => {
     // Tabs are only special in TSV. Over-quoting CSV is its own bug.
     expect(toCsv([['a\tb']])).toBe('a\tb');
   });
+
+  it('neutralizes spreadsheet formula triggers (CWE-1236)', () => {
+    expect(toCsv([['=1+2']])).toBe("'=1+2");
+    expect(toCsv([['+123']])).toBe("'+123");
+    expect(toCsv([['-5']])).toBe("'-5");
+    expect(toCsv([['@SUM(A1)']])).toBe("'@SUM(A1)");
+    expect(toCsv([['\tcmd']])).toBe("'\tcmd");
+  });
+
+  it('preserves negative and positive numeric values without single-quote neutralization', () => {
+    expect(toCsv([[-5]])).toBe('-5');
+    expect(toCsv([[+123]])).toBe('123');
+  });
+
+  it('neutralizes formula triggers before RFC 4180 quoting', () => {
+    expect(toCsv([['=1,2']])).toBe("\"'=1,2\"");
+  });
 });
