@@ -444,13 +444,26 @@
     tick().then(() => document.getElementById(`memory-tab-${tab}`)?.focus());
   }
 
+  // Uses a parallel cache pattern to avoid repeated string allocations (toLowerCase) inside the filter loop on every keystroke
+  let searchQueryLower = $derived(searchQuery.trim().toLowerCase());
+  let activeMemoriesCache = $derived(
+    activeMemories.map((m) => ({
+      item: m,
+      lowerKey: m.key_phrase.toLowerCase(),
+      lowerRule: m.rule_text.toLowerCase(),
+    })),
+  );
+
   const filteredActive = $derived(
-    activeMemories.filter((m) =>
-      searchQuery
-        ? m.key_phrase.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          m.rule_text.toLowerCase().includes(searchQuery.toLowerCase())
-        : true,
-    ),
+    searchQueryLower
+      ? activeMemoriesCache
+          .filter(
+            (c) =>
+              c.lowerKey.includes(searchQueryLower) ||
+              c.lowerRule.includes(searchQueryLower),
+          )
+          .map((c) => c.item)
+      : activeMemories,
   );
 </script>
 
