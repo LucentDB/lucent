@@ -68,6 +68,6 @@ describe('toCsv', () => {
   });
 
   it('neutralizes formula triggers before RFC 4180 quoting', () => {
-    expect(toCsv([['=1,2']])).toBe("\"'=1,2\"");
+    expect(toCsv([['=1,2']])).toBe('"\'=1,2"');
   });
 });
