@@ -11,12 +11,15 @@
   let query = $state('');
   let activeIndex = $state(0);
   let queryLower = $derived(query.trim().toLowerCase());
+  // Performance optimization: Uses outer derived `queryLower` and skips filtering when query is empty.
   let matches = $derived(
-    models.filter(
-      (m) =>
-        m.id.toLowerCase().includes(queryLower) ||
-        m.displayName.toLowerCase().includes(queryLower),
-    ),
+    queryLower
+      ? models.filter(
+          (m) =>
+            m.id.toLowerCase().includes(queryLower) ||
+            m.displayName.toLowerCase().includes(queryLower),
+        )
+      : models,
   );
 
   function pick(id) {
