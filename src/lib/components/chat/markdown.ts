@@ -23,7 +23,7 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
 // Forbid HTML forms and non-checkbox input controls to prevent UI spoofing / phishing
 // in rendered markdown within the webview environment.
 DOMPurify.addHook('uponSanitizeElement', (node, data) => {
-  if (data.tagName === 'input') {
+  if (data.tagName === 'input' && node instanceof Element) {
     const type = node.getAttribute('type');
     if (type !== 'checkbox') {
       node.parentNode?.removeChild(node);
