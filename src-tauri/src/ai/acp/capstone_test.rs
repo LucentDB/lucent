@@ -325,8 +325,9 @@ async fn capstone_tool_roundtrip_and_dml_approval() {
         .find_map(|e| match e {
             AiEvent::ToolResult {
                 output: Some(output),
+                tool,
                 ..
-            } => Some(output.clone()),
+            } if tool == "run_readonly_query" => Some(output.clone()),
             _ => None,
         })
         .expect("ToolResult with structured output reached the sink");
