@@ -687,6 +687,31 @@ async fn probing_a_duckdb_profile_uses_the_duckdb_worker() {
     //
     // Requires `cargo build --workspace` first: the probe spawns the real
     // lucent-driver-duckdb binary (same contract as duckdb_e2e_test).
+    let name = crate::supervisor::worker_binary_name("duckdb");
+    let has_binary = (|| {
+        if std::env::var(crate::supervisor::worker_binary_env_var("duckdb")).is_ok() {
+            return true;
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                for rel in ["", "../", "../../"] {
+                    if parent.join(rel).join(&name).exists() {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    })();
+
+    if !has_binary {
+        eprintln!(
+            "skipping probing_a_duckdb_profile_uses_the_duckdb_worker: {} binary not found",
+            name
+        );
+        return;
+    }
+
     let result = crate::commands::probe_connection(
         lucent_protocol::ConnectionConfig::new("duckdb").with("path", ":memory:"),
         "DuckDB".to_string(),

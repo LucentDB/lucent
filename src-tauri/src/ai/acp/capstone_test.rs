@@ -326,7 +326,7 @@ async fn capstone_tool_roundtrip_and_dml_approval() {
             AiEvent::ToolResult {
                 output: Some(output),
                 ..
-            } => Some(output.clone()),
+            } if output["type"] == "query_result" => Some(output.clone()),
             _ => None,
         })
         .expect("ToolResult with structured output reached the sink");
