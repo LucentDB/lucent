@@ -444,13 +444,20 @@
     tick().then(() => document.getElementById(`memory-tab-${tab}`)?.focus());
   }
 
-  const filteredActive = $derived(
-    activeMemories.filter((m) =>
-      searchQuery
-        ? m.key_phrase.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          m.rule_text.toLowerCase().includes(searchQuery.toLowerCase())
-        : true,
-    ),
+  // Compute normalized search query once per query update.
+  let searchQueryLower = $derived(searchQuery.trim().toLowerCase());
+
+  // Filter activeMemories efficiently: when query is empty, return activeMemories directly
+  // to avoid intermediate object/array allocations. When filtering, use searchQueryLower
+  // so query normalization is performed only once instead of per item.
+  let filteredActive = $derived(
+    !searchQueryLower
+      ? activeMemories
+      : activeMemories.filter(
+          (m) =>
+            m.key_phrase.toLowerCase().includes(searchQueryLower) ||
+            m.rule_text.toLowerCase().includes(searchQueryLower),
+        ),
   );
 </script>
 
