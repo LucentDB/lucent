@@ -139,6 +139,10 @@ impl Supervisor {
             return PathBuf::from(path);
         }
 
+        if let Ok(path) = std::env::var(format!("CARGO_BIN_EXE_{name}")) {
+            return PathBuf::from(path);
+        }
+
         // Search relative to the current executable's directory.
         // The running binary is either in target/debug/ (tauri dev) or
         // target/debug/deps/ (test). The worker sits in target/debug/.
