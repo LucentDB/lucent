@@ -690,14 +690,21 @@ async fn probing_a_duckdb_profile_uses_the_duckdb_worker() {
     let worker_name = crate::supervisor::worker_binary_name("duckdb");
     let has_binary = std::env::var(crate::supervisor::worker_binary_env_var("duckdb")).is_ok()
         || std::env::var(format!("CARGO_BIN_EXE_{worker_name}")).is_ok()
-        || std::env::current_exe().ok().and_then(|exe| {
-            exe.parent().and_then(|p| {
-                ["", "../", "../../"].iter().find_map(|rel| {
-                    let candidate = p.join(rel).join(&worker_name);
-                    if candidate.exists() { Some(candidate) } else { None }
+        || std::env::current_exe()
+            .ok()
+            .and_then(|exe| {
+                exe.parent().and_then(|p| {
+                    ["", "../", "../../"].iter().find_map(|rel| {
+                        let candidate = p.join(rel).join(&worker_name);
+                        if candidate.exists() {
+                            Some(candidate)
+                        } else {
+                            None
+                        }
+                    })
                 })
             })
-        }).is_some();
+            .is_some();
 
     if !has_binary {
         eprintln!("skipping probing_a_duckdb_profile_uses_the_duckdb_worker: {worker_name} binary not found");
