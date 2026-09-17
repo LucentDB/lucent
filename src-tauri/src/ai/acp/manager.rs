@@ -104,11 +104,42 @@ impl AcpManager {
         // Merge config env over the manifest env (user overrides win).
         let mut env = launch.env.clone();
         env.extend(acp.env.clone());
+
+        #[cfg(unix)]
+        {
+            let mut paths = env.get("PATH").cloned().unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
+            let mut standard_paths: Vec<String> = vec![
+                "/opt/homebrew/bin".into(),
+                "/opt/homebrew/sbin".into(),
+                "/usr/local/bin".into(),
+                "/usr/local/sbin".into(),
+            ];
+            if let Ok(home) = std::env::var("HOME") {
+                standard_paths.push(format!("{}/.cargo/bin", home));
+                standard_paths.push(format!("{}/.local/bin", home));
+            }
+            for p in standard_paths.into_iter().rev() {
+                if !paths.split(':').any(|x| x == p) {
+                    if paths.is_empty() {
+                        paths = p;
+                    } else {
+                        paths = format!("{}:{}", p, paths);
+                    }
+                }
+            }
+            env.insert("PATH".to_string(), paths);
+        }
+
+        let mut args = launch.args.clone();
+        if agent_id == "opencode" && !args.contains(&"--print-logs".to_string()) {
+            args.push("--print-logs".to_string());
+        }
+
         let proc = Arc::new(AgentProcess {
             agent_id: agent_id.to_string(),
             launch: LaunchSpec {
                 cmd: launch.cmd,
-                args: launch.args,
+                args,
                 env,
             },
             stderr_tail: Arc::new(Mutex::new(String::new())),
@@ -282,6 +313,27 @@ mod tests {
             Some("x")
         );
         uninstall("stub-manager-env").expect("cleanup ok");
+    }
+
+    #[tokio::test]
+    async fn unix_path_is_enriched() {
+        if !cfg!(unix) {
+            return;
+        }
+        let mgr = AcpManager::new();
+        let cfg = acp_cfg("stub", Some("opencode acp"));
+        let proc = mgr.ensure_process("stub", &cfg).await.unwrap();
+        let path = proc.launch.env.get("PATH").unwrap();
+        assert!(path.contains("/opt/homebrew/bin"));
+        assert!(path.contains("/usr/local/bin"));
+    }
+
+    #[tokio::test]
+    async fn opencode_print_logs_is_appended() {
+        let mgr = AcpManager::new();
+        let cfg = acp_cfg("opencode", Some("opencode acp"));
+        let proc = mgr.ensure_process("opencode", &cfg).await.unwrap();
+        assert!(proc.launch.args.contains(&"--print-logs".to_string()));
     }
 
     #[test]

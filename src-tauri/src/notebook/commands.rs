@@ -1003,16 +1003,34 @@ async fn run_ai_cell(
             return Err(CommandError::new("agent_error", e.to_string()));
         }
         Err(_) => {
-            log::error!("AI cell '{cell_id}' agent timed out after 300s");
+            log::error!("AI cell '{cell_id}' timed out");
+            let stderr_note = if is_acp {
+                if let Some(acp_cfg) = config.acp.as_ref() {
+                    if let Some(proc) = state.acp.manager.processes.lock().unwrap().get(&acp_cfg.agent_id) {
+                        let snip = proc.stderr_snippet();
+                        if !snip.trim().is_empty() {
+                            format!(" Last agent output:\n{}", snip)
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
             let error = CellError::QueryError {
-                message: "Agent timed out after 300 seconds. Try simplifying the question.".into(),
+                message: format!("Agent timed out after 300 seconds.{}", stderr_note),
                 sql_error: String::new(),
             };
             let _ = channel.send(NotebookEvent::CellError {
                 cell_id: cell_id.clone(),
                 error,
             });
-            return Err(CommandError::new("agent_timeout", "timed out after 300s"));
+            return Err(CommandError::new("timeout", "Agent timed out after 300s"));
         }
     }
 

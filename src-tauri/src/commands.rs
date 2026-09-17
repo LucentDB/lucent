@@ -2713,12 +2713,29 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
         }
         Err(_) => {
             log::error!("Agent timed out after 300s");
+            let stderr_note = if is_acp {
+                if let Some(acp_cfg) = config.acp.as_ref() {
+                    if let Some(proc) = state.acp.manager.processes.lock().unwrap().get(&acp_cfg.agent_id) {
+                        let snip = proc.stderr_snippet();
+                        if !snip.trim().is_empty() {
+                            format!(" Last agent output:\n{}", snip)
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
             let _ = app_err.emit(
                 "ai:error",
                 AiErrorPayload {
                     conversation_id: conversation_id.clone(),
-                    message: "Agent timed out after 300 seconds. Try simplifying the question."
-                        .into(),
+                    message: format!("Agent timed out after 300 seconds. Try simplifying the question.{}", stderr_note)
                 },
             );
             let mut s = conv_err.lock().await;

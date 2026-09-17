@@ -103,6 +103,23 @@ impl DuckHandle {
     pub fn conn_arc(&self) -> Arc<Mutex<Connection>> {
         self.conn.clone()
     }
+
+    /// Create another connection to the same underlying database instance.
+    pub fn try_clone(&self) -> Result<Self, LucentError> {
+        let guard = match self.conn.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let conn = guard
+            .try_clone()
+            .map_err(|e| err(LucentErrorKind::Internal, format!("clone connection: {e}")))?;
+        let interrupt = conn.interrupt_handle();
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            interrupt,
+            read_only: self.read_only,
+        })
+    }
 }
 
 fn err(kind: LucentErrorKind, message: impl Into<String>) -> LucentError {

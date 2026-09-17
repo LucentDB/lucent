@@ -77,6 +77,18 @@ pub fn worker_binary_env_var(driver_id: &str) -> String {
     format!("LUCENT_WORKER_BINARY_{}", driver_id.to_uppercase())
 }
 
+fn probe_worker_candidates(dir: &std::path::Path, name: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    let candidates = [dir.join(name), dir.join(format!("{name}.exe"))];
+    #[cfg(not(windows))]
+    let candidates = [dir.join(name)];
+
+    candidates
+        .into_iter()
+        .find(|c| c.exists())
+        .and_then(|c| c.canonicalize().ok())
+}
+
 impl Supervisor {
     /// A supervisor for the Postgres worker — the original single-driver
     /// behaviour. Driver-aware callers use [`Supervisor::for_driver`].
@@ -140,13 +152,15 @@ impl Supervisor {
         }
 
         // Search relative to the current executable's directory.
-        // The running binary is either in target/debug/ (tauri dev) or
-        // target/debug/deps/ (test). The worker sits in target/debug/.
+        // In release app bundles (macOS .app, Windows, Linux), sidecars sit next
+        // to the main binary in Contents/MacOS/ or root.
+        // In development/tests, the running binary is either in target/debug/ (tauri dev)
+        // or target/debug/deps/ (test). The worker sits in target/debug/ or target/release/.
         if let Ok(exe) = std::env::current_exe() {
             if let Some(parent) = exe.parent() {
                 for rel in &["", "../", "../../"] {
-                    let candidate = parent.join(rel).join(&name);
-                    if let Ok(canonical) = candidate.canonicalize() {
+                    let dir = parent.join(rel);
+                    if let Some(canonical) = probe_worker_candidates(&dir, &name) {
                         log::info!("Found worker binary at: {}", canonical.display());
                         return canonical;
                     }
@@ -156,9 +170,14 @@ impl Supervisor {
 
         // Also check from the current working directory (common during dev).
         if let Ok(cwd) = std::env::current_dir() {
-            for rel in &["target/debug/", "../target/debug/"] {
-                let candidate = cwd.join(rel).join(&name);
-                if let Ok(canonical) = candidate.canonicalize() {
+            for rel in &[
+                "target/debug/",
+                "../target/debug/",
+                "target/release/",
+                "../target/release/",
+            ] {
+                let dir = cwd.join(rel);
+                if let Some(canonical) = probe_worker_candidates(&dir, &name) {
                     log::info!("Found worker binary at: {}", canonical.display());
                     return canonical;
                 }
@@ -214,7 +233,7 @@ impl Supervisor {
         let mut child = match spawn_result {
             Ok(c) => c,
             Err(e) => {
-                let msg = format!("failed to spawn worker: {e}");
+                let msg = format!("failed to spawn worker at '{}': {e}", binary.display());
                 self.last_error = Some(msg.clone());
                 return Err(msg);
             }
@@ -372,5 +391,24 @@ mod tests {
     fn a_supervisor_remembers_which_driver_it_runs() {
         let sup = Supervisor::for_driver("duckdb", new_log_buffer());
         assert_eq!(sup.driver_id(), "duckdb");
+    }
+
+    #[test]
+    fn probe_worker_candidates_finds_binary_in_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin_name = "lucent-driver-test";
+        let file_path = temp.path().join(bin_name);
+        std::fs::write(&file_path, b"dummy").unwrap();
+
+        let found = probe_worker_candidates(temp.path(), bin_name);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap(), file_path.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn probe_worker_candidates_returns_none_when_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let found = probe_worker_candidates(temp.path(), "nonexistent");
+        assert!(found.is_none());
     }
 }

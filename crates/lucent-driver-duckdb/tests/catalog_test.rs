@@ -338,3 +338,177 @@ async fn catalog_errors_are_not_mislabeled_as_syntax_errors() {
         "the engine message must survive: {err}"
     );
 }
+
+#[tokio::test]
+async fn test_analytics_file() {
+    if !std::path::Path::new("/tmp/analytics.duckdb").exists() {
+        return;
+    }
+    let connector = DuckDbConnector::default();
+    let cid = ConnectionId(Uuid::new_v4());
+    connector
+        .connect(
+            cid,
+            ConnectionConfig::new("duckdb").with("path", "/tmp/analytics.duckdb"),
+        )
+        .await
+        .expect("connect");
+
+    let ns = connector
+        .catalog(cid, CatalogRequest::ListNamespaces)
+        .await
+        .expect("list namespaces");
+    eprintln!("NAMESPACES: {ns:?}");
+
+    let CatalogResult::Namespaces(namespaces) = ns else { panic!() };
+    for n in &namespaces {
+        let objs = connector
+            .catalog(
+                cid,
+                CatalogRequest::ListObjects {
+                    namespace: n.path.clone(),
+                    kinds: vec![],
+                },
+            )
+            .await
+            .expect("list objects with path");
+        eprintln!("OBJECTS FOR {}: {:?}", n.display(), objs);
+
+        let objs_single = connector
+            .catalog(
+                cid,
+                CatalogRequest::ListObjects {
+                    namespace: vec![n.display()],
+                    kinds: vec![],
+                },
+            )
+            .await;
+        eprintln!("OBJECTS FOR SINGLE [{}]: {:?}", n.display(), objs_single);
+    }
+}
+
+#[tokio::test]
+async fn test_cross_connection_visibility() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test_cross.duckdb");
+    let path_str = path.to_string_lossy().to_string();
+
+    let connector = DuckDbConnector::default();
+    let cid1 = ConnectionId(Uuid::new_v4());
+    connector
+        .connect(
+            cid1,
+            ConnectionConfig::new("duckdb").with("path", &path_str),
+        )
+        .await
+        .expect("connect 1");
+
+    // Connection 1 queries before table exists
+    let ns1 = connector.catalog(cid1, CatalogRequest::ListNamespaces).await.unwrap();
+    eprintln!("BEFORE CREATE - NS1: {ns1:?}");
+    let objs1_before = connector.catalog(cid1, CatalogRequest::ListObjects {
+        namespace: vec!["test_cross".into(), "main".into()],
+        kinds: vec![],
+    }).await.unwrap();
+    eprintln!("BEFORE CREATE - OBJS1: {objs1_before:?}");
+
+    // Connection 2 connects and creates table
+    let cid2 = ConnectionId(Uuid::new_v4());
+    connector
+        .connect(
+            cid2,
+            ConnectionConfig::new("duckdb").with("path", &path_str),
+        )
+        .await
+        .expect("connect 2");
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let exec = connector.execute(cid2, QueryId(Uuid::new_v4()), "CREATE TABLE my_table (id INT); INSERT INTO my_table VALUES (42);".into(), tx);
+    let drain = async {
+        while let Some(e) = rx.recv().await {
+            if let ExecutionEvent::Failed(err) = e {
+                panic!("exec failed: {err}");
+            }
+        }
+    };
+    tokio::join!(exec, drain);
+
+    // Check connection 2: does it see my_table?!
+    let objs2 = connector.catalog(cid2, CatalogRequest::ListObjects {
+        namespace: vec!["test_cross".into(), "main".into()],
+        kinds: vec![],
+    }).await.unwrap();
+    eprintln!("AFTER CREATE - OBJS2: {objs2:?}");
+
+    // Now check connection 1: does it see my_table?!
+    let ns1_after = connector.catalog(cid1, CatalogRequest::ListNamespaces).await.unwrap();
+    eprintln!("AFTER CREATE - NS1: {ns1_after:?}");
+    let objs1_after = connector.catalog(cid1, CatalogRequest::ListObjects {
+        namespace: vec!["test_cross".into(), "main".into()],
+        kinds: vec![],
+    }).await.unwrap();
+    eprintln!("AFTER CREATE - OBJS1: {objs1_after:?}");
+
+    let search1 = connector.catalog(cid1, CatalogRequest::SearchObjects {
+        query: "my_table".into(),
+        kinds: vec![],
+        namespace: None,
+        limit: 10,
+    }).await.unwrap();
+    eprintln!("AFTER CREATE - SEARCH1: {search1:?}");
+
+    // Check duckdb_transactions() on cid1
+    let (tx_txn, mut rx_txn) = tokio::sync::mpsc::channel(8);
+    let exec_txn = connector.execute(cid1, QueryId(Uuid::new_v4()), "SELECT * FROM duckdb_transactions()".into(), tx_txn);
+    let drain_txn = async {
+        while let Some(e) = rx_txn.recv().await {
+            if let ExecutionEvent::Batch(shape, _) = e {
+                eprintln!("CID1 TRANSACTIONS: {shape:?}");
+            }
+        }
+    };
+    tokio::join!(exec_txn, drain_txn);
+
+    // Now connect cid3
+    let cid3 = ConnectionId(Uuid::new_v4());
+    connector
+        .connect(
+            cid3,
+            ConnectionConfig::new("duckdb").with("path", &path_str),
+        )
+        .await
+        .expect("connect 3");
+    let objs3 = connector.catalog(cid3, CatalogRequest::ListObjects {
+        namespace: vec!["test_cross".into(), "main".into()],
+        kinds: vec![],
+    }).await.unwrap();
+    eprintln!("AFTER CREATE - OBJS3: {objs3:?}");
+}
+
+#[test]
+fn test_cloned_handle_cross_visibility() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test_shared.duckdb");
+    let path_str = path.to_string_lossy().to_string();
+
+    let h1 = lucent_driver_duckdb::connection::DuckHandle::open(&path_str, false).unwrap();
+    let h2 = h1.try_clone().unwrap();
+
+    // Query on h1 first
+    let count1: i64 = h1.with_conn(|conn| {
+        conn.query_row("SELECT count(*) FROM duckdb_tables()", [], |r| r.get(0)).map_err(|e| e.to_string())
+    }).unwrap();
+    assert_eq!(count1, 0);
+
+    // Create table on h2
+    h2.with_conn(|conn| {
+        conn.execute_batch("CREATE TABLE shared_t (x INT)").map_err(|e| e.to_string())
+    }).unwrap();
+
+    // Does h1 see it now?!
+    let count2: i64 = h1.with_conn(|conn| {
+        conn.query_row("SELECT count(*) FROM duckdb_tables() WHERE table_name = 'shared_t'", [], |r| r.get(0)).map_err(|e| e.to_string())
+    }).unwrap();
+    eprintln!("H1 SEES TABLE ON SHARED DB? count = {count2}");
+    assert_eq!(count2, 1);
+}

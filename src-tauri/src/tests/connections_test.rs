@@ -679,6 +679,11 @@ fn the_duckdb_descriptor_asks_for_a_path_and_no_secret() {
     );
 }
 
+// Needs the built `lucent-driver-duckdb` worker, which the unit tier
+// (`cargo test` in src-tauri alone) does not produce — the workspace tier
+// builds it. Gate it to the integration-tests feature, like the capstone
+// tests, so the dependency-free unit tier stays green.
+#[cfg(feature = "integration-tests")]
 #[tokio::test]
 async fn probing_a_duckdb_profile_uses_the_duckdb_worker() {
     // Regression test: the connection probe used to spawn a Postgres worker

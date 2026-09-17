@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:sidecars": "node scripts/stage-sidecars.mjs",
+    "build:app": "npm run build:sidecars && tauri build",
     "preview": "vite preview",
     "tauri": "tauri",
     "check": "svelte-check --tsconfig ./tsconfig.json",

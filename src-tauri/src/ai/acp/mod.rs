@@ -277,7 +277,21 @@ impl AcpState {
             let _ = std::fs::write(vscode_dir.join("mcp.json"), &mcp_json);
         }
 
-        // 5. Write executable lucent-tool helper script for terminal/bash-based agents (e.g. pi-acp)
+        // 5. Write opencode.json (used by OpenCode)
+        let opencode_config = serde_json::json!({
+            "$schema": "https://opencode.ai/config.json",
+            "mcp": {
+                "lucent-db-tools": {
+                    "type": "local",
+                    "command": [bridge_bin.clone(), "--socket", endpoint.clone(), "--token", token.clone()],
+                    "enabled": true
+                }
+            }
+        });
+        let opencode_json = serde_json::to_string_pretty(&opencode_config).unwrap_or_default();
+        let _ = std::fs::write(sandbox.join("opencode.json"), &opencode_json);
+
+        // 6. Write executable lucent-tool helper script for terminal/bash-based agents (e.g. pi-acp)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -800,6 +814,24 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn session_for_delivers_opencode_config() {
+        let _ws = hermetic_workspace();
+        let acp = AcpState::new();
+        let process = stub_process();
+        let sink = sink();
+        acp.session_for("conv-opencode", &process, &tool_ctx(), &sink)
+            .await
+            .expect("session/new round-trips");
+        
+        let workspace = crate::ai::acp::driver::workspace_dir("stub", "conv-opencode").unwrap();
+        let config_path = workspace.join("opencode.json");
+        let content = std::fs::read_to_string(&config_path).expect("opencode.json must be created");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("must be valid json");
+        assert_eq!(parsed["$schema"], "https://opencode.ai/config.json");
+        assert_eq!(parsed["mcp"]["lucent-db-tools"]["type"], "local");
+        assert_eq!(parsed["mcp"]["lucent-db-tools"]["enabled"], true);
+    }
     struct EnvVarGuard<'a>(&'a str, Option<String>);
     impl Drop for EnvVarGuard<'_> {
         fn drop(&mut self) {
