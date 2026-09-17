@@ -10,13 +10,23 @@
 
   let query = $state('');
   let activeIndex = $state(0);
+  // Cache lowercased strings per model to avoid repeated toLowerCase allocations per item during filtering on every keystroke
+  let cachedModels = $derived(
+    models.map((m) => ({
+      item: m,
+      lowerId: m.id.toLowerCase(),
+      lowerName: (m.displayName || '').toLowerCase(),
+    })),
+  );
+
   let queryLower = $derived(query.trim().toLowerCase());
   let matches = $derived(
-    models.filter(
-      (m) =>
-        m.id.toLowerCase().includes(queryLower) ||
-        m.displayName.toLowerCase().includes(queryLower),
-    ),
+    cachedModels
+      .filter(
+        (m) =>
+          m.lowerId.includes(queryLower) || m.lowerName.includes(queryLower),
+      )
+      .map((m) => m.item),
   );
 
   function pick(id) {
