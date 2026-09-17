@@ -2691,7 +2691,7 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
             system_prompt,
             conv,
             sink,
-            cancel,
+            cancel.clone(),
             applied_memory_count,
         ),
     )
@@ -2713,18 +2713,13 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
         }
         Err(_) => {
             log::error!("Agent timed out after 300s");
+            cancel.cancel();
             let stderr_note = if is_acp {
                 if let Some(acp_cfg) = config.acp.as_ref() {
-                    if let Some(proc) = state.acp.manager.processes.lock().unwrap().get(&acp_cfg.agent_id) {
-                        let snip = proc.stderr_snippet();
-                        if !snip.trim().is_empty() {
-                            format!(" Last agent output:\n{}", snip)
-                        } else {
-                            String::new()
-                        }
-                    } else {
-                        String::new()
-                    }
+                    let snip = state.acp.agent_stderr_snippet(&acp_cfg.agent_id);
+                    state.acp.kill_agent(&acp_cfg.agent_id).await;
+                    snip.map(|s| format!(" Last agent output:\n{}", s))
+                        .unwrap_or_default()
                 } else {
                     String::new()
                 }

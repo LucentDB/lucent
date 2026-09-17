@@ -29,11 +29,15 @@ const triple = getTargetTriple();
 const isWindows = triple.includes('windows') || process.platform === 'win32';
 const ext = isWindows ? '.exe' : '';
 
+const explicitTarget = process.env.TARGET || process.env.TAURI_ENV_TARGET_TRIPLE;
+const targetFlag = explicitTarget ? ` --target ${triple}` : '';
+const targetReleaseDir = explicitTarget ? join(rootDir, 'target', triple, 'release') : join(rootDir, 'target', 'release');
+
 console.log(`[stage-sidecars] Building release worker binaries for target: ${triple}`);
 
 // Build the release binaries
 execSync(
-  'cargo build --release -p lucent-driver-postgres -p lucent-driver-duckdb -p lucent --bin lucent-db-tools-mcp',
+  `cargo build --release${targetFlag} -p lucent-driver-postgres -p lucent-driver-duckdb -p lucent --bin lucent-db-tools-mcp`,
   {
     cwd: rootDir,
     stdio: 'inherit',
@@ -51,7 +55,7 @@ const sidecars = [
 ];
 
 for (const name of sidecars) {
-  const src = join(rootDir, 'target', 'release', `${name}${ext}`);
+  const src = join(targetReleaseDir, `${name}${ext}`);
   const dest = join(binariesDir, `${name}-${triple}${ext}`);
 
   if (!existsSync(src)) {

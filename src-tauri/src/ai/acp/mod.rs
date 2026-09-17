@@ -160,6 +160,11 @@ impl AcpState {
         }
     }
 
+    /// Returns the last non-empty stderr snippet for an agent, if any.
+    pub fn agent_stderr_snippet(&self, agent_id: &str) -> Option<String> {
+        self.manager.agent_stderr_snippet(agent_id)
+    }
+
     /// Get-or-create the ACP session for a conversation. On first use it
     /// also spawns the DB-tools bridge listener (tempdir socket + 32-byte
     /// hex token, spec §4.6) and delivers the bridge config to the agent via
@@ -831,6 +836,10 @@ mod tests {
         assert_eq!(parsed["$schema"], "https://opencode.ai/config.json");
         assert_eq!(parsed["mcp"]["lucent-db-tools"]["type"], "local");
         assert_eq!(parsed["mcp"]["lucent-db-tools"]["enabled"], true);
+        let cmd = parsed["mcp"]["lucent-db-tools"]["command"].as_array().expect("command is an array");
+        assert_eq!(cmd.len(), 5);
+        assert_eq!(cmd[1], "--socket");
+        assert_eq!(cmd[3], "--token");
     }
     struct EnvVarGuard<'a>(&'a str, Option<String>);
     impl Drop for EnvVarGuard<'_> {

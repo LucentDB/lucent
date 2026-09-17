@@ -936,7 +936,7 @@ async fn run_ai_cell(
             full_prompt,
             conv.clone(),
             sink.clone(),
-            cancel,
+            cancel.clone(),
             // Notebook cells build their own prompt and inject no memories.
             0,
         ),
@@ -1004,18 +1004,13 @@ async fn run_ai_cell(
         }
         Err(_) => {
             log::error!("AI cell '{cell_id}' timed out");
+            cancel.cancel();
             let stderr_note = if is_acp {
                 if let Some(acp_cfg) = config.acp.as_ref() {
-                    if let Some(proc) = state.acp.manager.processes.lock().unwrap().get(&acp_cfg.agent_id) {
-                        let snip = proc.stderr_snippet();
-                        if !snip.trim().is_empty() {
-                            format!(" Last agent output:\n{}", snip)
-                        } else {
-                            String::new()
-                        }
-                    } else {
-                        String::new()
-                    }
+                    let snip = state.acp.agent_stderr_snippet(&acp_cfg.agent_id);
+                    state.acp.kill_agent(&acp_cfg.agent_id).await;
+                    snip.map(|s| format!(" Last agent output:\n{}", s))
+                        .unwrap_or_default()
                 } else {
                     String::new()
                 }
@@ -1030,7 +1025,7 @@ async fn run_ai_cell(
                 cell_id: cell_id.clone(),
                 error,
             });
-            return Err(CommandError::new("timeout", "Agent timed out after 300s"));
+            return Err(CommandError::new("agent_timeout", "timed out after 300s"));
         }
     }
 

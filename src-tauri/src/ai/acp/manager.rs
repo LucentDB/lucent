@@ -38,7 +38,10 @@ impl AgentProcess {
         let mut t = tail.lock().unwrap();
         t.push_str(line);
         if t.len() > cap {
-            let cut = t.len() - cap;
+            let mut cut = t.len() - cap;
+            while cut < t.len() && !t.is_char_boundary(cut) {
+                cut += 1;
+            }
             t.drain(..cut);
         }
         t.len()
@@ -47,7 +50,10 @@ impl AgentProcess {
     /// Last ~2 KB of agent stderr, for user-facing error messages.
     pub fn stderr_snippet(&self) -> String {
         let t = self.stderr_tail.lock().unwrap();
-        let start = t.len().saturating_sub(2000);
+        let mut start = t.len().saturating_sub(2000);
+        while start < t.len() && !t.is_char_boundary(start) {
+            start += 1;
+        }
         t[start..].to_string()
     }
 }
@@ -63,6 +69,18 @@ impl AcpManager {
     pub fn new() -> Self {
         Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Returns the last non-empty stderr snippet for an agent, if any.
+    pub fn agent_stderr_snippet(&self, agent_id: &str) -> Option<String> {
+        let processes = self.processes.lock().unwrap();
+        let snip = processes.get(agent_id)?.stderr_snippet();
+        let trimmed = snip.trim();
+        if !trimmed.is_empty() {
+            Some(trimmed.to_string())
+        } else {
+            None
         }
     }
 
@@ -107,6 +125,7 @@ impl AcpManager {
 
         #[cfg(unix)]
         {
+            let user_specified_path = acp.env.contains_key("PATH");
             let mut paths = env.get("PATH").cloned().unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
             let mut standard_paths: Vec<String> = vec![
                 "/opt/homebrew/bin".into(),
@@ -118,12 +137,24 @@ impl AcpManager {
                 standard_paths.push(format!("{}/.cargo/bin", home));
                 standard_paths.push(format!("{}/.local/bin", home));
             }
-            for p in standard_paths.into_iter().rev() {
-                if !paths.split(':').any(|x| x == p) {
-                    if paths.is_empty() {
-                        paths = p;
-                    } else {
-                        paths = format!("{}:{}", p, paths);
+            if user_specified_path {
+                for p in standard_paths {
+                    if !paths.split(':').any(|x| x == p) {
+                        if paths.is_empty() {
+                            paths = p;
+                        } else {
+                            paths = format!("{}:{}", paths, p);
+                        }
+                    }
+                }
+            } else {
+                for p in standard_paths.into_iter().rev() {
+                    if !paths.split(':').any(|x| x == p) {
+                        if paths.is_empty() {
+                            paths = p;
+                        } else {
+                            paths = format!("{}:{}", p, paths);
+                        }
                     }
                 }
             }
@@ -334,6 +365,65 @@ mod tests {
         let cfg = acp_cfg("opencode", Some("opencode acp"));
         let proc = mgr.ensure_process("opencode", &cfg).await.unwrap();
         assert!(proc.launch.args.contains(&"--print-logs".to_string()));
+    }
+
+    #[tokio::test]
+    async fn opencode_print_logs_not_duplicated() {
+        let mgr = AcpManager::new();
+        let cfg = acp_cfg("opencode", Some("opencode acp --print-logs"));
+        let proc = mgr.ensure_process("opencode", &cfg).await.unwrap();
+        let count = proc.launch.args.iter().filter(|&a| a == "--print-logs").count();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn user_specified_path_is_not_preempted() {
+        if !cfg!(unix) {
+            return;
+        }
+        let mgr = AcpManager::new();
+        let mut cfg = acp_cfg("stub", Some("opencode acp"));
+        cfg.env.insert("PATH".into(), "/custom/bin".into());
+        let proc = mgr.ensure_process("stub", &cfg).await.unwrap();
+        let path = proc.launch.env.get("PATH").unwrap();
+        assert!(path.starts_with("/custom/bin"));
+        assert!(path.contains("/opt/homebrew/bin"));
+    }
+
+    #[test]
+    fn stderr_snippet_and_tail_push_handle_multibyte_utf8() {
+        let tail = Arc::new(Mutex::new(String::new()));
+        // Push 1000 emojis (each 4 bytes = 4000 bytes)
+        let emojis = "🔥".repeat(1000);
+        AgentProcess::tail_push(tail.clone(), &emojis, 2005);
+        let content = tail.lock().unwrap().clone();
+        assert!(content.is_char_boundary(0));
+        assert!(content.len() <= 2005);
+
+        let proc = Arc::new(AgentProcess {
+            agent_id: "utf8-agent".into(),
+            launch: LaunchSpec {
+                cmd: "echo".into(),
+                args: vec![],
+                env: HashMap::new(),
+            },
+            stderr_tail: tail,
+            spawns: Arc::new(Mutex::new(Vec::new())),
+        });
+        // Slicing last 2000 bytes should not panic on char boundary
+        let snip = proc.stderr_snippet();
+        assert!(!snip.is_empty());
+    }
+
+    #[tokio::test]
+    async fn manager_agent_stderr_snippet_returns_trimmed() {
+        let mgr = AcpManager::new();
+        let cfg = acp_cfg("stub", Some("echo hi"));
+        let proc = mgr.ensure_process("stub", &cfg).await.unwrap();
+        assert_eq!(mgr.agent_stderr_snippet("stub"), None);
+
+        AgentProcess::tail_push(proc.stderr_tail.clone(), "  fatal error \n  ", 1000);
+        assert_eq!(mgr.agent_stderr_snippet("stub").as_deref(), Some("fatal error"));
     }
 
     #[test]
