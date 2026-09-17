@@ -94,7 +94,12 @@
       Logs
     </span>
     <span class="drawer-hint">worker stderr</span>
-    <button class="close-btn" onclick={onClose} title="Close logs">
+    <button
+      class="close-btn"
+      onclick={onClose}
+      title="Close logs"
+      aria-label="Close logs"
+    >
       <svg
         width="14"
         height="14"

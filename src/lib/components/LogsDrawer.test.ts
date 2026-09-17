@@ -58,8 +58,8 @@ describe('LogsDrawer', () => {
 
   it('closes via the close button', async () => {
     const onClose = vi.fn();
-    const { getByTitle } = render(LogsDrawer, { onClose });
-    await fireEvent.click(getByTitle('Close logs'));
+    const { getByLabelText } = render(LogsDrawer, { onClose });
+    await fireEvent.click(getByLabelText('Close logs'));
     expect(onClose).toHaveBeenCalled();
   });
 
