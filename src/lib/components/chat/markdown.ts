@@ -47,7 +47,10 @@ export function renderMarkdown(text: string): string {
       renderer: markdownRenderer,
     });
     const html = typeof result === 'string' ? result : String(result);
-    return DOMPurify.sanitize(html);
+    return DOMPurify.sanitize(html, {
+      ALLOWED_URI_REGEXP:
+        /^(?:(?:(?:f|ht)tps?|mailto|tel):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i,
+    });
   } catch {
     return String(text ?? '')
       .replace(/&/g, '&amp;')
