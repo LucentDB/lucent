@@ -14,6 +14,9 @@ impl InjectionClass {
             Self::Retrieved => "retrieved",
         }
     }
+    // Lenient parse: unknown strings fall back to `Retrieved` rather than
+    // erroring, so this deliberately stays an inherent method.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         if s.eq_ignore_ascii_case("always") {
             Self::Always
@@ -41,6 +44,9 @@ impl Origin {
             Self::System => "system",
         }
     }
+    // Lenient parse: unknown strings fall back to `Agent` rather than erroring,
+    // so this deliberately stays an inherent method.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "owner" => Self::Owner,
@@ -71,6 +77,9 @@ pub struct Observation {
 }
 
 impl Observation {
+    // The observation fields are written together as one atomic record, so the
+    // constructor takes them positionally rather than via a builder struct.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         connection_key: String,
         conversation_id: Option<String>,
