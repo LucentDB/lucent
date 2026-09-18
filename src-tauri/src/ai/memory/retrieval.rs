@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use super::decay::{calculate_retention, calculate_viability};
 use super::drift::validate_live_schema_gate;
-use super::{GoldenQuery, MemoryItem, MemoryStatus, HOT_TIER_TOKEN_BUDGET};
+use super::{GoldenQuery, InjectionClass, MemoryItem, MemoryStatus, HOT_TIER_TOKEN_BUDGET};
 use crate::ai::rerank::Rerank;
 use crate::ai::schema_graph::SchemaGraph;
 
@@ -122,6 +122,13 @@ pub fn score_hybrid_candidates(
 
     for m in active_memories {
         if m.status != MemoryStatus::Active || m.tombstone {
+            continue;
+        }
+        // Cross-plane guard (spec §5.2/§5.5): `injection = 'always'` entries
+        // (profile memories injected unconditionally at the top of the prompt)
+        // must never surface through the retrieval pipeline, or they would be
+        // duplicated into the retrieved block.
+        if m.injection != InjectionClass::Retrieved {
             continue;
         }
         if let Some(valid_until) = m.valid_until {
@@ -556,6 +563,37 @@ mod tests {
             ids,
             vec!["mem_1"],
             "the memory whose linked table vanished must still be rejected"
+        );
+    }
+
+    /// Spec §5.2/§5.5: `injection = 'always'` entries (profile memories seeded
+    /// unconditionally into the prompt) are a separate plane and must never be
+    /// surfaced by the retrieval pipeline, or they would be injected twice.
+    #[test]
+    fn always_injection_memories_never_surface_through_retrieval() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        let mut retrieved = sample_memory("mem_retrieved");
+        retrieved.embedding = vec![1.0, 0.0, 0.0];
+
+        let mut always = sample_memory("mem_always");
+        always.embedding = vec![1.0, 0.0, 0.0];
+        always.injection = InjectionClass::Always;
+
+        let out = score_hybrid_candidates(
+            "anything",
+            "conn",
+            Some(&[1.0, 0.0, 0.0]),
+            None,
+            &[retrieved, always],
+            &conn,
+        );
+
+        let ids: Vec<&str> = out.iter().map(|c| c.memory.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["mem_retrieved"],
+            "an always-injected memory must not appear in retrieved output"
         );
     }
 }
