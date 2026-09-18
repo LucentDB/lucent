@@ -33,6 +33,14 @@
   // lives inside the popover, so the pill no longer needs a drawer handler to
   // render — it degrades to showing the applied rules on its own.
   let showAttribution = $state(false);
+  let pillEl = $state<HTMLButtonElement>();
+
+  // Closing from inside the popover (Escape or the close button) must return
+  // focus to the pill that opened it, not leave it on <body>.
+  function closeAttribution() {
+    showAttribution = false;
+    pillEl?.focus();
+  }
 
   // The DML card lives on a message, but its outcome (rows affected / error,
   // C1) is conversation-level state — derive it so the card re-renders when
@@ -85,6 +93,7 @@
         {/if}
         <button
           class="memory-pill"
+          bind:this={pillEl}
           onclick={() => (showAttribution = !showAttribution)}
           aria-label="{message.rulesApplied} {message.rulesApplied === 1
             ? 'rule'
@@ -98,7 +107,7 @@
       {#if showAttribution}
         <MemoryAttributionPopover
           ruleIds={message.appliedRuleIds ?? []}
-          onClose={() => (showAttribution = false)}
+          onClose={closeAttribution}
           onOpenDrawer={onOpenMemoryDrawer}
         />
       {/if}

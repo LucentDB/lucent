@@ -101,6 +101,31 @@ describe('ChatMessage memory pill (F-C2)', () => {
     expect(onOpen).toHaveBeenCalledTimes(1);
   });
 
+  it('traps focus in the attribution popover and returns it to the pill on Escape', async () => {
+    render(ChatMessage, {
+      message: assistantMsg({ rulesApplied: 2, appliedRuleIds: ['r1'] }),
+    });
+    const pill = screen.getByRole('button', { name: /2 rules applied/i });
+    await fireEvent.click(pill);
+
+    const dialog = screen.getByRole('dialog', { name: 'Applied rules' });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+
+    // Tab from the last focusable wraps to the first (W3C APG modal trap).
+    const focusables = dialog.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    );
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    last.focus();
+    await fireEvent.keyDown(window, { key: 'Tab' });
+    expect(document.activeElement).toBe(first);
+
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(pill);
+  });
+
   it('still shows token usage with no pill when zero rules applied', () => {
     render(ChatMessage, {
       message: assistantMsg({

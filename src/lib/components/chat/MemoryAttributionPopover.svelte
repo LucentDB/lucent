@@ -17,17 +17,66 @@
   let feedback = $state<Feedback>(null);
   let reported = $state(false);
 
+  // Modal focus management (mirrors MemoryDrawer.svelte): the dialog takes
+  // focus on mount and Tab wraps at its boundaries so keyboard focus stays
+  // inside while the popover is open.
+  const FOCUSABLE_SELECTOR =
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+  let dialogEl = $state<HTMLDivElement>();
+
+  $effect(() => {
+    dialogEl?.focus();
+  });
+
+  function trapTab(e: KeyboardEvent) {
+    const root = dialogEl;
+    if (!root) return;
+
+    const focusables = Array.from(
+      root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+    );
+    if (focusables.length === 0) {
+      e.preventDefault();
+      root.focus();
+      return;
+    }
+
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey) {
+      if (active === first || !root.contains(active)) {
+        e.preventDefault();
+        last.focus();
+      }
+    } else if (active === last || !root.contains(active)) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       e.stopPropagation();
       onClose?.();
+      return;
+    }
+    if (e.key === 'Tab') {
+      trapTab(e);
     }
   }
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="attribution-popover" role="dialog" aria-label="Applied rules">
+<div
+  class="attribution-popover"
+  role="dialog"
+  aria-label="Applied rules"
+  tabindex="-1"
+  bind:this={dialogEl}
+>
   <div class="attr-hdr">
     <span class="attr-icon">🧠</span>
     <span class="attr-title">Applied rules</span>
