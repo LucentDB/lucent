@@ -1,4 +1,5 @@
 pub mod consolidation;
+pub mod curation;
 pub mod decay;
 pub mod drift;
 pub mod entity_linker;
@@ -19,6 +20,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub use consolidation::*;
+pub use curation::*;
 pub use decay::*;
 pub use drift::*;
 pub use entity_linker::*;
