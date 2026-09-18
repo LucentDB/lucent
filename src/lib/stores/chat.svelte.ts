@@ -64,6 +64,10 @@ export interface ChatMessage {
    *  prompt (F-C2). 0/undefined hides the memory pill. On ACP follow-up turns
    *  this is 0 by design — only DELIVERED rules count. */
   rulesApplied?: number;
+  /** Ids of the learned memory rules injected into this turn (F-C2), used by
+   *  the attribution popover. Undefined when the turn predates attribution or
+   *  the backend did not report per-rule ids. */
+  appliedRuleIds?: string[];
   createdAt: number;
 }
 

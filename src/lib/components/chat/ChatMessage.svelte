@@ -4,6 +4,7 @@
   import DmlApprovalCard from './DmlApprovalCard.svelte';
   import PermissionRequestCard from './PermissionRequestCard.svelte';
   import WorkSession from './WorkSession.svelte';
+  import MemoryAttributionPopover from './MemoryAttributionPopover.svelte';
   import { chat, setSessionExpanded } from '../../stores/chat.svelte.ts';
 
   let {
@@ -27,6 +28,11 @@
   } = $props();
 
   let rendered = $derived(renderMarkdown(message.content));
+
+  // R24: the pill toggles an attribution popover. The Memory Drawer action
+  // lives inside the popover, so the pill no longer needs a drawer handler to
+  // render — it degrades to showing the applied rules on its own.
+  let showAttribution = $state(false);
 
   // The DML card lives on a message, but its outcome (rows affected / error,
   // C1) is conversation-level state — derive it so the card re-renders when
@@ -70,7 +76,7 @@
       />
     {/if}
 
-    {#if message.role === 'assistant' && (message.rulesApplied ?? 0) > 0 && onOpenMemoryDrawer}
+    {#if message.role === 'assistant' && (message.rulesApplied ?? 0) > 0}
       <div class="message-meta-row">
         {#if message.usage && message.usage.promptTokens + message.usage.completionTokens > 0}
           <div class="usage">
@@ -79,7 +85,7 @@
         {/if}
         <button
           class="memory-pill"
-          onclick={onOpenMemoryDrawer}
+          onclick={() => (showAttribution = !showAttribution)}
           aria-label="{message.rulesApplied} {message.rulesApplied === 1
             ? 'rule'
             : 'rules'} applied. Open Memory Drawer"
@@ -89,6 +95,13 @@
           {message.rulesApplied === 1 ? 'rule' : 'rules'} applied
         </button>
       </div>
+      {#if showAttribution}
+        <MemoryAttributionPopover
+          ruleIds={message.appliedRuleIds ?? []}
+          onClose={() => (showAttribution = false)}
+          onOpenDrawer={onOpenMemoryDrawer}
+        />
+      {/if}
     {:else if message.usage && message.usage.promptTokens + message.usage.completionTokens > 0}
       <div class="usage">
         ~{message.usage.promptTokens + message.usage.completionTokens} tokens

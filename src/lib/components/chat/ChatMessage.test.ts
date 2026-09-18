@@ -44,6 +44,18 @@ describe('ChatMessage memory pill (F-C2)', () => {
     expect(text).toMatch(/3 rules applied/);
   });
 
+  it('clicking memory pill opens attribution popover with rules', async () => {
+    render(ChatMessage, {
+      message: assistantMsg({
+        rulesApplied: 2,
+        appliedRuleIds: ['r1', 'r2'],
+      }),
+    });
+    const pill = screen.getByRole('button', { name: /2 rules applied/i });
+    await fireEvent.click(pill);
+    expect(await screen.findByText(/applied rules/i)).toBeTruthy();
+  });
+
   it('hides the pill when rulesApplied is 0', () => {
     render(ChatMessage, {
       message: assistantMsg({ rulesApplied: 0 }),
@@ -60,9 +72,11 @@ describe('ChatMessage memory pill (F-C2)', () => {
     expect(screen.queryByRole('button')).toBeNull();
   });
 
-  it('hides the pill when no drawer handler is provided', () => {
+  it('renders the pill without a drawer handler and opens the attribution popover', async () => {
     render(ChatMessage, { message: assistantMsg({ rulesApplied: 2 }) });
-    expect(screen.queryByRole('button')).toBeNull();
+    const pill = screen.getByRole('button', { name: /2 rules applied/i });
+    await fireEvent.click(pill);
+    expect(await screen.findByText(/applied rules/i)).toBeTruthy();
   });
 
   it('does not render the pill for a user message', () => {
@@ -73,13 +87,17 @@ describe('ChatMessage memory pill (F-C2)', () => {
     expect(screen.queryByRole('button')).toBeNull();
   });
 
-  it('opens the Memory Drawer when the pill is clicked', async () => {
+  it('opens the Memory Drawer from inside the attribution popover', async () => {
     const onOpen = vi.fn();
     render(ChatMessage, {
       message: assistantMsg({ rulesApplied: 2 }),
       onOpenMemoryDrawer: onOpen,
     });
     await fireEvent.click(screen.getByRole('button'));
+    expect(await screen.findByText(/applied rules/i)).toBeTruthy();
+    await fireEvent.click(
+      screen.getByRole('button', { name: 'Open Memory Drawer' }),
+    );
     expect(onOpen).toHaveBeenCalledTimes(1);
   });
 
