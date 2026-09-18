@@ -13,6 +13,8 @@
 
 use lucent_protocol::ConnectionConfig;
 
+pub mod memfail;
+
 pub struct EvalCase {
     pub name: &'static str,
     pub question: &'static str,
