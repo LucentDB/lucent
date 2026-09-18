@@ -273,6 +273,18 @@ mod tests {
             MergeOutcome::MergedInto { keep_id } => assert_eq!(keep_id, "m1"),
             _ => panic!("expected merge into m1"),
         }
+
+        // R18: the candidate must have been persisted *before* folding, leaving
+        // a real SUPERSEDED row (not the phantom-id bug that dropped evidence).
+        // Superseded rows are neither ARCHIVED nor tombstoned, so the default
+        // list_memories call still returns them.
+        let items = mgr.list_memories("conn", false).await.unwrap();
+        let m2 = items
+            .iter()
+            .find(|m| m.id == "m2")
+            .expect("R18: candidate row must exist after consolidate_or_merge_item");
+        assert_eq!(m2.status, MemoryStatus::Superseded);
+        assert_eq!(m2.supersedes_id, Some("m1".to_string()));
     }
 
     /// Direct coverage for the DAG-supersession half of the merge: folds carry
