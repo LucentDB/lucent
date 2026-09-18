@@ -3446,8 +3446,9 @@ pub async fn save_memory_manual(
 ) -> Result<crate::ai::memory::MemoryItem, String> {
     use crate::ai::memory::security::{sanitize_rule_text, sanitize_sql_snippet, SourceTrust};
     use crate::ai::memory::{
-        compute_memory_doc_hash, MemoryCategory, MemoryItem, MemoryScope, MemoryStatus,
-        MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME, USER_EXPLICIT_STABILITY_HOURS,
+        compute_memory_doc_hash, InjectionClass, MemoryCategory, MemoryItem, MemoryScope,
+        MemoryStatus, Origin, MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME,
+        USER_EXPLICIT_STABILITY_HOURS,
     };
 
     let sanitized_rule = sanitize_rule_text(&rule_text)?;
@@ -3523,6 +3524,13 @@ pub async fn save_memory_manual(
         embedding,
         created_at: now,
         updated_at: now,
+        injection: InjectionClass::Retrieved,
+        preference_key: None,
+        origin: Origin::Agent,
+        steps_json: None,
+        merge_group_id: None,
+        confirmed: false,
+        confirmation_conv_id: None,
     };
 
     state
@@ -3675,6 +3683,13 @@ pub async fn import_memories_markdown(
             embedding,
             created_at: now,
             updated_at: now,
+            injection: crate::ai::memory::InjectionClass::Retrieved,
+            preference_key: None,
+            origin: crate::ai::memory::Origin::Agent,
+            steps_json: None,
+            merge_group_id: None,
+            confirmed: false,
+            confirmation_conv_id: None,
         };
         if state
             .memory_manager
@@ -3877,8 +3892,8 @@ mod applied_memory_count_tests {
     use super::{build_system_prompt_with_query, AppState, MemoryEmbedderTestGate};
     use crate::ai::config::AiConfig;
     use crate::ai::memory::{
-        compute_memory_doc_hash, MemoryCategory, MemoryItem, MemoryManager, MemoryScope,
-        MemoryStatus, SourceTrust, MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME,
+        compute_memory_doc_hash, InjectionClass, MemoryCategory, MemoryItem, MemoryManager,
+        MemoryScope, MemoryStatus, Origin, SourceTrust, MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME,
     };
     use std::sync::Arc;
 
@@ -3925,6 +3940,13 @@ mod applied_memory_count_tests {
                 embedding: vec![0.0; 384],
                 created_at: now,
                 updated_at: now,
+                injection: InjectionClass::Retrieved,
+                preference_key: None,
+                origin: Origin::Agent,
+                steps_json: None,
+                merge_group_id: None,
+                confirmed: false,
+                confirmation_conv_id: None,
             },
             &[],
         )

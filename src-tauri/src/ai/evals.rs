@@ -278,6 +278,13 @@ mod grading_tests {
             embedding: vec![0.1; 384],
             created_at: 1000,
             updated_at: 1000,
+            injection: InjectionClass::Retrieved,
+            preference_key: None,
+            origin: Origin::Agent,
+            steps_json: None,
+            merge_group_id: None,
+            confirmed: false,
+            confirmation_conv_id: None,
         };
 
         let entity_link = EntityRef {
@@ -518,6 +525,13 @@ mod grading_tests {
             embedding: vec![0.5; 384],
             created_at: now - 3600,
             updated_at: now - 3600,
+            injection: InjectionClass::Retrieved,
+            preference_key: None,
+            origin: Origin::Agent,
+            steps_json: None,
+            merge_group_id: None,
+            confirmed: false,
+            confirmation_conv_id: None,
         };
 
         let new_rule = MemoryItem {
@@ -550,6 +564,13 @@ mod grading_tests {
             embedding: vec![0.5; 384],
             created_at: now,
             updated_at: now,
+            injection: InjectionClass::Retrieved,
+            preference_key: None,
+            origin: Origin::Agent,
+            steps_json: None,
+            merge_group_id: None,
+            confirmed: false,
+            confirmation_conv_id: None,
         };
 
         mgr.save_memory(old_rule, &[]).await.unwrap();
@@ -659,6 +680,13 @@ mod grading_tests {
             embedding: vec![],
             created_at: 1000,
             updated_at: 1000,
+            injection: InjectionClass::Retrieved,
+            preference_key: None,
+            origin: Origin::Agent,
+            steps_json: None,
+            merge_group_id: None,
+            confirmed: false,
+            confirmation_conv_id: None,
         };
 
         let prompt_with_mem = build_system_prompt_with_memories(&tree, None, None, &[mem1], &[]);

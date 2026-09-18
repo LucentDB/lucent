@@ -298,8 +298,8 @@ mod tests {
     }
 
     use crate::ai::memory::{
-        MemoryCategory, MemoryItem, MemoryScope, SourceTrust, MEMORY_FORMAT_VERSION,
-        MEMORY_MODEL_NAME,
+        InjectionClass, MemoryCategory, MemoryItem, MemoryScope, Origin, SourceTrust,
+        MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME,
     };
 
     fn sample_candidate(idx: usize, final_score: f32) -> ScoredCandidate {
@@ -334,6 +334,13 @@ mod tests {
                 embedding: Vec::new(),
                 created_at: 0,
                 updated_at: 0,
+                injection: InjectionClass::Retrieved,
+                preference_key: None,
+                origin: Origin::Agent,
+                steps_json: None,
+                merge_group_id: None,
+                confirmed: false,
+                confirmation_conv_id: None,
             },
             rrf_score: final_score,
             viability: 1.0,
@@ -442,6 +449,13 @@ mod tests {
             embedding: Vec::new(),
             created_at: 0,
             updated_at: 0,
+            injection: InjectionClass::Retrieved,
+            preference_key: None,
+            origin: Origin::Agent,
+            steps_json: None,
+            merge_group_id: None,
+            confirmed: false,
+            confirmation_conv_id: None,
         }
     }
 

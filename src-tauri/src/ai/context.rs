@@ -819,6 +819,13 @@ mod tests {
             embedding: vec![],
             created_at: 100,
             updated_at: 100,
+            injection: crate::ai::memory::InjectionClass::Retrieved,
+            preference_key: None,
+            origin: crate::ai::memory::Origin::Agent,
+            steps_json: None,
+            merge_group_id: None,
+            confirmed: false,
+            confirmation_conv_id: None,
         };
         let p_with_mem = build_system_prompt_with_memories(&small(), None, None, &[mem], &[]);
 
@@ -864,6 +871,13 @@ mod tests {
             embedding: vec![],
             created_at: 100,
             updated_at: 100,
+            injection: crate::ai::memory::InjectionClass::Retrieved,
+            preference_key: None,
+            origin: crate::ai::memory::Origin::Agent,
+            steps_json: None,
+            merge_group_id: None,
+            confirmed: false,
+            confirmation_conv_id: None,
         }
     }
 

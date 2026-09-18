@@ -3,6 +3,7 @@ pub mod decay;
 pub mod drift;
 pub mod entity_linker;
 pub mod migrations;
+pub mod observations;
 pub mod retrieval;
 pub mod rules_parser;
 pub mod security;
@@ -17,6 +18,7 @@ pub use consolidation::*;
 pub use decay::*;
 pub use drift::*;
 pub use entity_linker::*;
+pub use observations::*;
 pub use retrieval::*;
 pub use rules_parser::*;
 pub use security::*;
@@ -97,6 +99,7 @@ pub enum MemoryCategory {
     Join,
     Quirk,
     Preference,
+    Playbook,
 }
 
 impl MemoryCategory {
@@ -106,6 +109,7 @@ impl MemoryCategory {
             MemoryCategory::Join => "join",
             MemoryCategory::Quirk => "quirk",
             MemoryCategory::Preference => "preference",
+            MemoryCategory::Playbook => "playbook",
         }
     }
 
@@ -117,6 +121,7 @@ impl MemoryCategory {
             "metric" => MemoryCategory::Metric,
             "join" => MemoryCategory::Join,
             "preference" | "formatting_preference" => MemoryCategory::Preference,
+            "playbook" => MemoryCategory::Playbook,
             _ => MemoryCategory::Quirk,
         }
     }
@@ -189,6 +194,13 @@ pub struct MemoryItem {
     pub embedding: Vec<f32>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub injection: InjectionClass,
+    pub preference_key: Option<String>,
+    pub origin: Origin,
+    pub steps_json: Option<String>,
+    pub merge_group_id: Option<String>,
+    pub confirmed: bool,
+    pub confirmation_conv_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -438,10 +450,13 @@ impl MemoryManager {
                 sql_snippet, importance, stability_hours, last_accessed_at, access_count,
                 source_trust, source_conv_id, source_turn_id, source_tool_id, status,
                 supersedes_id, valid_from, valid_until, learned_at, tombstone, tombstoned_at,
-                doc_hash, embedding_model, embedding_version, embedding_blob, created_at, updated_at
+                doc_hash, embedding_model, embedding_version, embedding_blob, created_at, updated_at,
+                injection, preference_key, origin, steps_json, merge_group_id, confirmed,
+                confirmation_conv_id
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29
+                ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29,
+                ?30, ?31, ?32, ?33, ?34, ?35, ?36
             ) ON CONFLICT(id) DO UPDATE SET
                 rule_text = excluded.rule_text,
                 sql_snippet = excluded.sql_snippet,
@@ -451,7 +466,14 @@ impl MemoryManager {
                 status = excluded.status,
                 tombstone = excluded.tombstone,
                 updated_at = excluded.updated_at,
-                embedding_blob = excluded.embedding_blob",
+                embedding_blob = excluded.embedding_blob,
+                injection = excluded.injection,
+                preference_key = excluded.preference_key,
+                origin = excluded.origin,
+                steps_json = excluded.steps_json,
+                merge_group_id = excluded.merge_group_id,
+                confirmed = excluded.confirmed,
+                confirmation_conv_id = excluded.confirmation_conv_id",
             params![
                 item.id,
                 item.connection_key,
@@ -482,6 +504,13 @@ impl MemoryManager {
                 emb_blob,
                 item.created_at,
                 item.updated_at,
+                item.injection.as_str(),
+                item.preference_key,
+                item.origin.as_str(),
+                item.steps_json,
+                item.merge_group_id,
+                item.confirmed as i64,
+                item.confirmation_conv_id,
             ],
         )
         .map_err(|e| format!("failed to insert memory: {e}"))?;
@@ -539,7 +568,9 @@ impl MemoryManager {
                     sql_snippet, importance, stability_hours, last_accessed_at, access_count,
                     source_trust, source_conv_id, source_turn_id, source_tool_id, status,
                     supersedes_id, valid_from, valid_until, learned_at, tombstone, tombstoned_at,
-                    doc_hash, embedding_model, embedding_version, embedding_blob, created_at, updated_at
+                    doc_hash, embedding_model, embedding_version, embedding_blob, created_at, updated_at,
+                    injection, preference_key, origin, steps_json, merge_group_id, confirmed,
+                    confirmation_conv_id
              FROM memories
              WHERE (connection_key = ?1 OR scope = 'global')",
         );
@@ -584,6 +615,13 @@ impl MemoryManager {
                     embedding: blob_to_embedding(&emb_bytes),
                     created_at: row.get(27)?,
                     updated_at: row.get(28)?,
+                    injection: InjectionClass::from_str(&row.get::<_, String>(29)?),
+                    preference_key: row.get(30)?,
+                    origin: Origin::from_str(&row.get::<_, String>(31)?),
+                    steps_json: row.get(32)?,
+                    merge_group_id: row.get(33)?,
+                    confirmed: row.get::<_, i64>(34)? != 0,
+                    confirmation_conv_id: row.get(35)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -1013,6 +1051,13 @@ mod tests {
             embedding: vec![0.1; 384],
             created_at: 1000,
             updated_at: 1000,
+            injection: InjectionClass::Retrieved,
+            preference_key: None,
+            origin: Origin::Agent,
+            steps_json: None,
+            merge_group_id: None,
+            confirmed: false,
+            confirmation_conv_id: None,
         };
 
         mgr.save_memory(item, &[]).await.unwrap();
@@ -1064,6 +1109,13 @@ mod tests {
             embedding: vec![0.0; 384],
             created_at: 1000,
             updated_at: 1000,
+            injection: InjectionClass::Retrieved,
+            preference_key: None,
+            origin: Origin::Agent,
+            steps_json: None,
+            merge_group_id: None,
+            confirmed: false,
+            confirmation_conv_id: None,
         }
     }
 

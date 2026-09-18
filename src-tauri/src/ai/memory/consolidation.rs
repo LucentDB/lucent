@@ -167,8 +167,8 @@ mod tests {
     }
 
     use crate::ai::memory::{
-        compute_memory_doc_hash, MemoryCategory, MemoryItem, MemoryManager, MemoryScope,
-        MemoryStatus, SourceTrust, MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME,
+        compute_memory_doc_hash, InjectionClass, MemoryCategory, MemoryItem, MemoryManager,
+        MemoryScope, MemoryStatus, Origin, SourceTrust, MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME,
     };
 
     fn memory(id: &str, trust: SourceTrust) -> MemoryItem {
@@ -203,6 +203,13 @@ mod tests {
             embedding: vec![0.0; 384],
             created_at: now,
             updated_at: now,
+            injection: InjectionClass::Retrieved,
+            preference_key: None,
+            origin: Origin::Agent,
+            steps_json: None,
+            merge_group_id: None,
+            confirmed: false,
+            confirmation_conv_id: None,
         }
     }
 
