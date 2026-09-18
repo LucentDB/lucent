@@ -2,6 +2,7 @@ pub mod consolidation;
 pub mod decay;
 pub mod drift;
 pub mod entity_linker;
+pub mod migrations;
 pub mod retrieval;
 pub mod rules_parser;
 pub mod security;
@@ -357,6 +358,7 @@ impl MemoryManager {
         .map_err(|e| format!("failed to initialize memory database: {e}"))?;
 
         Self::migrate_entity_links(conn)?;
+        migrations::ensure_v2_schema(conn)?;
 
         Ok(())
     }
@@ -1186,6 +1188,42 @@ mod tests {
             normalized, None,
             "the read boundary must normalize '' back to None"
         );
+    }
+
+    #[test]
+    fn test_v2_schema_migration_adds_columns_and_observations_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        MemoryManager::init_tables(&conn).unwrap();
+
+        // Verify v2 columns on memories table
+        let mut stmt = conn.prepare("PRAGMA table_info(memories)").unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert!(cols.contains(&"injection".to_string()));
+        assert!(cols.contains(&"preference_key".to_string()));
+        assert!(cols.contains(&"origin".to_string()));
+        assert!(cols.contains(&"steps_json".to_string()));
+        assert!(cols.contains(&"merge_group_id".to_string()));
+        assert!(cols.contains(&"confirmed".to_string()));
+        assert!(cols.contains(&"confirmation_conv_id".to_string()));
+
+        // Verify memory_observations table exists
+        let mut obs_stmt = conn
+            .prepare("PRAGMA table_info(memory_observations)")
+            .unwrap();
+        let obs_cols: Vec<String> = obs_stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert!(obs_cols.contains(&"dedup_key".to_string()));
+        assert!(obs_cols.contains(&"signal_strength".to_string()));
+        assert!(obs_cols.contains(&"occurrence_count".to_string()));
     }
 
     /// B-I8: an existing database has the old nullable `column_name` in the
