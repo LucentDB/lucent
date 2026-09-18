@@ -2951,7 +2951,15 @@ async fn ai_chat_impl(
     .await;
     log::info!("System prompt complete ({} bytes)", system_prompt.len());
 
-    run_agent_turn(
+    // `run_agent_turn` consumes `message`; keep a copy for the observer so an
+    // explicit "remember that …" in this turn is captured at completion. The
+    // memory subsystem keys on the frontend memory key, falling back to the
+    // command's `connection_id` when no connect-time key was captured.
+    let observer_user_text = message.clone();
+    let observer_connection_id = connection_id.clone();
+    let observer_conversation_id = conversation_id.clone();
+
+    let result = run_agent_turn(
         &state,
         &app_handle,
         channel,
@@ -2960,7 +2968,34 @@ async fn ai_chat_impl(
         system_prompt,
         applied_memory_count,
     )
-    .await
+    .await;
+
+    // Detached: observation capture must never delay the final token, so it
+    // runs on its own task after the turn has returned. Covers both the rig and
+    // ACP drivers, which share `run_agent_turn`.
+    let observer_handle = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = observer_handle.state::<AppState>();
+        let connection_key = state
+            .memory_connection_key
+            .lock()
+            .await
+            .clone()
+            .unwrap_or(observer_connection_id);
+        let turn = crate::ai::memory::TurnOutcome {
+            connection_key,
+            conversation_id: observer_conversation_id,
+            turn_id: Uuid::new_v4().to_string(),
+            runtime: crate::ai::memory::TurnRuntime::Rig,
+            user_text: Some(observer_user_text),
+            assistant_text: None,
+            executed_sql: vec![],
+            tool_calls: vec![],
+        };
+        crate::ai::memory::record_turn_observations(&state, turn).await;
+    });
+
+    result
 }
 
 #[tauri::command]
@@ -4761,5 +4796,37 @@ mod memory_connection_key_tests {
             "localhost:5432/analytics",
             "inline connects key memories by host:port/database (App.svelte)"
         );
+    }
+}
+
+#[cfg(test)]
+mod observer_seam_tests {
+    use super::AppState;
+    use crate::ai::memory::{record_turn_observations, Origin, TurnOutcome, TurnRuntime};
+
+    #[tokio::test]
+    async fn test_turn_completion_records_explicit_request_observation() {
+        let state = AppState::new();
+        let turn = TurnOutcome {
+            connection_key: "conn-1".into(),
+            conversation_id: "conv-1".into(),
+            turn_id: "turn-1".into(),
+            runtime: TurnRuntime::Rig,
+            user_text: Some("Remember that customers uses uuid string ids".into()),
+            assistant_text: Some("Understood.".into()),
+            executed_sql: vec![],
+            tool_calls: vec![],
+        };
+
+        record_turn_observations(&state, turn).await;
+
+        let obs = state
+            .memory_manager
+            .list_observations("conn-1", "open")
+            .await
+            .unwrap();
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].signal, "explicit_request");
+        assert_eq!(obs[0].origin, Origin::Owner);
     }
 }

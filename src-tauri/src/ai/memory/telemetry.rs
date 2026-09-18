@@ -1,4 +1,78 @@
 use crate::ai::memory::observations::Origin;
+use crate::ai::memory::Observation;
+
+/// Which agent runtime a completed turn ran on. Chat turns use `Rig` or `Acp`
+/// (both flow through `run_agent_turn`; `Rig` is the default), notebook AI
+/// cells use `Notebook`. Kept so each detection site can record where a signal
+/// was observed without threading a stringly-typed tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnRuntime {
+    Rig,
+    Acp,
+    Notebook,
+}
+
+/// One SQL statement executed during a turn, with the statement the agent
+/// proposed (when one exists) so an editor diff can be detected later.
+#[derive(Debug, Clone)]
+pub struct ExecutedSql {
+    pub sql: String,
+    pub proposed_sql: Option<String>,
+    pub status: String,
+    pub error: Option<String>,
+}
+
+/// Compact per-tool-call outcome summary for a completed turn.
+#[derive(Debug, Clone)]
+pub struct ToolSummary {
+    pub name: String,
+    pub ok: bool,
+}
+
+/// Everything the observer needs about one completed turn. `user_text` and
+/// `assistant_text` are optional because not every completion point has both
+/// (the chat seam knows the user text, the sink does not).
+#[derive(Debug, Clone)]
+pub struct TurnOutcome {
+    pub connection_key: String,
+    pub conversation_id: String,
+    pub turn_id: String,
+    pub runtime: TurnRuntime,
+    pub user_text: Option<String>,
+    pub assistant_text: Option<String>,
+    pub executed_sql: Vec<ExecutedSql>,
+    pub tool_calls: Vec<ToolSummary>,
+}
+
+/// Record the deterministic observations a completed turn produced. Runs the
+/// explicit-request detector over the user's text and persists a matching
+/// `Observation`; errors are intentionally swallowed so observation capture can
+/// never fail a turn. Callers invoke this detached, after the final token.
+pub async fn record_turn_observations(state: &crate::AppState, turn: TurnOutcome) {
+    if !state
+        .ai_config
+        .read()
+        .await
+        .is_memory_enabled(&turn.connection_key)
+    {
+        return;
+    }
+    if let Some(ref text) = turn.user_text {
+        if let Some(draft) = detect_explicit_request(text) {
+            let obs = Observation::new(
+                turn.connection_key.clone(),
+                Some(turn.conversation_id.clone()),
+                Some(turn.turn_id.clone()),
+                draft.kind,
+                draft.origin,
+                draft.signal,
+                draft.signal_strength,
+                draft.payload_json,
+            );
+            let _ = state.memory_manager.record_observation(obs).await;
+        }
+    }
+}
 
 /// A candidate observation produced by a deterministic detector, before it is
 /// assigned an id / dedup key and persisted by `MemoryManager::record_observation`.
