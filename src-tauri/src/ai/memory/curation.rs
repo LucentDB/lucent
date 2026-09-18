@@ -1,8 +1,9 @@
 use crate::ai::memory::observations::{InjectionClass, Observation, Origin};
 use crate::ai::memory::reflection::CurationProposal;
+use crate::ai::memory::retrieval::cosine_similarity;
 use crate::ai::memory::security::{sanitize_rule_text, sanitize_sql_snippet, SourceTrust};
 use crate::ai::memory::{
-    compute_memory_doc_hash, MemoryCategory, MemoryItem, MemoryScope, MemoryStatus,
+    compute_memory_doc_hash, MemoryCategory, MemoryItem, MemoryManager, MemoryScope, MemoryStatus,
     MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME, TOOL_RULE_STABILITY_HOURS,
     USER_EXPLICIT_STABILITY_HOURS,
 };
@@ -88,6 +89,54 @@ pub fn validate_and_build_memory_item(
     })
 }
 
+/// Result of routing a newly built memory item through near-duplicate curation.
+///
+/// `MergedInto` means an existing memory was similar enough (cosine `>=` the
+/// supplied threshold) that the candidate was folded into it rather than kept
+/// as an independent rule. `Superseded` is reserved for the explicit DAG
+/// supersession path. `SavedAsNew` is the no-near-duplicate fallback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeOutcome {
+    SavedAsNew { id: String },
+    MergedInto { keep_id: String },
+    Superseded { old_id: String },
+}
+
+/// Persists a built memory item, first checking whether it is a near-duplicate
+/// of an active memory in the same connection + category.
+///
+/// When a near-duplicate exists (`cosine_similarity >= threshold`) the candidate
+/// is still persisted — R18: folding must not silently drop the candidate's
+/// evidence — and then immediately marked `SUPERSEDED` with `supersedes_id`
+/// pointing at the keeper. This leaves a queryable DAG edge and a real row for
+/// `merge_memories` to fold, instead of a phantom id that was never inserted.
+pub async fn consolidate_or_merge_item(
+    item: MemoryItem,
+    mgr: &MemoryManager,
+    threshold: f32,
+) -> Result<MergeOutcome, String> {
+    let existing = mgr.list_memories(&item.connection_key, false).await?;
+    for ex in existing {
+        if ex.category == item.category
+            && ex.status == MemoryStatus::Active
+            && !ex.tombstone
+        {
+            let sim = cosine_similarity(&item.embedding, &ex.embedding);
+            if sim >= threshold {
+                // Persist the candidate before folding so its evidence survives
+                // and `merge_memories` has a real row to mark SUPERSEDED (R18).
+                mgr.save_memory(item.clone(), &[]).await?;
+                mgr.merge_memories(&ex.id, std::slice::from_ref(&item.id))
+                    .await?;
+                return Ok(MergeOutcome::MergedInto { keep_id: ex.id });
+            }
+        }
+    }
+    let id = item.id.clone();
+    mgr.save_memory(item, &[]).await?;
+    Ok(MergeOutcome::SavedAsNew { id })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +215,95 @@ mod tests {
         assert_eq!(item.injection, InjectionClass::Retrieved);
         assert_eq!(item.source_trust, SourceTrust::ErrorResolution);
         assert_eq!(item.origin, Origin::Agent);
+    }
+
+    fn sample_memory(id: &str, rule_text: &str) -> MemoryItem {
+        MemoryItem {
+            id: id.into(),
+            connection_key: "conn".into(),
+            scope: MemoryScope::Connection,
+            scope_key: "conn".into(),
+            category: MemoryCategory::Quirk,
+            key_phrase: id.into(),
+            rule_text: rule_text.into(),
+            sql_snippet: None,
+            importance: 0.5,
+            stability_hours: 720.0,
+            last_accessed_at: 0,
+            access_count: 1,
+            source_trust: SourceTrust::UserExplicit,
+            source_conv_id: None,
+            source_turn_id: None,
+            source_tool_id: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            valid_from: 0,
+            valid_until: None,
+            learned_at: 0,
+            tombstone: false,
+            tombstoned_at: None,
+            doc_hash: String::new(),
+            embedding_model: MEMORY_MODEL_NAME.into(),
+            embedding_version: MEMORY_FORMAT_VERSION,
+            embedding: Vec::new(),
+            created_at: 0,
+            updated_at: 0,
+            injection: InjectionClass::Retrieved,
+            preference_key: None,
+            origin: Origin::Agent,
+            steps_json: None,
+            merge_group_id: None,
+            confirmed: false,
+            confirmation_conv_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_near_duplicate_cosine_merge() {
+        let mgr = MemoryManager::open_in_memory().unwrap();
+        let mut item1 = sample_memory("m1", "orders uses soft deletes");
+        item1.embedding = vec![0.1; 384]; // identical vector -> cosine 1.0
+        mgr.save_memory(item1, &[]).await.unwrap();
+
+        let mut item2 = sample_memory("m2", "orders table filters deleted_at IS NULL");
+        item2.embedding = vec![0.1; 384]; // cosine 1.0 >= 0.92
+
+        let outcome = consolidate_or_merge_item(item2, &mgr, 0.92).await.unwrap();
+        match outcome {
+            MergeOutcome::MergedInto { keep_id } => assert_eq!(keep_id, "m1"),
+            _ => panic!("expected merge into m1"),
+        }
+    }
+
+    /// Direct coverage for the DAG-supersession half of the merge: folds carry
+    /// `status = SUPERSEDED` + `supersedes_id = keep_id` and every participant
+    /// shares one `merge_group_id`, while the keeper stays ACTIVE even if a
+    /// caller (defensively) lists it among the fold ids. A fold id with no row
+    /// is a silent no-op, not an error.
+    #[tokio::test]
+    async fn test_merge_memories_marks_folds_superseded_and_shares_group() {
+        let mgr = MemoryManager::open_in_memory().unwrap();
+        mgr.save_memory(sample_memory("m1", "keep me"), &[])
+            .await
+            .unwrap();
+        mgr.save_memory(sample_memory("m2", "fold me"), &[])
+            .await
+            .unwrap();
+
+        // Keeper also appears in fold_ids plus a nonexistent id: neither may
+        // supersede the keeper nor error.
+        mgr.merge_memories("m1", &["m2".into(), "m1".into(), "missing".into()])
+            .await
+            .unwrap();
+
+        let items = mgr.list_memories("conn", false).await.unwrap();
+        let get = |id: &str| items.iter().find(|m| m.id == id).unwrap().clone();
+        let (keep, fold) = (get("m1"), get("m2"));
+
+        assert_eq!(keep.status, MemoryStatus::Active);
+        assert!(keep.merge_group_id.is_some());
+        assert_eq!(fold.status, MemoryStatus::Superseded);
+        assert_eq!(fold.supersedes_id.as_deref(), Some("m1"));
+        assert_eq!(fold.merge_group_id, keep.merge_group_id);
     }
 }

@@ -567,6 +567,57 @@ impl MemoryManager {
         Ok(())
     }
 
+    /// Folds one or more `fold_ids` into a surviving `keep_id` memory.
+    ///
+    /// All participating rows share a freshly minted `merge_group_id`, and each
+    /// fold row is marked `SUPERSEDED` with `supersedes_id = keep_id` so the
+    /// merge is a traversable DAG edge rather than a destructive overwrite.
+    /// The keeper is never superseded even if it appears in `fold_ids`, and a
+    /// fold id with no matching row is skipped without error (defensive).
+    pub async fn merge_memories(
+        &self,
+        keep_id: &str,
+        fold_ids: &[String],
+    ) -> Result<(), String> {
+        let mut guard = self.conn.lock().await;
+        let now = chrono::Utc::now().timestamp();
+        let merge_group_id = uuid::Uuid::new_v4().to_string();
+
+        let tx = guard
+            .transaction()
+            .map_err(|e| format!("failed to begin merge_memories transaction: {e}"))?;
+
+        // Stamp the shared group on the keeper first. `WHERE id = ?` is a no-op
+        // for an unknown keeper; the caller owns the keeper's existence.
+        tx.execute(
+            "UPDATE memories SET merge_group_id = ?1, updated_at = ?2 WHERE id = ?3",
+            params![merge_group_id, now, keep_id],
+        )
+        .map_err(|e| format!("failed to stamp merge group on keeper: {e}"))?;
+
+        for fold_id in fold_ids {
+            // Never let a caller fold the keeper into itself: guard in addition
+            // to the UI/curation callers only ever passing distinct ids.
+            if fold_id == keep_id {
+                continue;
+            }
+            // An UPDATE matching zero rows is a silent no-op in SQLite, which is
+            // exactly the defensive "skip missing fold id" behavior we want.
+            tx.execute(
+                "UPDATE memories
+                 SET status = 'SUPERSEDED', supersedes_id = ?1, merge_group_id = ?2, updated_at = ?3
+                 WHERE id = ?4",
+                params![keep_id, merge_group_id, now, fold_id],
+            )
+            .map_err(|e| format!("failed to fold memory {fold_id}: {e}"))?;
+        }
+
+        tx.commit()
+            .map_err(|e| format!("failed to commit merge_memories transaction: {e}"))?;
+
+        Ok(())
+    }
+
     pub async fn list_memories(
         &self,
         connection_key: &str,
