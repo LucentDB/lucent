@@ -107,7 +107,10 @@ mod tests {
         };
 
         let item = validate_and_build_memory_item(&proposal, &obs, None).unwrap();
-        assert_eq!(item.origin, Origin::Agent);
+        // Finding C: the untrusted origin is preserved (lowest trust tier); the
+        // security property that matters is that it can never enter `always`.
+        assert_eq!(item.origin, Origin::Untrusted);
+        assert_eq!(item.source_trust, SourceTrust::UntrustedToolResult);
         assert_eq!(item.injection, InjectionClass::Retrieved);
     }
 }

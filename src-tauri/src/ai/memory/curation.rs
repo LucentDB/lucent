@@ -20,12 +20,21 @@ pub fn validate_and_build_memory_item(
         None => None,
     };
 
-    // Trust ceiling: LLM output derived from agent evidence is capped at ErrorResolution
+    // Trust ceiling follows the observation's origin, not the LLM's claim:
+    // an explicit user request is UserExplicit, an untrusted tool result is
+    // UntrustedToolResult, and everything the agent inferred (Agent/System) is
+    // capped at ErrorResolution. The origin carries through unchanged so the
+    // trust plane is auditable downstream.
     let (source_trust, origin, stability_hours) = match obs.origin {
         Origin::Owner => (
             SourceTrust::UserExplicit,
             Origin::Owner,
             USER_EXPLICIT_STABILITY_HOURS,
+        ),
+        Origin::Untrusted => (
+            SourceTrust::UntrustedToolResult,
+            Origin::Untrusted,
+            TOOL_RULE_STABILITY_HOURS,
         ),
         _ => (
             SourceTrust::ErrorResolution,
@@ -213,8 +222,10 @@ mod tests {
 
         let item = validate_and_build_memory_item(&proposal, &obs, None).unwrap();
         assert_eq!(item.injection, InjectionClass::Retrieved);
-        assert_eq!(item.source_trust, SourceTrust::ErrorResolution);
-        assert_eq!(item.origin, Origin::Agent);
+        // Finding C: an untrusted observation keeps its own (lowest) trust
+        // tier instead of being relabeled as an agent inference.
+        assert_eq!(item.source_trust, SourceTrust::UntrustedToolResult);
+        assert_eq!(item.origin, Origin::Untrusted);
     }
 
     fn sample_memory(id: &str, rule_text: &str) -> MemoryItem {
