@@ -104,6 +104,7 @@
         <button
           class="action-btn"
           title="Test connection"
+          aria-label="Test connection"
           onclick={(e) => {
             e.stopPropagation();
             onTest?.(profile.id);
@@ -124,6 +125,7 @@
         <button
           class="action-btn"
           title="Edit profile"
+          aria-label="Edit profile"
           onclick={(e) => {
             e.stopPropagation();
             onEdit?.(profile);
@@ -146,6 +148,7 @@
         <button
           class="action-btn"
           title="Duplicate"
+          aria-label="Duplicate connection"
           onclick={(e) => {
             e.stopPropagation();
             onDuplicate?.(profile.id);
@@ -166,6 +169,7 @@
         <button
           class="action-btn danger"
           title="Delete"
+          aria-label="Delete connection"
           onclick={(e) => {
             e.stopPropagation();
             onDelete?.(profile.id);
