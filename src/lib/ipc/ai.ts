@@ -437,7 +437,7 @@ export interface MemoryItem {
   connection_key: string;
   scope: 'global' | 'connection' | 'schema';
   scope_key?: string | null;
-  category: 'metric' | 'join' | 'quirk' | 'preference';
+  category: 'metric' | 'join' | 'quirk' | 'preference' | 'playbook';
   key_phrase: string;
   rule_text: string;
   sql_snippet?: string | null;
@@ -463,6 +463,38 @@ export interface MemoryItem {
   doc_hash: string;
   embedding_model: string;
   embedding_version: number;
+  created_at: number;
+  updated_at: number;
+  // Profile / playbook plane fields (Task 15). Optional so older fixtures and
+  // list responses that predate the migration still type-check; the backend
+  // always serializes them (Rust snake_case field names).
+  injection?: 'always' | 'retrieved';
+  preference_key?: string | null;
+  origin?: 'owner' | 'agent' | 'untrusted' | 'system';
+  steps_json?: string | null;
+  merge_group_id?: string | null;
+  confirmed?: boolean;
+  confirmation_conv_id?: string | null;
+}
+
+/**
+ * A row from `memory_observations` (Task 15). Backs the Learning Journal tab:
+ * the raw signals Lucent logged before they were distilled into memories.
+ */
+export interface Observation {
+  id: string;
+  connection_key: string;
+  conversation_id?: string | null;
+  turn_id?: string | null;
+  kind: string;
+  origin: 'owner' | 'agent' | 'untrusted' | 'system';
+  signal: string;
+  signal_strength: number;
+  occurrence_count: number;
+  dedup_key: string;
+  payload_json: string;
+  status: string;
+  derived_memory_id?: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -545,6 +577,29 @@ export async function listMemories(
   includeArchived = false,
 ): Promise<MemoryItem[]> {
   return invoke('list_memories', { connectionKey, includeArchived });
+}
+
+/**
+ * Always-on profile memories for a connection (Task 15). NOTE (R23): the
+ * `list_always_memories` Tauri command is not implemented in this plan, so
+ * this can reject at runtime — callers must catch and fall back (the drawer
+ * filters `list_memories` by `injection === 'always'` instead of crashing).
+ */
+export async function listAlwaysMemories(
+  connectionKey: string,
+): Promise<MemoryItem[]> {
+  return invoke('list_always_memories', { connectionKey });
+}
+
+/**
+ * Raw observations for a connection (Task 15). NOTE (R23): the
+ * `list_observations` Tauri command is not implemented in this plan, so this
+ * can reject at runtime — the Journal tab catches and renders an empty list.
+ */
+export async function listObservations(
+  connectionKey: string,
+): Promise<Observation[]> {
+  return invoke('list_observations', { connectionKey });
 }
 
 export async function saveMemoryManual(

@@ -2,6 +2,8 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import {
     listMemories,
+    listAlwaysMemories,
+    listObservations,
     saveMemoryManual,
     deleteMemory,
     toggleMemoryStatus,
@@ -12,6 +14,7 @@
     deleteGoldenQuery,
     runConsolidation,
     type MemoryItem,
+    type Observation,
     type GoldenQuery,
     type DriftAlert,
   } from '../../ipc/ai.ts';
@@ -19,6 +22,7 @@
     driftAlertsFor,
     removeDriftAlert,
   } from '../../stores/memoryDrift.svelte.ts';
+  import LearningJournal from '../memory/LearningJournal.svelte';
 
   let {
     isOpen = $bindable(false),
@@ -38,7 +42,15 @@
     triggerEl?: HTMLElement | null;
   } = $props();
 
-  let activeTab = $state<'active' | 'archived' | 'drift' | 'golden'>('active');
+  let activeTab = $state<
+    | 'active'
+    | 'profile'
+    | 'playbooks'
+    | 'journal'
+    | 'drift'
+    | 'golden'
+    | 'archived'
+  >('active');
   let searchQuery = $state('');
   let loading = $state(false);
   let statusMessage = $state<string | null>(null);
@@ -49,6 +61,12 @@
 
   let activeMemories = $state<MemoryItem[]>([]);
   let archivedMemories = $state<MemoryItem[]>([]);
+  // Always-on profile plane (Task 15). Sourced from the dedicated
+  // `listAlwaysMemories` command when available, else filtered locally (R23).
+  let profileMemories = $state<MemoryItem[]>([]);
+  let playbookMemories = $state<MemoryItem[]>([]);
+  let observations = $state<Observation[]>([]);
+  let observationsLoading = $state(false);
   let driftAlerts = $state<DriftAlert[]>([]);
   let goldenQueries = $state<GoldenQuery[]>([]);
 
@@ -143,11 +161,38 @@
       driftAlerts =
         genuineDriftAlerts.length > 0 ? genuineDriftAlerts : synthesizedAlerts;
 
+      // Playbooks are just a category on the same connection-scoped list.
+      playbookMemories = all.filter(
+        (m) => m.category === 'playbook' && !m.tombstone,
+      );
+
+      // Profile plane. Prefer the dedicated command; the backend command is not
+      // shipped in this plan (R23), so fall back to the `injection` field on the
+      // list already in hand rather than failing the whole drawer.
+      try {
+        profileMemories = await listAlwaysMemories(key);
+      } catch {
+        profileMemories = all.filter(
+          (m) => m.injection === 'always' && !m.tombstone,
+        );
+      }
+
       goldenQueries = await listGoldenQueries(key);
     } catch (e) {
       statusMessage = `Failed to load memories: ${String(e)}`;
     } finally {
       loading = false;
+    }
+
+    // The journal is independent of the memory list: a missing
+    // `list_observations` command must not blank the other tabs (R23).
+    observationsLoading = true;
+    try {
+      observations = await listObservations(key);
+    } catch {
+      observations = [];
+    } finally {
+      observationsLoading = false;
     }
   }
 
@@ -404,16 +449,30 @@
     }
   }
 
-  const MEMORY_TABS = ['active', 'archived', 'drift', 'golden'] as const;
+  const MEMORY_TABS = [
+    'active',
+    'profile',
+    'playbooks',
+    'journal',
+    'drift',
+    'golden',
+    'archived',
+  ] as const;
 
   const memoryTabs = $derived([
     { id: 'active' as const, label: `Active (${activeMemories.length})` },
-    { id: 'archived' as const, label: `Archived (${archivedMemories.length})` },
+    { id: 'profile' as const, label: `Profile (${profileMemories.length})` },
+    {
+      id: 'playbooks' as const,
+      label: `Playbooks (${playbookMemories.length})`,
+    },
+    { id: 'journal' as const, label: `Journal (${observations.length})` },
     { id: 'drift' as const, label: `Drift Alerts (${driftAlerts.length})` },
     {
       id: 'golden' as const,
       label: `Golden Queries (${goldenQueries.length})`,
     },
+    { id: 'archived' as const, label: `Archived (${archivedMemories.length})` },
   ]);
 
   function selectTab(tab: (typeof MEMORY_TABS)[number]) {
@@ -629,6 +688,61 @@
                 {/each}
               </div>
             {/if}
+          {:else if activeTab === 'profile'}
+            {#if profileMemories.length === 0}
+              <div class="empty-state">
+                No profile memories yet. Always-on facts and preferences you
+                teach Lucent are injected on every turn and shown here.
+              </div>
+            {:else}
+              <div class="card-list">
+                {#each profileMemories as m (m.id)}
+                  <div class="memory-card">
+                    <div class="card-header">
+                      <span class="category-badge {m.category}"
+                        >{m.category}</span
+                      >
+                      <span class="key-phrase">{m.key_phrase}</span>
+                      {#if m.origin}
+                        <span class="origin-pill">{m.origin}</span>
+                      {/if}
+                    </div>
+                    <div class="rule-text">{m.rule_text}</div>
+                    {#if m.sql_snippet}
+                      <pre class="sql-snippet"><code>{m.sql_snippet}</code
+                        ></pre>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          {:else if activeTab === 'playbooks'}
+            {#if playbookMemories.length === 0}
+              <div class="empty-state">
+                No playbooks learned yet. Multi-step procedures Lucent distills
+                from your sessions will be collected here.
+              </div>
+            {:else}
+              <div class="card-list">
+                {#each playbookMemories as m (m.id)}
+                  <div class="memory-card">
+                    <div class="card-header">
+                      <span class="category-badge playbook">{m.category}</span>
+                      <span class="key-phrase">{m.key_phrase}</span>
+                      {#if m.confirmed}
+                        <span class="verified-tag">CONFIRMED</span>
+                      {/if}
+                    </div>
+                    <div class="rule-text">{m.rule_text}</div>
+                    {#if m.steps_json}
+                      <pre class="sql-snippet"><code>{m.steps_json}</code></pre>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          {:else if activeTab === 'journal'}
+            <LearningJournal {observations} loading={observationsLoading} />
           {:else if activeTab === 'archived'}
             {#if archivedMemories.length === 0}
               <div class="empty-state">
@@ -1062,6 +1176,17 @@
   }
   .category-badge.preference {
     color: #10b981;
+  }
+  .category-badge.playbook {
+    color: #c084fc;
+  }
+  .origin-pill {
+    margin-left: auto;
+    font-size: 11px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-muted);
   }
   .key-phrase {
     font-weight: 600;

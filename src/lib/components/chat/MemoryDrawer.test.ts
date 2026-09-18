@@ -24,6 +24,10 @@ vi.mock('../../ipc/ai.ts', () => ({
     pruned_session_json_count: 0,
     drift_alerts: [],
   })),
+  // Profile / Journal tabs (Task 15). The backend commands do not ship yet, so
+  // these stubs stand in for the IPC boundary and keep the drawer pure.
+  listObservations: vi.fn(async () => []),
+  listAlwaysMemories: vi.fn(async () => []),
 }));
 
 // The drift store registers a Tauri event listener; stub the boundary and
@@ -36,6 +40,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 
 import MemoryDrawerHarness from './MemoryDrawerHarness.svelte';
+import MemoryDrawer from './MemoryDrawer.svelte';
 import {
   listMemories,
   listGoldenQueries,
@@ -502,7 +507,7 @@ describe('MemoryDrawer — accessible tabs (F-I3)', () => {
 
     const tablist = utils.getByRole('tablist');
     const tabs = utils.getAllByRole('tab');
-    expect(tabs).toHaveLength(4);
+    expect(tabs).toHaveLength(7);
     expect(tablist.contains(tabs[0])).toBe(true);
 
     const selected = tabs.filter(
@@ -525,6 +530,15 @@ describe('MemoryDrawer — accessible tabs (F-I3)', () => {
     );
     expect(tabs[1].getAttribute('tabindex')).toBe('0');
     expect(tabs[0].getAttribute('tabindex')).toBe('-1');
+  });
+
+  it('renders Profile and Journal tabs in MemoryDrawer', async () => {
+    const { getByRole } = render(MemoryDrawer, {
+      isOpen: true,
+      connectionId: 'conn-1',
+    });
+    expect(getByRole('tab', { name: /profile/i })).toBeTruthy();
+    expect(getByRole('tab', { name: /journal/i })).toBeTruthy();
   });
 });
 
