@@ -7,6 +7,15 @@ test('objectMatches is case-insensitive and empty-query matches all', () => {
   expect(objectMatches('orders', 'user')).toBe(false);
 });
 
+test('objectMatches works with frozen objects and caches lowercased names without mutating objects', () => {
+  const frozenObj = Object.freeze({ name: 'Users' });
+  expect(objectMatches(frozenObj, 'user')).toBe(true);
+  expect(objectMatches(frozenObj, 'ser')).toBe(true);
+  expect(objectMatches(frozenObj, 'orders')).toBe(false);
+  // Confirm object was not mutated
+  expect((frozenObj as any).lowerName).toBeUndefined();
+});
+
 test('schemaMatches by schema name or contained object', () => {
   const objects = [{ name: 'users' }, { name: 'orders' }];
   expect(schemaMatches({ name: 'public' }, objects, 'user')).toBe(true); // object match

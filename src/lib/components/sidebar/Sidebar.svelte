@@ -359,7 +359,7 @@
                       <span class="schema-name">{schema.name}</span>
                       {#if searchQuery && loadedObjects[schema.name]}
                         {@const matchCount = loadedObjects[schema.name].filter(
-                          (o) => objectMatches(o.name, searchQueryLower),
+                          (o) => objectMatches(o, searchQueryLower),
                         ).length}
                         <span class="count-badge" class:match={matchCount > 0}
                           >{matchCount}</span
@@ -378,7 +378,7 @@
                         >
                           {#snippet children(objects)}
                             {#each groupObjects(objects)
-                              .map( (g) => ({ ...g, items: g.items.filter( (o) => objectMatches(o.name, searchQueryLower) ) }) )
+                              .map( (g) => ({ ...g, items: g.items.filter( (o) => objectMatches(o, searchQueryLower) ) }) )
                               .filter((g) => g.items.length > 0) as group}
                               <div class="group-node">
                                 <button

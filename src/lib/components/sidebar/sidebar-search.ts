@@ -4,9 +4,26 @@
 // schema. During an active search we only match against data that is loaded;
 // a node whose children are not yet loaded matches only by its own name.
 
-export function objectMatches(name: string, queryLower: string): boolean {
+const lowerCache = new WeakMap<object, string>();
+
+function getLowerName(nameOrObj: string | { name: string }): string {
+  if (typeof nameOrObj === 'string') {
+    return nameOrObj.toLowerCase();
+  }
+  let cached = lowerCache.get(nameOrObj);
+  if (!cached) {
+    cached = nameOrObj.name.toLowerCase();
+    lowerCache.set(nameOrObj, cached);
+  }
+  return cached;
+}
+
+export function objectMatches(
+  nameOrObj: string | { name: string },
+  queryLower: string,
+): boolean {
   if (!queryLower) return true;
-  return name.toLowerCase().includes(queryLower);
+  return getLowerName(nameOrObj).includes(queryLower);
 }
 
 export function schemaMatches(
@@ -15,13 +32,13 @@ export function schemaMatches(
   queryLower: string,
 ): boolean {
   if (!queryLower) return true;
-  if (objectMatches(schema.name, queryLower)) return true;
+  if (objectMatches(schema, queryLower)) return true;
   if (!objects) return false;
-  return objects.some((o) => objectMatches(o.name, queryLower));
+  return objects.some((o) => objectMatches(o, queryLower));
 }
 
 export function dbMatches(
-  dbName: string,
+  dbName: string | { name: string },
   schemas: { name: string }[] | undefined,
   objectsBySchema: Record<string, { name: string }[]>,
   queryLower: string,
