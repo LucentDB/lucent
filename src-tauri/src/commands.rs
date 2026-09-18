@@ -4008,6 +4008,102 @@ mod applied_memory_count_tests {
         .unwrap();
     }
 
+    /// An `Always`-injected, active, global-scope rule, so `ProfileSnapshot`
+    /// picks it up for any connection.
+    async fn seed_profile_rule(mgr: &MemoryManager, rule_text: &str) {
+        let now = chrono::Utc::now().timestamp();
+        mgr.save_memory(
+            MemoryItem {
+                id: uuid::Uuid::new_v4().to_string(),
+                connection_key: "global".into(),
+                scope: MemoryScope::Global,
+                scope_key: "global".into(),
+                category: MemoryCategory::Preference,
+                key_phrase: "profile_rule".into(),
+                rule_text: rule_text.into(),
+                sql_snippet: None,
+                importance: 0.9,
+                stability_hours: 720.0,
+                last_accessed_at: now,
+                access_count: 1,
+                source_trust: SourceTrust::UserExplicit,
+                source_conv_id: None,
+                source_turn_id: None,
+                source_tool_id: None,
+                status: MemoryStatus::Active,
+                supersedes_id: None,
+                valid_from: now,
+                valid_until: None,
+                learned_at: now,
+                tombstone: false,
+                tombstoned_at: None,
+                doc_hash: compute_memory_doc_hash(rule_text),
+                embedding_model: MEMORY_MODEL_NAME.into(),
+                embedding_version: MEMORY_FORMAT_VERSION,
+                embedding: vec![0.0; 384],
+                created_at: now,
+                updated_at: now,
+                injection: InjectionClass::Always,
+                preference_key: None,
+                origin: Origin::Owner,
+                steps_json: None,
+                merge_group_id: None,
+                confirmed: false,
+                confirmation_conv_id: None,
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// R13: the profile block is session-frozen. A rule inserted *after* a
+    /// conversation's first prompt build must not appear in later prompts for
+    /// that same conversation, while a different conversation id (fresh key)
+    /// sees the new rule. This fails if the get-or-insert ever rebuilds on a
+    /// cache hit, and it exercises the profile-before-retrieved no-query path
+    /// without touching the embedder.
+    #[tokio::test]
+    async fn profile_block_is_frozen_per_conversation_and_ignores_later_rules() {
+        const FIRST: &str = "Always qualify timestamps with the reporting timezone";
+        const SECOND: &str = "Always wrap deletes in an explicit transaction";
+
+        let state = state();
+        *state.ai_config.write().await = AiConfig::default();
+        seed_profile_rule(&state.memory_manager, FIRST).await;
+
+        // First turn for the conversation builds and stores the snapshot.
+        let (first_prompt, _, _) =
+            build_system_prompt_with_query(&state, "conn-freeze", None, Some("conv-freeze")).await;
+        assert!(
+            first_prompt.contains(FIRST),
+            "first build must inject the profile rule"
+        );
+
+        // Rule learned mid-session — must not leak into the frozen snapshot.
+        seed_profile_rule(&state.memory_manager, SECOND).await;
+
+        let (second_prompt, _, _) =
+            build_system_prompt_with_query(&state, "conn-freeze", None, Some("conv-freeze")).await;
+        assert!(
+            !second_prompt.contains(SECOND),
+            "frozen snapshot must not pick up a rule learned after the first build"
+        );
+        assert_eq!(
+            first_prompt, second_prompt,
+            "the same conversation must reuse the byte-identical snapshot"
+        );
+
+        // A different conversation id has its own key and builds fresh, so it
+        // sees the rule learned after the first conversation was frozen.
+        let (other_prompt, _, _) =
+            build_system_prompt_with_query(&state, "conn-freeze", None, Some("conv-other")).await;
+        assert!(
+            other_prompt.contains(SECOND),
+            "a fresh conversation key must see the newly learned rule"
+        );
+    }
+
     /// F-C2 producer: the count comes from the retrieval that feeds the
     /// prompt — `1` for one retrieved rule, `0` for no query or disabled
     /// memory. `run_agent_turn` then threads this into the `Done` event.
