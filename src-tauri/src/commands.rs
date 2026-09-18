@@ -240,6 +240,11 @@ pub struct AppState {
     /// Per-conversation accumulated LLM token usage, keyed by conversation id.
     /// Fed by `TauriSink` on every `AiEvent::Done`; read by `get_ai_usage`.
     pub llm_usage: DashMap<String, TokenUsage>,
+    /// Session-frozen profile snapshots, keyed by conversation id. Built once
+    /// on the conversation's first memory-enabled turn and reused unchanged
+    /// for the rest of the session (rules learned mid-conversation do not
+    /// retroactively alter a prompt already in flight).
+    pub profile_snapshots: Arc<DashMap<String, crate::ai::memory::ProfileSnapshot>>,
     /// Capabilities of the connected driver. `None` when disconnected.
     /// Phase 2 moves this onto `LiveConnection`; `capabilities()` is the seam
     /// that keeps that a small change.
@@ -315,6 +320,7 @@ impl AppState {
             notebook_sessions: DashMap::new(),
             logs: crate::supervisor::new_log_buffer(),
             llm_usage: DashMap::new(),
+            profile_snapshots: Arc::new(DashMap::new()),
             indexing,
             acp_http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
@@ -2346,7 +2352,7 @@ async fn build_system_prompt(
     state: &AppState,
     connection_id: &str,
 ) -> (String, crate::ai::mschema::ContextTier) {
-    let (prompt, tier, _) = build_system_prompt_with_query(state, connection_id, None).await;
+    let (prompt, tier, _) = build_system_prompt_with_query(state, connection_id, None, None).await;
     (prompt, tier)
 }
 
@@ -2357,6 +2363,7 @@ async fn build_system_prompt_with_query(
     state: &AppState,
     connection_id: &str,
     query: Option<&str>,
+    conversation_id: Option<&str>,
 ) -> (String, crate::ai::mschema::ContextTier, usize) {
     // Static prompt + tier selection happen under the schema_graph lock. The
     // guard is scoped to this block and dropped before any memory work:
@@ -2421,6 +2428,46 @@ async fn build_system_prompt_with_query(
         .is_memory_enabled(connection_id);
     let mut applied_memory_count = 0usize;
     if enable_memory {
+        // Profile plane: rules that apply to every turn for this connection.
+        // The snapshot is built once for the conversation and then frozen —
+        // a miss builds from the DB, a hit reuses the stored snapshot without
+        // rebuilding, so rules learned mid-session never mutate an in-flight
+        // prompt. Injected before the per-query retrieved block.
+        if let Some(conv) = conversation_id {
+            let cached = state.profile_snapshots.get(conv).map(|r| r.clone());
+            let snapshot = match cached {
+                Some(snapshot) => snapshot,
+                None => {
+                    match crate::ai::memory::ProfileSnapshot::build(
+                        &state.memory_manager,
+                        connection_id,
+                        crate::ai::memory::PROFILE_CAPACITY_TOKENS,
+                    )
+                    .await
+                    {
+                        Ok(snapshot) => {
+                            state
+                                .profile_snapshots
+                                .insert(conv.to_string(), snapshot.clone());
+                            snapshot
+                        }
+                        Err(e) => {
+                            log::warn!("profile snapshot build failed: {e}");
+                            crate::ai::memory::ProfileSnapshot {
+                                connection_key: connection_id.to_string(),
+                                memories: Vec::new(),
+                                built_at: 0,
+                            }
+                        }
+                    }
+                }
+            };
+            if let Some(profile_block) = crate::ai::memory::format_profile_block(&snapshot.memories)
+            {
+                prompt.push_str(&profile_block);
+            }
+        }
+
         if let Some(user_query) = query {
             let q_vec = if let Some(emb) = state.get_or_init_memory_embedder().await {
                 emb.embed_query(user_query).await.ok()
@@ -2895,8 +2942,13 @@ async fn ai_chat_impl(
         })
         .await;
 
-    let (system_prompt, _context_tier, applied_memory_count) =
-        build_system_prompt_with_query(&state, &connection_id, Some(&message)).await;
+    let (system_prompt, _context_tier, applied_memory_count) = build_system_prompt_with_query(
+        &state,
+        &connection_id,
+        Some(&message),
+        Some(&conversation_id),
+    )
+    .await;
     log::info!("System prompt complete ({} bytes)", system_prompt.len());
 
     run_agent_turn(
@@ -2954,6 +3006,7 @@ pub async fn ai_cancel(state: State<'_, AppState>, conversation_id: String) -> R
 fn evict_conversation(state: &AppState, conversation_id: &str) {
     state.conversations.remove(conversation_id);
     state.llm_usage.remove(conversation_id);
+    state.profile_snapshots.remove(conversation_id);
 }
 
 #[tauri::command]
@@ -3843,7 +3896,8 @@ mod memory_embedder_lock_scope_tests {
         connection_id: &'static str,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            build_system_prompt_with_query(&state, connection_id, Some("recent invoices")).await;
+            build_system_prompt_with_query(&state, connection_id, Some("recent invoices"), None)
+                .await;
         })
     }
 
@@ -3964,16 +4018,16 @@ mod applied_memory_count_tests {
         seed_rule(&state.memory_manager, "conn-fc2").await;
 
         let (_prompt, _tier, count) =
-            build_system_prompt_with_query(&state, "conn-fc2", Some("recent invoices")).await;
+            build_system_prompt_with_query(&state, "conn-fc2", Some("recent invoices"), None).await;
         assert_eq!(count, 1, "one matching rule retrieved → one applied");
 
         let (_prompt, _tier, count) =
-            build_system_prompt_with_query(&state, "conn-fc2", None).await;
+            build_system_prompt_with_query(&state, "conn-fc2", None, None).await;
         assert_eq!(count, 0, "no query → no retrieval");
 
         state.ai_config.write().await.enable_ai_memory = false;
         let (_prompt, _tier, count) =
-            build_system_prompt_with_query(&state, "conn-fc2", Some("recent invoices")).await;
+            build_system_prompt_with_query(&state, "conn-fc2", Some("recent invoices"), None).await;
         assert_eq!(count, 0, "disabled memory applies no rules");
     }
 }
