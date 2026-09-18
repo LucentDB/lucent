@@ -8,7 +8,7 @@ pub mod retrieval;
 pub mod rules_parser;
 pub mod security;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -770,6 +770,112 @@ impl MemoryManager {
         Ok(())
     }
 
+    // ── Observations ──────────────────────────────────────────────────────────
+    pub async fn record_observation(
+        &self,
+        obs: Observation,
+    ) -> Result<ObservationOutcome, String> {
+        let guard = self.conn.lock().await;
+        let now = chrono::Utc::now().timestamp();
+
+        let mut existing_stmt = guard
+            .prepare("SELECT id, occurrence_count FROM memory_observations WHERE dedup_key = ?1")
+            .map_err(|e| e.to_string())?;
+        let existing: Option<(String, i64)> = existing_stmt
+            .query_row(params![obs.dedup_key], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()
+            .map_err(|e| e.to_string())?;
+
+        if let Some((id, count)) = existing {
+            let new_count = count + 1;
+            guard
+                .execute(
+                    "UPDATE memory_observations
+                     SET occurrence_count = ?1, updated_at = ?2
+                     WHERE id = ?3",
+                    params![new_count, now, id],
+                )
+                .map_err(|e| format!("failed to rollup observation: {e}"))?;
+            return Ok(ObservationOutcome::RolledUp {
+                id,
+                occurrence_count: new_count,
+            });
+        }
+
+        guard
+            .execute(
+                "INSERT INTO memory_observations (
+                    id, connection_key, conversation_id, turn_id, kind, origin, signal,
+                    signal_strength, occurrence_count, dedup_key, payload_json, status,
+                    derived_memory_id, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    obs.id,
+                    obs.connection_key,
+                    obs.conversation_id,
+                    obs.turn_id,
+                    obs.kind,
+                    obs.origin.as_str(),
+                    obs.signal,
+                    obs.signal_strength,
+                    obs.occurrence_count,
+                    obs.dedup_key,
+                    obs.payload_json,
+                    obs.status,
+                    obs.derived_memory_id,
+                    obs.created_at,
+                    obs.updated_at,
+                ],
+            )
+            .map_err(|e| format!("failed to insert observation: {e}"))?;
+
+        Ok(ObservationOutcome::Inserted { id: obs.id })
+    }
+
+    pub async fn list_observations(
+        &self,
+        connection_key: &str,
+        status: &str,
+    ) -> Result<Vec<Observation>, String> {
+        let guard = self.conn.lock().await;
+        let mut stmt = guard
+            .prepare(
+                "SELECT id, connection_key, conversation_id, turn_id, kind, origin, signal,
+                        signal_strength, occurrence_count, dedup_key, payload_json, status,
+                        derived_memory_id, created_at, updated_at
+                 FROM memory_observations
+                 WHERE connection_key = ?1 AND status = ?2
+                 ORDER BY created_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let rows = stmt
+            .query_map(params![connection_key, status], |row| {
+                Ok(Observation {
+                    id: row.get(0)?,
+                    connection_key: row.get(1)?,
+                    conversation_id: row.get(2)?,
+                    turn_id: row.get(3)?,
+                    kind: row.get(4)?,
+                    origin: Origin::from_str(&row.get::<_, String>(5)?),
+                    signal: row.get(6)?,
+                    signal_strength: row.get::<_, f64>(7)? as f32,
+                    occurrence_count: row.get(8)?,
+                    dedup_key: row.get(9)?,
+                    payload_json: row.get(10)?,
+                    status: row.get(11)?,
+                    derived_memory_id: row.get(12)?,
+                    created_at: row.get(13)?,
+                    updated_at: row.get(14)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(rows)
+    }
+
     pub async fn retrieve_hybrid_memories(
         &self,
         query: &str,
@@ -1327,5 +1433,48 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_record_observation_rolls_up_on_duplicate() {
+        let mgr = MemoryManager::open_in_memory().unwrap();
+        let obs1 = Observation::new(
+            "conn-a".into(),
+            Some("c1".into()),
+            Some("t1".into()),
+            "diff".into(),
+            Origin::Agent,
+            "editor_diff".into(),
+            0.8,
+            r#"{"predicate":"deleted_at IS NULL"}"#.into(),
+        );
+        let obs2 = Observation::new(
+            "conn-a".into(),
+            Some("c2".into()),
+            Some("t2".into()),
+            "diff".into(),
+            Origin::Agent,
+            "editor_diff".into(),
+            0.8,
+            r#"{"predicate":"deleted_at IS NULL"}"#.into(),
+        );
+
+        let outcome1 = mgr.record_observation(obs1).await.unwrap();
+        match outcome1 {
+            ObservationOutcome::Inserted { .. } => {}
+            _ => panic!("first observation should be inserted"),
+        }
+
+        let outcome2 = mgr.record_observation(obs2).await.unwrap();
+        match outcome2 {
+            ObservationOutcome::RolledUp { occurrence_count, .. } => {
+                assert_eq!(occurrence_count, 2);
+            }
+            _ => panic!("second identical observation should roll up"),
+        }
+
+        let pending = mgr.list_observations("conn-a", "open").await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].occurrence_count, 2);
     }
 }
