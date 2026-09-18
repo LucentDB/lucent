@@ -14,6 +14,7 @@ pub mod retrieval;
 pub mod rules_parser;
 pub mod security;
 pub mod telemetry;
+pub mod triggers;
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -36,6 +37,7 @@ pub use retrieval::*;
 pub use rules_parser::*;
 pub use security::*;
 pub use telemetry::*;
+pub use triggers::*;
 
 pub const MEMORY_FORMAT_VERSION: u32 = 1;
 pub const MEMORY_MODEL_NAME: &str = "bge-small-en-v1.5";
