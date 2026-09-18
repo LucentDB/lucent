@@ -71,7 +71,7 @@
   }
 </script>
 
-<div class="logs-drawer">
+<div class="logs-drawer" role="region" aria-label="Worker stderr logs">
   <header class="drawer-header">
     <span class="drawer-title">
       <svg
@@ -94,7 +94,12 @@
       Logs
     </span>
     <span class="drawer-hint">worker stderr</span>
-    <button class="close-btn" onclick={onClose} title="Close logs">
+    <button
+      class="close-btn"
+      onclick={onClose}
+      title="Close logs"
+      aria-label="Close logs"
+    >
       <svg
         width="14"
         height="14"
@@ -115,7 +120,12 @@
     </button>
   </header>
 
-  <div class="logs-body" bind:this={listEl} onscroll={handleScroll}>
+  <div
+    class="logs-body"
+    bind:this={listEl}
+    onscroll={handleScroll}
+    aria-live="polite"
+  >
     {#if lines.length === 0 && !error}
       <div class="empty">
         No log lines yet — worker stderr will appear here.

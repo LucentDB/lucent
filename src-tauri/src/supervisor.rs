@@ -151,6 +151,13 @@ impl Supervisor {
             return PathBuf::from(path);
         }
 
+        // `cargo test` exposes the built binary to integration tests through
+        // CARGO_BIN_EXE_<name>. Check it before filesystem probing so tests can
+        // find the worker the workspace build produced.
+        if let Ok(path) = std::env::var(format!("CARGO_BIN_EXE_{name}")) {
+            return PathBuf::from(path);
+        }
+
         // Search relative to the current executable's directory.
         // In release app bundles (macOS .app, Windows, Linux), sidecars sit next
         // to the main binary in Contents/MacOS/ or root.

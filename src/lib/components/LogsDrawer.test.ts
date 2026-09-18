@@ -58,9 +58,17 @@ describe('LogsDrawer', () => {
 
   it('closes via the close button', async () => {
     const onClose = vi.fn();
-    const { getByTitle } = render(LogsDrawer, { onClose });
-    await fireEvent.click(getByTitle('Close logs'));
+    const { getByLabelText } = render(LogsDrawer, { onClose });
+    await fireEvent.click(getByLabelText('Close logs'));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('renders region role and live region for screen readers', () => {
+    const { getByRole, container } = render(LogsDrawer, { onClose: vi.fn() });
+    expect(getByRole('region', { name: 'Worker stderr logs' })).toBeTruthy();
+    expect(
+      container.querySelector('.logs-body')?.getAttribute('aria-live'),
+    ).toBe('polite');
   });
 
   it('keeps polling on the interval while open', async () => {

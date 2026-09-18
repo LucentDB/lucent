@@ -9,10 +9,17 @@ export function toTsv(rows) {
 }
 
 const NEEDS_QUOTING = /[",\r\n]/;
+const FORMULA_TRIGGERS = /^[=+\-@\t\r]/;
 
-/** RFC 4180: quote when the field contains a comma, quote, CR or LF. */
+/** RFC 4180: quote when the field contains a comma, quote, CR or LF.
+ * Neutralize formula trigger characters (=, +, -, @, \t, \r) to prevent CWE-1236 CSV injection,
+ * excluding valid numbers.
+ */
 function csvField(value) {
-  const text = formatCell(value);
+  let text = formatCell(value);
+  if (FORMULA_TRIGGERS.test(text) && typeof value !== 'number') {
+    text = `'${text}`;
+  }
   if (!NEEDS_QUOTING.test(text)) return text;
   return `"${text.replace(/"/g, '""')}"`;
 }

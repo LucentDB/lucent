@@ -20,6 +20,30 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
   }
 });
 
+// Forbid HTML forms and non-checkbox input controls to prevent UI spoofing / phishing
+// in rendered markdown within the webview environment.
+DOMPurify.addHook('uponSanitizeElement', (node, data) => {
+  if (data.tagName === 'input' && node instanceof Element) {
+    const type = node.getAttribute('type');
+    if (type !== 'checkbox') {
+      node.parentNode?.removeChild(node);
+    }
+  }
+});
+
+const FORBIDDEN_MARKDOWN_TAGS = [
+  'form',
+  'script',
+  'iframe',
+  'object',
+  'embed',
+  'style',
+  'dialog',
+  'select',
+  'textarea',
+  'button',
+];
+
 const SQL_LANGUAGES = new Set([
   'sql',
   'postgres',
@@ -47,7 +71,12 @@ export function renderMarkdown(text: string): string {
       renderer: markdownRenderer,
     });
     const html = typeof result === 'string' ? result : String(result);
-    return DOMPurify.sanitize(html);
+    return DOMPurify.sanitize(html, {
+      FORBID_TAGS: FORBIDDEN_MARKDOWN_TAGS,
+      // Only safe link protocols, so `data:`/`javascript:` URLs are dropped.
+      ALLOWED_URI_REGEXP:
+        /^(?:(?:(?:f|ht)tps?|mailto|tel):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i,
+    });
   } catch {
     return String(text ?? '')
       .replace(/&/g, '&amp;')

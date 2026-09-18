@@ -55,6 +55,8 @@
     {disabled}
     onclick={() => (open = !open)}
     title="Copy results"
+    aria-label="Copy results"
+    aria-expanded={open}
   >
     <svg
       width="16"
