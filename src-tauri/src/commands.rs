@@ -245,6 +245,12 @@ pub struct AppState {
     /// for the rest of the session (rules learned mid-conversation do not
     /// retroactively alter a prompt already in flight).
     pub profile_snapshots: Arc<DashMap<String, crate::ai::memory::ProfileSnapshot>>,
+    /// Shared idle clock for the sleep-time compute daemon. Query execution and
+    /// AI chat `touch()` it; the daemon in `lib.rs` reads it to decide when the
+    /// app has been idle long enough to run consolidation. Owned here (rather
+    /// than managed separately by Tauri) so both the hot paths and the daemon
+    /// see one tracker.
+    pub idle_tracker: Arc<crate::ai::memory::IdleTracker>,
     /// Capabilities of the connected driver. `None` when disconnected.
     /// Phase 2 moves this onto `LiveConnection`; `capabilities()` is the seam
     /// that keeps that a small change.
@@ -321,6 +327,7 @@ impl AppState {
             logs: crate::supervisor::new_log_buffer(),
             llm_usage: DashMap::new(),
             profile_snapshots: Arc::new(DashMap::new()),
+            idle_tracker: Arc::new(crate::ai::memory::IdleTracker::new()),
             indexing,
             acp_http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
@@ -1632,6 +1639,9 @@ pub async fn execute_query(
     sort: Option<Vec<crate::query_paging::SortSpec>>,
     filters: Vec<crate::query_paging::FilterSpec>,
 ) -> Result<ExecuteResult, CommandError> {
+    // Running a query is user activity: reset the idle clock the sleep-time
+    // compute daemon watches so consolidation never fires mid-workload.
+    state.idle_tracker.touch();
     let sort = sort.unwrap_or_default();
     let conn_id = (*state.current_connection_id.lock().await)
         .ok_or_else(|| CommandError::new("QueryError", "not connected — connect first"))?;
@@ -2798,6 +2808,9 @@ pub async fn ai_chat(
     connection_id: String,
     profile_id: Option<String>,
 ) -> Result<(), String> {
+    // A chat turn is user activity: reset the idle clock so the sleep-time
+    // compute daemon does not fire while the user is actively working.
+    state.idle_tracker.touch();
     // Correlate the whole turn (including bridged `log::` lines) under the
     // `ai_chat` span.
     let span = crate::trace::ai_chat_span(&conversation_id);
@@ -3522,9 +3535,68 @@ pub async fn list_memories(
         .await
 }
 
+/// F (R23): raw captured observations for the Journal tab. The memory manager
+/// already could list them; this exposes that through IPC.
+#[tauri::command]
+pub async fn list_observations(
+    state: State<'_, AppState>,
+    connection_key: String,
+    status: String,
+) -> Result<Vec<crate::ai::memory::Observation>, String> {
+    state
+        .memory_manager
+        .list_observations(&connection_key, &status)
+        .await
+}
+
+/// F (R23): the always-on profile plane for the drawer's Profile tab. Derived
+/// from the same connection-scoped list, filtered to `injection == Always`.
+#[tauri::command]
+pub async fn list_always_memories(
+    state: State<'_, AppState>,
+    connection_key: String,
+) -> Result<Vec<crate::ai::memory::MemoryItem>, String> {
+    let all = state
+        .memory_manager
+        .list_memories(&connection_key, false)
+        .await?;
+    Ok(all
+        .into_iter()
+        .filter(|m| m.injection == crate::ai::memory::InjectionClass::Always)
+        .collect())
+}
+
 #[tauri::command]
 pub async fn save_memory_manual(
     state: State<'_, AppState>,
+    connection_key: String,
+    category: String,
+    key_phrase: String,
+    rule_text: String,
+    sql_snippet: Option<String>,
+    scope: Option<String>,
+) -> Result<crate::ai::memory::MemoryItem, String> {
+    save_memory_manual_impl(
+        &state,
+        connection_key,
+        category,
+        key_phrase,
+        rule_text,
+        sql_snippet,
+        scope,
+    )
+    .await
+}
+
+/// Finding A: the manual save path is the only production producer of the
+/// always-on profile plane. A `Preference` is a user's explicit standing
+/// instruction, so it is saved with `injection = Always` and the key phrase as
+/// its `preference_key`; every other category stays retrieved-only. The agent
+/// tool path (`ai::tools::memory`) deliberately remains `Retrieved` — an agent
+/// cannot promote itself. Split from the command so tests can exercise the
+/// exact mapping without a Tauri `State`.
+async fn save_memory_manual_impl(
+    state: &AppState,
     connection_key: String,
     category: String,
     key_phrase: String,
@@ -3543,6 +3615,12 @@ pub async fn save_memory_manual(
     let sanitized_sql = sanitize_sql_snippet(sql_snippet.as_deref())?;
 
     let cat = MemoryCategory::from_str(&category);
+    let is_preference = cat == MemoryCategory::Preference;
+    let preference_key = if is_preference {
+        Some(key_phrase.clone())
+    } else {
+        None
+    };
     let sc = scope
         .as_deref()
         .map(MemoryScope::from_str)
@@ -3612,8 +3690,12 @@ pub async fn save_memory_manual(
         embedding,
         created_at: now,
         updated_at: now,
-        injection: InjectionClass::Retrieved,
-        preference_key: None,
+        injection: if is_preference {
+            InjectionClass::Always
+        } else {
+            InjectionClass::Retrieved
+        },
+        preference_key,
         origin: Origin::Agent,
         steps_json: None,
         merge_group_id: None,
@@ -3714,6 +3796,16 @@ pub async fn import_memories_markdown(
             };
 
         let id = uuid::Uuid::new_v4().to_string();
+        // Finding A: an imported `preference` is a user-authored standing
+        // instruction, same as a manual save, so it enters the always-on
+        // profile plane with its key phrase as the preference key. All other
+        // imported categories stay retrieved-only.
+        let is_preference = rule.category == crate::ai::memory::MemoryCategory::Preference;
+        let preference_key = if is_preference {
+            Some(rule.key_phrase.clone())
+        } else {
+            None
+        };
         let doc_hash = crate::ai::memory::compute_memory_doc_hash(&format!(
             "{} {}",
             rule.key_phrase, sanitized_rule
@@ -3771,8 +3863,12 @@ pub async fn import_memories_markdown(
             embedding,
             created_at: now,
             updated_at: now,
-            injection: crate::ai::memory::InjectionClass::Retrieved,
-            preference_key: None,
+            injection: if is_preference {
+                crate::ai::memory::InjectionClass::Always
+            } else {
+                crate::ai::memory::InjectionClass::Retrieved
+            },
+            preference_key,
             origin: crate::ai::memory::Origin::Agent,
             steps_json: None,
             merge_group_id: None,
@@ -4828,5 +4924,105 @@ mod observer_seam_tests {
         assert_eq!(obs.len(), 1);
         assert_eq!(obs[0].signal, "explicit_request");
         assert_eq!(obs[0].origin, Origin::Owner);
+    }
+}
+
+#[cfg(test)]
+mod manual_memory_injection_tests {
+    use super::{save_memory_manual_impl, AppState, MemoryEmbedderTestGate};
+    use crate::ai::memory::{InjectionClass, ProfileSnapshot};
+    use std::sync::Arc;
+    use tauri::Manager;
+
+    /// Isolated in-memory memory DB + an embedder that reports unavailable, so
+    /// these tests never touch the real `memory.db` or load an ONNX model.
+    fn state() -> AppState {
+        let mut state = AppState::new();
+        state.memory_manager = Arc::new(crate::ai::memory::MemoryManager::open_in_memory().unwrap());
+        state.memory_embedder_test_gate = Some(Arc::new(MemoryEmbedderTestGate::unavailable()));
+        state
+    }
+
+    /// Finding A: a Preference saved through the manual path is the production
+    /// producer for the always-on profile plane. It must come back `Always`,
+    /// carry a preference key, and be picked up by `ProfileSnapshot::build`.
+    #[tokio::test]
+    async fn manual_preference_becomes_always_and_reaches_profile() {
+        let state = state();
+        let item = save_memory_manual_impl(
+            &state,
+            "conn-a".into(),
+            "preference".into(),
+            "sql_style".into(),
+            "Always use CTEs over correlated subqueries".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(item.injection, InjectionClass::Always);
+        assert_eq!(item.preference_key.as_deref(), Some("sql_style"));
+
+        let snapshot = ProfileSnapshot::build(&state.memory_manager, "conn-a", 250)
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot.memories.len(),
+            1,
+            "the manual preference must enter the always-on profile"
+        );
+        assert_eq!(snapshot.memories[0].id, item.id);
+    }
+
+    /// Finding A: every non-preference category keeps the retrieved-only
+    /// default and no preference key.
+    #[tokio::test]
+    async fn manual_non_preference_stays_retrieved() {
+        let state = state();
+        let item = save_memory_manual_impl(
+            &state,
+            "conn-a".into(),
+            "quirk".into(),
+            "orders_soft_delete".into(),
+            "orders uses deleted_at IS NULL".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(item.injection, InjectionClass::Retrieved);
+        assert_eq!(item.preference_key, None);
+    }
+
+    /// Finding F: the registered command returns the observation that
+    /// `MemoryManager` recorded. Driven through a real mock `App`/`State` so
+    /// the command signature itself is exercised.
+    #[tokio::test]
+    async fn list_observations_command_returns_recorded_observation() {
+        let state = state();
+        let obs = crate::ai::memory::Observation::new(
+            "conn-1".into(),
+            None,
+            None,
+            "request".into(),
+            crate::ai::memory::Origin::Owner,
+            "explicit_request".into(),
+            1.0,
+            "{}".into(),
+        );
+        state.memory_manager.record_observation(obs).await.unwrap();
+
+        let app = tauri::test::mock_app();
+        app.manage(state);
+        let state = app.state::<AppState>();
+
+        let listed = super::list_observations(state, "conn-1".into(), "open".into())
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].signal, "explicit_request");
+        assert_eq!(listed[0].origin, crate::ai::memory::Origin::Owner);
     }
 }

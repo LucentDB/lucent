@@ -580,10 +580,7 @@ export async function listMemories(
 }
 
 /**
- * Always-on profile memories for a connection (Task 15). NOTE (R23): the
- * `list_always_memories` Tauri command is not implemented in this plan, so
- * this can reject at runtime — callers must catch and fall back (the drawer
- * filters `list_memories` by `injection === 'always'` instead of crashing).
+ * Always-on profile memories for a connection (Task 15, R23).
  */
 export async function listAlwaysMemories(
   connectionKey: string,
@@ -592,14 +589,14 @@ export async function listAlwaysMemories(
 }
 
 /**
- * Raw observations for a connection (Task 15). NOTE (R23): the
- * `list_observations` Tauri command is not implemented in this plan, so this
- * can reject at runtime — the Journal tab catches and renders an empty list.
+ * Raw observations for a connection (Task 15, R23). Defaults to the open
+ * observation inbox; pass an explicit status to inspect another bucket.
  */
 export async function listObservations(
   connectionKey: string,
+  status = 'open',
 ): Promise<Observation[]> {
-  return invoke('list_observations', { connectionKey });
+  return invoke('list_observations', { connectionKey, status });
 }
 
 export async function saveMemoryManual(

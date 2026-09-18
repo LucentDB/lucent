@@ -60,13 +60,13 @@ pub fn run() {
             let sink: Arc<dyn crate::ai::indexer::IndexingEventSink> = Arc::new(
                 crate::ai::events::IndexingEmitter::new(Arc::new(TauriEmit(handle.clone()))),
             );
-            app.manage(commands::AppState::with_indexing_sink(sink));
-
+            let state = commands::AppState::with_indexing_sink(sink);
             // Sleep-time compute: once the app has been idle for 15 minutes,
-            // run memory consolidation and write memory-review.md. Shared with
-            // the (future) activity hooks so any user/app activity resets it.
-            let idle_tracker = Arc::new(crate::ai::memory::IdleTracker::new());
-            app.manage(idle_tracker.clone());
+            // run memory consolidation and write memory-review.md. The tracker
+            // lives on AppState so `execute_query` / `ai_chat` can reset it on
+            // activity without a second Tauri-managed handle.
+            let idle_tracker = state.idle_tracker.clone();
+            app.manage(state);
             crate::ai::memory::start_idle_daemon(handle.clone(), idle_tracker);
 
             let new_notebook = MenuItem::with_id(
@@ -222,6 +222,8 @@ pub fn run() {
             commands::load_chat_conversation,
             commands::delete_chat_conversation,
             commands::list_memories,
+            commands::list_observations,
+            commands::list_always_memories,
             commands::save_memory_manual,
             commands::delete_memory,
             commands::toggle_memory_status,

@@ -155,6 +155,37 @@ mod tests {
         assert_eq!(s.origin, Origin::Owner);
     }
 
+    /// R28: notebook AI cells run through the same observer as chat turns, so a
+    /// notebook turn whose user text is an explicit request must record the
+    /// same `explicit_request` / `Owner` observation the rig path does.
+    #[tokio::test]
+    async fn test_notebook_runtime_records_explicit_request_like_rig() {
+        let mut state = crate::AppState::new();
+        state.memory_manager =
+            std::sync::Arc::new(crate::ai::memory::MemoryManager::open_in_memory().unwrap());
+
+        let turn = TurnOutcome {
+            connection_key: "conn-nb".into(),
+            conversation_id: "conv-nb".into(),
+            turn_id: "turn-nb".into(),
+            runtime: TurnRuntime::Notebook,
+            user_text: Some("Remember that customers uses uuid string ids".into()),
+            assistant_text: None,
+            executed_sql: vec![],
+            tool_calls: vec![],
+        };
+        record_turn_observations(&state, turn).await;
+
+        let obs = state
+            .memory_manager
+            .list_observations("conn-nb", "open")
+            .await
+            .unwrap();
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].signal, "explicit_request");
+        assert_eq!(obs[0].origin, Origin::Owner);
+    }
+
     #[test]
     fn test_detect_editor_diff_signal() {
         let proposed = "SELECT * FROM orders WHERE status = 'active'";
