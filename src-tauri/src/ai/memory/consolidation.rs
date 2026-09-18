@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::decay::{calculate_retention, is_archive_eligible};
 use super::security::SourceTrust;
+use super::MemoryManager;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CanonicalAssertion {
@@ -70,6 +71,87 @@ pub fn soft_archive_decayed_memories(conn: &Connection) -> Result<usize, String>
     }
 
     Ok(archived_count)
+}
+
+/// Outcome of one sleep-cycle pass, plus the human-readable Markdown review
+/// that is written to `<config_dir>/lucent/memory-review.md`.
+#[derive(Debug)]
+pub struct SleepCycleReport {
+    pub compacted_observations: usize,
+    pub merged_memories: usize,
+    pub archived_memories: usize,
+    pub markdown_content: String,
+}
+
+/// Runs the sleep-cycle compaction pass against an in-memory `MemoryManager`
+/// and produces the review report. Compaction itself is deliberately minimal
+/// for now — the tested contract is the report generation:
+///
+/// 1. soft-archive decayed memories (counted; a failure degrades to 0 rather
+///    than aborting the whole cycle),
+/// 2. promotion/merge are stubs until their strategies land,
+/// 3. render the Markdown review.
+pub async fn run_sleep_cycle_in_memory(mgr: &MemoryManager) -> Result<SleepCycleReport, String> {
+    // A failed archive pass must not sink the report: the review is still
+    // useful, and the next idle window retries.
+    let archived_memories = mgr
+        .with_connection(soft_archive_decayed_memories)
+        .await
+        .unwrap_or(0);
+
+    let compacted_observations = 0usize;
+    let merged_memories = 0usize;
+
+    let merged_section = if merged_memories == 0 {
+        "None".to_string()
+    } else {
+        format!("{merged_memories} memories merged")
+    };
+    let promoted_section = if compacted_observations == 0 {
+        "None".to_string()
+    } else {
+        format!("{compacted_observations} observations promoted")
+    };
+    let archived_section = if archived_memories == 0 {
+        "None".to_string()
+    } else {
+        format!("{archived_memories} memories archived")
+    };
+
+    let markdown_content = format!(
+        "# Lucent Autonomous Memory Review\n\n\
+         Generated at: {}\n\n\
+         ## Merged\n{}\n\n\
+         ## Promoted Observations\n{}\n\n\
+         ## Archived\n{}\n",
+        chrono::Utc::now().to_rfc3339(),
+        merged_section,
+        promoted_section,
+        archived_section,
+    );
+
+    Ok(SleepCycleReport {
+        compacted_observations,
+        merged_memories,
+        archived_memories,
+        markdown_content,
+    })
+}
+
+/// Production entry point: runs the sleep cycle against the live app state's
+/// memory manager and persists the Markdown review next to the memory database
+/// (`<config_dir>/lucent/memory-review.md`). Returns the report so callers can
+/// log or surface the counts.
+pub async fn run_sleep_cycle(state: &crate::AppState) -> Result<SleepCycleReport, String> {
+    let report = run_sleep_cycle_in_memory(&state.memory_manager).await?;
+
+    let mut dir = dirs::config_dir().ok_or("no config directory found")?;
+    dir.push("lucent");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("memory-review.md"), &report.markdown_content)
+        .map_err(|e| format!("failed to write memory review report: {e}"))?;
+
+    Ok(report)
 }
 
 /// Executes DAG Supersession when a new rule contradicts an existing active rule.
@@ -164,6 +246,17 @@ mod tests {
         // Dropping '8/10' fails fidelity check
         let bad_assertion = "automatons built when motivation is high and timeout <= 30s";
         assert!(verify_fidelity(source, bad_assertion).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_sleep_cycle_generates_markdown_review() {
+        let mgr = MemoryManager::open_in_memory().unwrap();
+        let report = run_sleep_cycle_in_memory(&mgr).await.unwrap();
+
+        assert!(report
+            .markdown_content
+            .contains("# Lucent Autonomous Memory Review"));
+        assert!(report.markdown_content.contains("## Merged"));
     }
 
     use crate::ai::memory::{

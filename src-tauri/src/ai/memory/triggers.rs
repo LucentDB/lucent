@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
+use tauri::Manager;
+
 /// Idle window before the sleep-time compute daemon may run: 15 minutes.
 pub const IDLE_THRESHOLD_SECS: i64 = 900;
 
@@ -42,6 +44,41 @@ impl Default for IdleTracker {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Polls the shared [`IdleTracker`] every 60 seconds and runs the sleep-cycle
+/// consolidation once per idle period.
+///
+/// The "fired" flag is reset as soon as activity resumes, so a fresh idle
+/// window triggers a fresh cycle while a continuously-idle app never re-runs
+/// the same cycle on every tick.
+pub fn start_idle_daemon<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    tracker: std::sync::Arc<IdleTracker>,
+) {
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut fired_for_idle_period = false;
+
+        loop {
+            interval.tick().await;
+            let now = chrono::Utc::now().timestamp();
+
+            if tracker.is_idle(now, IDLE_THRESHOLD_SECS) {
+                if !fired_for_idle_period {
+                    let state = app.state::<crate::AppState>();
+                    if let Err(e) =
+                        crate::ai::memory::consolidation::run_sleep_cycle(state.inner()).await
+                    {
+                        log::debug!("idle sleep-cycle consolidation failed: {e}");
+                    }
+                    fired_for_idle_period = true;
+                }
+            } else {
+                fired_for_idle_period = false;
+            }
+        }
+    });
 }
 
 #[cfg(test)]

@@ -62,6 +62,13 @@ pub fn run() {
             );
             app.manage(commands::AppState::with_indexing_sink(sink));
 
+            // Sleep-time compute: once the app has been idle for 15 minutes,
+            // run memory consolidation and write memory-review.md. Shared with
+            // the (future) activity hooks so any user/app activity resets it.
+            let idle_tracker = Arc::new(crate::ai::memory::IdleTracker::new());
+            app.manage(idle_tracker.clone());
+            crate::ai::memory::start_idle_daemon(handle.clone(), idle_tracker);
+
             let new_notebook = MenuItem::with_id(
                 handle,
                 "new-notebook",
