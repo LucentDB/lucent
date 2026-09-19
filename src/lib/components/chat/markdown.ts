@@ -14,7 +14,10 @@ marked.setOptions({
 // Force all links rendered from markdown to open in a new tab/window securely,
 // preventing reverse tabnabbing (window.opener hijacking) in webview environments.
 DOMPurify.addHook('afterSanitizeAttributes', (node) => {
-  if (node.tagName === 'A') {
+  // Only links that survived sanitization with an href are worth opening in a
+  // new tab: DOMPurify drops `javascript:`/`data:` hrefs, and an anchor without
+  // an href is inert, so decorating it is noise.
+  if (node.tagName === 'A' && node.hasAttribute('href')) {
     node.setAttribute('target', '_blank');
     node.setAttribute('rel', 'noopener noreferrer');
   }
@@ -81,7 +84,9 @@ export function renderMarkdown(text: string): string {
     return String(text ?? '')
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 }
 

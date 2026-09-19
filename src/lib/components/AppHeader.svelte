@@ -7,34 +7,34 @@
   import DbIcon from './icons/DbIcon.svelte';
 
   let {
-    config,
-    connected,
-    showAiSettings,
-    showChatPanel,
+    config = null,
+    connected = false,
+    showAiSettings = false,
+    showChatPanel = false,
     showLogs = false,
-    hasTabs,
+    hasTabs = false,
     leftWidth = 0,
     sidebarCollapsed = false,
-    onToggleSidebar,
-    onToggleTheme,
-    onToggleAi,
-    onToggleLogs,
-    onToggleChat,
-    onTogglePalette,
+    onToggleSidebar = undefined,
+    onToggleTheme = undefined,
+    onToggleAi = undefined,
+    onToggleLogs = undefined,
+    onToggleChat = undefined,
+    onTogglePalette = undefined,
     // unified tab bar props
     tabs = [],
     activeTabId = '',
     view = 'query',
-    onSwitchTab,
-    onCloseTab,
-    onNewQuery,
+    onSwitchTab = undefined,
+    onCloseTab = undefined,
+    onNewQuery = undefined,
     // notebook file actions
-    onNotebookSave,
-    onNotebookSaveAs,
-    onNotebookOpen,
+    onNotebookSave = undefined,
+    onNotebookSaveAs = undefined,
+    onNotebookOpen = undefined,
     isTabDirty = (_id: string) => false,
     // batch close callbacks
-    onCloseTabs,
+    onCloseTabs = undefined,
   } = $props();
 
   let tabsEl: HTMLDivElement;
@@ -210,6 +210,7 @@
           class="icon-btn sidebar-toggle"
           onclick={onToggleSidebar}
           title={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
+          aria-label={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
         >
           <svg
             width="16"
@@ -269,15 +270,19 @@
                   }
                 }}
                 role="button"
-                tabindex="-1">×</span
+                tabindex="-1"
+                aria-label="Close tab">×</span
               >
             </button>
           {/each}
         </div>
 
         <div class="new-tab-group">
-          <button class="new-tab-btn" onclick={handleNewDbTab} title="New Query"
-            >+</button
+          <button
+            class="new-tab-btn"
+            onclick={handleNewDbTab}
+            title="New Query"
+            aria-label="New Query">+</button
           >
         </div>
       {/if}
@@ -303,7 +308,12 @@
     {/if}
 
     <div class="actions">
-      <button class="icon-btn ai-btn" onclick={onToggleAi} title="AI Settings">
+      <button
+        class="icon-btn ai-btn"
+        onclick={onToggleAi}
+        title="AI Settings"
+        aria-label="AI Settings"
+      >
         <svg
           width="18"
           height="18"
@@ -324,6 +334,7 @@
         class:active={showLogs}
         onclick={onToggleLogs}
         title="Worker logs"
+        aria-label="Worker logs"
       >
         <svg
           width="16"
@@ -345,7 +356,11 @@
       </button>
 
       {#if connected}
-        <button class="search-btn" onclick={onTogglePalette}>
+        <button
+          class="search-btn"
+          onclick={onTogglePalette}
+          aria-label="Search command palette"
+        >
           <svg
             width="14"
             height="14"
@@ -362,7 +377,12 @@
           <span class="kbd">⌘K</span>
         </button>
 
-        <button class="icon-btn" onclick={onToggleTheme} title="Toggle theme">
+        <button
+          class="icon-btn"
+          onclick={onToggleTheme}
+          title="Toggle theme"
+          aria-label="Toggle theme"
+        >
           <svg
             width="16"
             height="16"
@@ -407,6 +427,7 @@
           class:full={!hasTabs}
           onclick={onToggleChat}
           title={hasTabs ? 'Toggle AI Chat' : 'AI Chat'}
+          aria-label={hasTabs ? 'Toggle AI Chat' : 'AI Chat'}
         >
           <svg
             width="18"

@@ -8,6 +8,9 @@
           document.documentElement.classList.add('dark');
         }
       })();
+      document.addEventListener('contextmenu', function(e) {
+        e.preventDefault();
+      }, true);
     </script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />

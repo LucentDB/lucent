@@ -15,6 +15,17 @@ test('strips javascript: URLs in links', () => {
   expect(out.toLowerCase()).not.toContain('javascript:');
 });
 
+test('strips vbscript: URLs in links', () => {
+  const out = renderMarkdown('[click](vbscript:msgbox(1))');
+  expect(out.toLowerCase()).not.toContain('vbscript:');
+});
+
+test('leaves link decoration off anchors whose href was stripped', () => {
+  const out = renderMarkdown('[click](javascript:alert(1))');
+  expect(out).not.toContain('target="_blank"');
+  expect(out).not.toContain('noopener');
+});
+
 test('strips data: URLs in links', () => {
   const out = renderMarkdown(
     '[click](data:text/html,<script>alert(1)</script>)',
