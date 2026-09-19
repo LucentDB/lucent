@@ -6,17 +6,21 @@
 # Produces ONE DRAFT release. Publishing is manual and deliberate: the updater
 # endpoint (releases/latest/download/latest.json) resolves only to published
 # releases, so a bad build cannot reach an existing install's auto-updater
-# until a human says so. Publishing is also what updates the install channels
-# (tap.yml, and the Windows/Linux channels once they exist).
+# until a human says so. Publishing is also what fires tap.yml.
 #
 # Required secrets:
-#   TAURI_SIGNING_PRIVATE_KEY           minisign key for updater artifacts
+#   TAURI_SIGNING_PRIVATE_KEY           the rsign key for updater artifacts
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password
+#   HOMEBREW_TAP_TOKEN                  used by tap.yml, not here
 #
 # There is deliberately NO Apple certificate: macOS is ad-hoc signed
 # (bundle.macOS.signingIdentity = "-") and never notarized, so the old
 # `security import` step could only ever fail. See the spec
 # docs/superpowers/specs/2026-08-29-release-distribution-design.md.
+#
+# macOS ONLY, for now. The Windows and Linux legs existed and were removed
+# deliberately — see the matrix comment below. `apt.yml` and `winget.yml` are
+# already written and stay dormant until their artifacts are real.
 
 name: Release
 
@@ -24,14 +28,52 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and attach the draft release to (e.g. v0.1.0)'
+        required: true
 
 permissions:
   contents: write
 
 jobs:
   release:
+    # One resolution point for the tag. On a tag push `inputs` is empty, so this
+    # falls back to the tag itself; a manual run passes one explicitly. Without
+    # this, `github.ref_name` on workflow_dispatch is the *branch* name, and
+    # tauri-action would create a draft release tagged "main".
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     strategy:
       fail-fast: false
+      # Serial, and not for resource reasons. tauri-action builds `latest.json`
+      # by reading the release's existing asset, adding this target's platform
+      # entry, and re-uploading it (src/upload-version-json.ts). Two targets
+      # running at once both read the same stale file and the later upload
+      # discards the earlier one's entry — leaving `releases/latest/download/
+      # latest.json` missing `darwin-x86_64` (or `darwin-aarch64`) and quietly
+      # breaking updates for that architecture only. Serialising makes each leg
+      # see the previous leg's entry and merge into it.
+      max-parallel: 1
+      # Windows and Linux are deferred until the app actually builds and behaves
+      # there. Their legs looked like this, and the two `if:`-guarded steps
+      # ("Install Linux deps", "Install NASM") went with them:
+      #
+      #   - platform: windows-latest
+      #     target: x86_64-pc-windows-msvc
+      #     bundles: nsis
+      #   - platform: ubuntu-22.04
+      #     target: x86_64-unknown-linux-gnu
+      #     bundles: appimage,deb
+      #
+      # Restoring them requires the cross-platform correctness work that is NOT
+      # in main: `lucent_home()` (every AI/ACP path reads $HOME, which Windows
+      # does not set — the whole db-tools feature is broken there),
+      # per-target `keyring` features (the workspace-wide `apple-native`
+      # feature silently degrades to an in-memory mock on Windows, so saved
+      # passwords vanish), and CREATE_NO_WINDOW on child spawns (otherwise
+      # every connection flashes a console window). Until then, shipping those
+      # artifacts would be shipping something that has never been compiled.
       matrix:
         include:
           - platform: macos-latest
@@ -40,23 +82,21 @@ jobs:
           - platform: macos-latest
             target: x86_64-apple-darwin
             bundles: app,dmg
-          - platform: windows-latest
-            target: x86_64-pc-windows-msvc
-            bundles: nsis
-          - platform: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            bundles: appimage,deb
 
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux deps
-        if: matrix.platform == 'ubuntu-22.04'
+      - name: Validate the tag
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev \
-            libappindicator3-dev librsvg2-dev patchelf libdbus-1-dev xdg-utils
+          set -euo pipefail
+          # tauri-action names the release and every artifact from this value,
+          # so a stray branch name or a malformed tag must stop the build here
+          # rather than produce a release nothing can be installed from.
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$TAG' is not a v<major>.<minor>.<patch> tag"
+            exit 1
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -70,12 +110,6 @@ jobs:
       # pin selects. No-op when they are the same.
       - name: Add the target to the pinned toolchain
         run: rustup target add ${{ matrix.target }}
-
-      # aws-lc-sys reaches the graph via russh and rustls and cannot assemble
-      # its crypto primitives under MSVC without NASM.
-      - name: Install NASM
-        if: matrix.platform == 'windows-latest'
-        uses: ilammy/setup-nasm@v1
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -91,18 +125,39 @@ jobs:
       - name: Version consistency
         run: node scripts/check-version.mjs
 
+      # Before anything is built or published: prove the private key in CI is
+      # the counterpart of the public key committed in tauri.conf.json. A
+      # mismatch is invisible otherwise — the release would publish cleanly and
+      # then every installed app would reject the update, with no signal until
+      # users are already stuck on an old version.
+      - name: Verify the updater signing key matches the shipped public key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          head -c 4096 /dev/urandom > /tmp/payload.bin
+          npx tauri signer sign /tmp/payload.bin
+          node scripts/verify-updater-key.mjs --payload /tmp/payload.bin --sig /tmp/payload.bin.sig
+
       # The sidecars (postgres driver, duckdb driver, ACP bridge) are built and
       # staged for THIS target by `beforeBuildCommand` — see
       # scripts/stage-sidecars.mjs. Nothing to stage here: it runs inside
       # `tauri build`, after `npm ci` and the `rustup target add` above.
+      #
+      # `app` is in `bundles` and is not optional: it is the target the updater
+      # is enabled for. Without it the bundler warns that it was "configured to
+      # create updater artifacts but no updater-enabled targets were built" and
+      # emits no `.app.tar.gz` and no signature, so a published release would
+      # look fine and silently break every existing install's update path.
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Lucent ${{ github.ref_name }}'
+          tagName: ${{ env.TAG }}
+          releaseName: 'Lucent ${{ env.TAG }}'
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
