@@ -554,7 +554,10 @@ impl DatabaseAgent {
         cancel: tokio_util::sync::CancellationToken,
         applied_memory_count: usize,
     ) -> Result<(), String> {
-        let conversation_id = conv_state.lock().await.connection_id.clone();
+        let conversation_id = {
+            let s = conv_state.lock().await;
+            s.conversation_id.clone().unwrap_or_else(|| s.connection_id.clone())
+        };
 
         let agent = self
             .provider

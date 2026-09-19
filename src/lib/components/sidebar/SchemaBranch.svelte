@@ -27,7 +27,7 @@
   {#if objects.isPending}
     <div class="loading-line">Loading…</div>
   {:else if objects.error}
-    <div class="sidebar-error">{objects.error}</div>
+    <div class="sidebar-error selectable">{objects.error}</div>
   {:else}
     {@render children(objects.data ?? [])}
   {/if}

@@ -220,6 +220,7 @@ pub fn run() {
             // AI Memory Subsystem commands
             commands::list_chat_conversations,
             commands::load_chat_conversation,
+            commands::save_chat_message,
             commands::delete_chat_conversation,
             commands::list_memories,
             commands::list_observations,

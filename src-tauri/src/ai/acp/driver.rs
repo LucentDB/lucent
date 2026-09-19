@@ -21,7 +21,7 @@ use crate::ai::events::{
 use crate::ai::tools::AiToolContext;
 use agent_client_protocol::schema::v1::{
     ContentBlock, ContentChunk, SessionUpdate, StopReason, ToolCallContent, ToolCallStatus,
-    ToolCallUpdate, UsageUpdate,
+    ToolCallUpdate, Usage, UsageUpdate,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -66,7 +66,9 @@ impl AcpChatDriver {
     ) -> Result<(), String> {
         let conversation_id = {
             let s = conv_state.lock().await;
-            s.connection_id.clone()
+            s.conversation_id
+                .clone()
+                .unwrap_or_else(|| s.connection_id.clone())
         };
         // Session key = the conversation key (set by `run_agent_turn`).
         // Multiple conversations share one `connection_id`, so the connection
@@ -254,6 +256,15 @@ impl AcpChatDriver {
                 ));
             }
         };
+        // The agent's end-of-turn usage is the authoritative prompt/completion
+        // split; it lands here (after the last `usage_update` drained above) so
+        // it wins over the occupancy fallback. Agents that report none keep the
+        // fallback numbers.
+        if let Some(turn_usage) = outcome.usage.as_ref() {
+            if !end_turn_usage_is_empty(turn_usage) {
+                apply_end_turn_usage(&mut usage, turn_usage);
+            }
+        }
         let final_message = match outcome.stop_reason {
             StopReason::EndTurn => text_buf.clone(),
             StopReason::MaxTokens | StopReason::MaxTurnRequests => {
@@ -662,13 +673,50 @@ fn sanitize_segment(s: &str) -> String {
 }
 
 /// Accumulates a `UsageUpdate` into the `TokenUsage` the Done event carries.
-/// v1's numbers are context-window occupancy (`used` of `size`) — the
-/// prompt/completion split is not observable, so `used` lands in
-/// prompt_tokens and completion stays 0; documented as approximate in the
-/// UI tooltip.
+/// These numbers are context-window occupancy (`used` of `size`), not a
+/// prompt/completion split: `used` lands in prompt_tokens and completion
+/// stays 0. This is the FALLBACK — an agent that reports end-of-turn usage
+/// (see `apply_end_turn_usage`) overwrites it after the turn resolves.
 pub fn accumulate_usage(usage: &mut TokenUsage, u: &UsageUpdate) {
-    usage.prompt_tokens = u.used.min(u32::MAX as u64) as u32;
+    usage.prompt_tokens = clamp_u64(u.used);
     usage.cached_prompt_tokens = 0;
+}
+
+/// Whether the agent's end-of-turn `Usage` carries any real number. Agents
+/// that don't populate the field answer with zeros (the schema's
+/// `DefaultOnError` default), and a zero report must not wipe the occupancy
+/// estimate `accumulate_usage` already collected.
+fn end_turn_usage_is_empty(u: &Usage) -> bool {
+    u.total_tokens == 0
+        && u.input_tokens == 0
+        && u.output_tokens == 0
+        && u.thought_tokens.unwrap_or(0) == 0
+        && u.cached_read_tokens.unwrap_or(0) == 0
+        && u.cached_write_tokens.unwrap_or(0) == 0
+}
+
+/// Overlays the agent's end-of-turn token `Usage` (ACP
+/// `unstable_end_turn_token_usage`, carried on `PromptResponse.usage`) onto
+/// the turn's `TokenUsage` — the authoritative per-turn prompt/completion
+/// split, which `usage_update`'s context occupancy can't express.
+///
+/// Field semantics: the agent reports uncached input, output, reasoning and
+/// cache traffic separately, so the totals Lucent shows are
+/// `prompt = input + cached_read + cached_write` (the whole prompt, with
+/// `cached_prompt_tokens` the cached subset, matching the rig path's
+/// `input_tokens`/`cached_input_tokens` convention) and
+/// `completion = output + thought` (reasoning tokens are tokens the model
+/// generated).
+pub fn apply_end_turn_usage(usage: &mut TokenUsage, u: &Usage) {
+    let cached = u.cached_read_tokens.unwrap_or(0) + u.cached_write_tokens.unwrap_or(0);
+    usage.prompt_tokens = clamp_u64(u.input_tokens + cached);
+    usage.cached_prompt_tokens = clamp_u64(cached);
+    usage.completion_tokens = clamp_u64(u.output_tokens + u.thought_tokens.unwrap_or(0));
+}
+
+/// `u64 → u32` with saturation — provider counters are u64, the UI field is u32.
+fn clamp_u64(v: u64) -> u32 {
+    v.min(u32::MAX as u64) as u32
 }
 
 /// How long the driver waits after sending `session/cancel` before killing
@@ -923,6 +971,35 @@ mod tests {
         assert_eq!(map_update(&plan), None);
     }
 
+    #[test]
+    fn end_turn_usage_splits_prompt_and_completion() {
+        // Uncached input + cache traffic is the whole prompt; output +
+        // reasoning is the whole completion.
+        let reported = Usage::new(190, 150, 30)
+            .thought_tokens(10)
+            .cached_read_tokens(40)
+            .cached_write_tokens(5);
+        let mut turn = TokenUsage::default();
+        apply_end_turn_usage(&mut turn, &reported);
+        assert_eq!(turn.prompt_tokens, 195);
+        assert_eq!(turn.cached_prompt_tokens, 45);
+        assert_eq!(turn.completion_tokens, 40);
+
+        // Optional fields absent: plain input/output, no cache.
+        let mut minimal = TokenUsage::default();
+        apply_end_turn_usage(&mut minimal, &Usage::new(180, 150, 30));
+        assert_eq!(minimal.prompt_tokens, 150);
+        assert_eq!(minimal.cached_prompt_tokens, 0);
+        assert_eq!(minimal.completion_tokens, 30);
+    }
+
+    #[test]
+    fn zeroed_end_turn_usage_never_replaces_the_occupancy_estimate() {
+        assert!(end_turn_usage_is_empty(&Usage::new(0, 0, 0)));
+        assert!(!end_turn_usage_is_empty(&Usage::new(0, 0, 1)));
+        assert!(!end_turn_usage_is_empty(&Usage::new(0, 12, 0)));
+    }
+
     // ── Lifecycle tests against the stub ──
 
     #[tokio::test]
@@ -1008,6 +1085,57 @@ mod tests {
                 },
             ],
         );
+    }
+
+    #[tokio::test]
+    async fn end_turn_usage_overrides_the_context_occupancy_estimate() {
+        // The occupancy stream says 100 (context tokens, no split); the
+        // prompt response carries the authoritative prompt/completion split.
+        // The Done event must report the split, not the occupancy.
+        let _ws = hermetic_workspace();
+        let _guard = env_var_guard("LUCENT_ACP_TOOLS_GATE_MS");
+        std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "50");
+        let script = script_file(json!({
+            "stopReason": "end_turn",
+            "usage": {"totalTokens": 190, "inputTokens": 150, "outputTokens": 30, "thoughtTokens": 10, "cachedReadTokens": 40},
+            "steps": [
+                {"notify": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "done"}}},
+                {"notify": {"sessionUpdate": "usage_update", "used": 100, "size": 200000}}
+            ]
+        }));
+
+        let driver = AcpChatDriver::new(
+            AcpState::new(),
+            acp_cfg(Some(&script.path().join("script.json"))),
+            tool_ctx(),
+        );
+        let sink = Arc::new(CollectorSink(std::sync::Mutex::new(Vec::new())));
+        let conv = conversation("conv-usage");
+
+        driver
+            .chat(
+                "summarize".into(),
+                &AiConfig::default(),
+                "system preamble".into(),
+                conv,
+                sink.clone(),
+                tokio_util::sync::CancellationToken::new(),
+                0,
+            )
+            .await
+            .expect("scripted turn completes");
+
+        let events = sink.0.lock().unwrap().clone();
+        let usage = events
+            .iter()
+            .find_map(|e| match e {
+                AiEvent::Done { usage, .. } => Some(usage.clone()),
+                _ => None,
+            })
+            .expect("Done event present");
+        assert_eq!(usage.prompt_tokens, 190); // 150 uncached + 40 cached
+        assert_eq!(usage.cached_prompt_tokens, 40);
+        assert_eq!(usage.completion_tokens, 40); // 30 output + 10 reasoning
     }
 
     #[tokio::test]

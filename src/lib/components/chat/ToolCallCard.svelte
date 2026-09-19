@@ -186,7 +186,7 @@
   </button>
 
   {#if open}
-    <div class="tcc-body">
+    <div class="tcc-body selectable">
       {#if (tool.status === 'failed' || tool.status === 'stopped') && tool.summary}
         <div class="tcc-section">
           <div class="tcc-section-label">

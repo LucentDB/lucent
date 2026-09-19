@@ -134,7 +134,7 @@
       {/if}
     </div>
   {:else if status === 'error'}
-    <div class="error-banner">{errorMessage}</div>
+    <div class="error-banner selectable">{errorMessage}</div>
   {/if}
 
   {#if status !== 'success'}

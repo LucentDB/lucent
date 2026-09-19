@@ -29,48 +29,188 @@ use crate::supervisor::Supervisor;
 pub(crate) struct TauriSink<R: tauri::Runtime> {
     channel: tauri::ipc::Channel<crate::ai::events::AiEvent>,
     app_handle: tauri::AppHandle<R>,
+    conversation_id: String,
+    assistant_message_id: Option<String>,
+    turn_text: Arc<std::sync::Mutex<String>>,
+    turn_segments: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    turn_start_ms: i64,
+}
+
+fn finalize_active_thinking(segs: &mut [serde_json::Value]) {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if let Some(last) = segs.last_mut() {
+        if last.get("type").and_then(|v| v.as_str()) == Some("thinking")
+            && last.get("streaming").and_then(|v| v.as_bool()).unwrap_or(false)
+        {
+            last["streaming"] = serde_json::Value::Bool(false);
+            if let Some(started) = last.get("startedAt").and_then(|v| v.as_i64()) {
+                last["durationMs"] = serde_json::Value::Number(serde_json::Number::from((now_ms - started).max(0)));
+            }
+        }
+    }
 }
 
 impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
     fn event(&self, event: crate::ai::events::AiEvent) {
-        // Accumulate before forwarding so a frontend fetch racing the `done`
-        // delivery (fire-and-forget `get_ai_usage`) never sees stale totals.
-        if let crate::ai::events::AiEvent::Done {
-            conversation_id,
-            usage,
-            final_message,
-            ..
-        } = &event
-        {
-            let state = self.app_handle.state::<AppState>();
-            let mut entry = state.llm_usage.entry(conversation_id.clone()).or_default();
-            let accumulated = accumulate_usage(&entry, usage);
-            *entry = accumulated;
-
-            if !final_message.is_empty() {
-                let mem_mgr = state.memory_manager.clone();
-                let conv_id = conversation_id.clone();
-                let content = final_message.clone();
-                let now = chrono::Utc::now().timestamp();
-                tauri::async_runtime::spawn(async move {
-                    let msg = crate::ai::memory::ChatMessage {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        conversation_id: conv_id,
-                        role: "assistant".into(),
-                        content,
-                        session_json: None,
-                        created_at: now,
-                    };
-                    let _ = mem_mgr.save_message(msg).await;
-                });
+        match &event {
+            crate::ai::events::AiEvent::Thinking { content } => {
+                let mut segs = self.turn_segments.lock().unwrap();
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                if let Some(last) = segs.last_mut() {
+                    if last.get("type").and_then(|v| v.as_str()) == Some("thinking")
+                        && last.get("streaming").and_then(|v| v.as_bool()).unwrap_or(false)
+                    {
+                        if let Some(c) = last.get_mut("content") {
+                            if let Some(s) = c.as_str() {
+                                *c = serde_json::Value::String(format!("{s}{content}"));
+                            }
+                        }
+                    } else {
+                        segs.push(serde_json::json!({
+                            "type": "thinking",
+                            "content": content,
+                            "streaming": true,
+                            "startedAt": now_ms,
+                        }));
+                    }
+                } else {
+                    segs.push(serde_json::json!({
+                        "type": "thinking",
+                        "content": content,
+                        "streaming": true,
+                        "startedAt": now_ms,
+                    }));
+                }
             }
+            crate::ai::events::AiEvent::Text { content } => {
+                let mut segs = self.turn_segments.lock().unwrap();
+                finalize_active_thinking(&mut segs);
+                let mut text = self.turn_text.lock().unwrap();
+                text.push_str(content);
+            }
+            crate::ai::events::AiEvent::Notice { content } => {
+                let mut segs = self.turn_segments.lock().unwrap();
+                finalize_active_thinking(&mut segs);
+                segs.push(serde_json::json!({
+                    "type": "note",
+                    "content": content,
+                }));
+            }
+            crate::ai::events::AiEvent::ToolCalls { tools } => {
+                let mut segs = self.turn_segments.lock().unwrap();
+                finalize_active_thinking(&mut segs);
+                for t in tools {
+                    segs.push(serde_json::json!({
+                        "type": "tool_call",
+                        "call": {
+                            "id": t.id,
+                            "name": t.name,
+                            "args": t.args,
+                            "summary": serde_json::Value::Null,
+                            "status": "running",
+                        }
+                    }));
+                }
+            }
+            crate::ai::events::AiEvent::ToolResult { id, summary, output, input, status, .. } => {
+                let mut segs = self.turn_segments.lock().unwrap();
+                for seg in segs.iter_mut() {
+                    if seg.get("type").and_then(|v| v.as_str()) == Some("tool_call") {
+                        if let Some(call) = seg.get_mut("call") {
+                            if call.get("id").and_then(|v| v.as_str()) == Some(id) {
+                                call["summary"] = serde_json::Value::String(summary.clone());
+                                if let Some(out) = output {
+                                    call["output"] = out.clone();
+                                }
+                                if let Some(inp) = input {
+                                    call["args"] = inp.clone();
+                                }
+                                call["status"] = serde_json::Value::String(match status {
+                                    crate::ai::events::ToolResultStatus::Completed => "completed".into(),
+                                    crate::ai::events::ToolResultStatus::Failed => "failed".into(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            crate::ai::events::AiEvent::Done {
+                usage,
+                final_message,
+                cancelled,
+                ..
+            } => {
+                let mut segs = self.turn_segments.lock().unwrap();
+                finalize_active_thinking(&mut segs);
+                if *cancelled {
+                    for seg in segs.iter_mut() {
+                        if seg.get("type").and_then(|v| v.as_str()) == Some("tool_call") {
+                            if let Some(call) = seg.get_mut("call") {
+                                if call.get("status").and_then(|v| v.as_str()) == Some("running") {
+                                    call["status"] = serde_json::Value::String("stopped".into());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let state = self.app_handle.state::<AppState>();
+                let mut entry = state.llm_usage.entry(self.conversation_id.clone()).or_default();
+                let accumulated = accumulate_usage(&entry, usage);
+                *entry = accumulated;
+
+                let streamed_text = self.turn_text.lock().unwrap().clone();
+                let content = if !final_message.is_empty() {
+                    final_message.clone()
+                } else {
+                    streamed_text
+                };
+
+                let session_json = if !segs.is_empty() {
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    Some(serde_json::json!({
+                        "segments": *segs,
+                        "startedAt": self.turn_start_ms,
+                        "durationMs": (now_ms - self.turn_start_ms).max(0),
+                        "active": false,
+                    }).to_string())
+                } else {
+                    None
+                };
+
+                if !content.is_empty() || session_json.is_some() {
+                    let mem_mgr = state.memory_manager.clone();
+                    let conv_id = self.conversation_id.clone();
+                    let msg_id = self.assistant_message_id.clone()
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                    let now = chrono::Utc::now().timestamp();
+                    tauri::async_runtime::spawn(async move {
+                        let msg = crate::ai::memory::ChatMessage {
+                            id: msg_id,
+                            conversation_id: conv_id,
+                            role: "assistant".into(),
+                            content,
+                            session_json,
+                            created_at: now,
+                        };
+                        if let Err(e) = mem_mgr.save_message(msg).await {
+                            log::error!("Failed to save assistant chat message: {e}");
+                        }
+                    });
+                }
+            }
+            _ => {}
         }
         let _ = self.channel.send(event);
     }
     fn dml_approval(&self, payload: crate::ai::events::DmlApprovalPayload) {
+        let mut segs = self.turn_segments.lock().unwrap();
+        finalize_active_thinking(&mut segs);
         let _ = self.app_handle.emit("ai:dml_approval", payload);
     }
     fn permission_request(&self, payload: crate::ai::events::AgentPermissionPayload) {
+        let mut segs = self.turn_segments.lock().unwrap();
+        finalize_active_thinking(&mut segs);
         let _ = self.app_handle.emit("ai:agent_permission", payload);
     }
 }
@@ -2597,6 +2737,7 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
     message: String,
     system_prompt: String,
     applied_memory_count: usize,
+    assistant_message_id: Option<String>,
 ) -> Result<(), String> {
     let conv = state
         .conversations
@@ -2736,6 +2877,11 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
     let sink: Arc<dyn AgentSink> = Arc::new(TauriSink {
         channel,
         app_handle: app_handle.clone(),
+        conversation_id: conversation_id.clone(),
+        assistant_message_id,
+        turn_text: Arc::new(std::sync::Mutex::new(String::new())),
+        turn_segments: Arc::new(std::sync::Mutex::new(Vec::new())),
+        turn_start_ms: chrono::Utc::now().timestamp_millis(),
     });
     let app_err = app_handle.clone();
     let conv_err = conv.clone();
@@ -2807,6 +2953,8 @@ pub async fn ai_chat(
     conversation_id: String,
     connection_id: String,
     profile_id: Option<String>,
+    user_message_id: Option<String>,
+    assistant_message_id: Option<String>,
 ) -> Result<(), String> {
     // A chat turn is user activity: reset the idle clock so the sleep-time
     // compute daemon does not fire while the user is actively working.
@@ -2822,6 +2970,8 @@ pub async fn ai_chat(
         conversation_id,
         connection_id,
         profile_id,
+        user_message_id,
+        assistant_message_id,
     )
     .instrument(span)
     .await
@@ -2835,6 +2985,8 @@ async fn ai_chat_impl(
     conversation_id: String,
     connection_id: String,
     profile_id: Option<String>,
+    user_message_id: Option<String>,
+    assistant_message_id: Option<String>,
 ) -> Result<(), String> {
     // Verify a database connection is active before starting the AI agent.
     // Without this, the agent wastes tokens and time on tools that will all
@@ -2943,10 +3095,11 @@ async fn ai_chat_impl(
         })
         .await;
 
+    let user_msg_id = user_message_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let _ = state
         .memory_manager
         .save_message(crate::ai::memory::ChatMessage {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: user_msg_id,
             conversation_id: conversation_id.clone(),
             role: "user".into(),
             content: message.clone(),
@@ -2980,6 +3133,7 @@ async fn ai_chat_impl(
         message,
         system_prompt,
         applied_memory_count,
+        assistant_message_id,
     )
     .await;
 
@@ -3202,6 +3356,7 @@ pub async fn execute_dml(
         system_prompt,
         // Resume-after-DML builds no memory block, so no rules were applied.
         0,
+        None,
     )
     .await?;
 
@@ -3510,6 +3665,14 @@ pub async fn load_chat_conversation(
     conversation_id: String,
 ) -> Result<Vec<crate::ai::memory::ChatMessage>, String> {
     state.memory_manager.list_messages(&conversation_id).await
+}
+
+#[tauri::command]
+pub async fn save_chat_message(
+    state: State<'_, AppState>,
+    message: crate::ai::memory::ChatMessage,
+) -> Result<(), String> {
+    state.memory_manager.save_message(message).await
 }
 
 #[tauri::command]
@@ -5024,5 +5187,186 @@ mod manual_memory_injection_tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].signal, "explicit_request");
         assert_eq!(listed[0].origin, crate::ai::memory::Origin::Owner);
+    }
+
+    #[tokio::test]
+    async fn save_and_load_chat_message_commands_persist_full_turn_session() {
+        let state = state();
+        let app = tauri::test::mock_app();
+        app.manage(state);
+        let app_state = app.state::<AppState>();
+
+        // Seed conversation
+        app_state
+            .memory_manager
+            .save_conversation(crate::ai::memory::ChatConversation {
+                id: "conv-test".into(),
+                connection_id: "conn-test".into(),
+                title: "Test".into(),
+                archived: false,
+                created_at: 1000,
+                updated_at: 1000,
+            })
+            .await
+            .unwrap();
+
+        let session_json = serde_json::json!({
+            "segments": [
+                {
+                    "type": "thinking",
+                    "content": "Analyzing tables...",
+                    "streaming": false,
+                    "startedAt": 1000,
+                    "durationMs": 250
+                },
+                {
+                    "type": "tool_call",
+                    "call": {
+                        "id": "call-1",
+                        "name": "run_readonly_query",
+                        "args": {"sql": "SELECT 1"},
+                        "summary": "1 row",
+                        "status": "completed"
+                    }
+                }
+            ],
+            "startedAt": 1000,
+            "durationMs": 500,
+            "active": false
+        })
+        .to_string();
+
+        let msg = crate::ai::memory::ChatMessage {
+            id: "msg-asst-1".into(),
+            conversation_id: "conv-test".into(),
+            role: "assistant".into(),
+            content: "Here is the result: 1".into(),
+            session_json: Some(session_json),
+            created_at: 1000,
+        };
+
+        super::save_chat_message(app_state.clone(), msg)
+            .await
+            .unwrap();
+
+        let loaded = super::load_chat_conversation(app_state, "conv-test".into())
+            .await
+            .unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "msg-asst-1");
+        assert_eq!(loaded[0].role, "assistant");
+        assert_eq!(loaded[0].content, "Here is the result: 1");
+        assert!(loaded[0].session_json.is_some());
+
+        let session_val: serde_json::Value =
+            serde_json::from_str(loaded[0].session_json.as_ref().unwrap()).unwrap();
+        assert_eq!(session_val["segments"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn tauri_sink_accumulates_events_and_persists_full_turn_session() {
+        use crate::ai::agent::AgentSink;
+        use crate::ai::events::{AiEvent, TokenUsage, ToolCallInfo, ToolResultStatus};
+
+        let state = state();
+        let app = tauri::test::mock_app();
+        app.manage(state);
+        let app_state = app.state::<AppState>();
+
+        let channel = tauri::ipc::Channel::new(|_| Ok(()));
+        let conv_id = "conv-sink-test".to_string();
+        let assistant_msg_id = "asst-msg-123".to_string();
+
+        let sink = super::TauriSink {
+            channel,
+            app_handle: app.handle().clone(),
+            conversation_id: conv_id.clone(),
+            assistant_message_id: Some(assistant_msg_id.clone()),
+            turn_text: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            turn_segments: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            turn_start_ms: chrono::Utc::now().timestamp_millis(),
+        };
+
+        // 1. Thinking delta
+        sink.event(AiEvent::Thinking {
+            content: "Checking database schema...".into(),
+        });
+
+        // 2. Tool calls
+        sink.event(AiEvent::ToolCalls {
+            tools: vec![ToolCallInfo {
+                id: "call-query-1".into(),
+                name: "run_readonly_query".into(),
+                args: serde_json::json!({ "sql": "SELECT COUNT(*) FROM users" }),
+            }],
+        });
+
+        // 3. Tool result
+        sink.event(AiEvent::ToolResult {
+            id: "call-query-1".into(),
+            tool: "run_readonly_query".into(),
+            summary: "1 row".into(),
+            output: Some(serde_json::json!({
+                "type": "query_result",
+                "columns": [{"name": "count", "type": "int"}],
+                "rows": [["42"]],
+                "row_count": 1
+            })),
+            input: Some(serde_json::json!({ "sql": "SELECT COUNT(*) FROM users" })),
+            status: ToolResultStatus::Completed,
+        });
+
+        // 4. Streamed text
+        sink.event(AiEvent::Text {
+            content: "There are 42 users registered.".into(),
+        });
+
+        // 5. Done event
+        sink.event(AiEvent::Done {
+            conversation_id: "legacy-conn-key".into(), // Deliberately mismatching to verify TauriSink uses its own conversation_id
+            final_message: "".into(), // empty final_message falls back to accumulated streamed_text
+            usage: TokenUsage {
+                prompt_tokens: 150,
+                completion_tokens: 45,
+                cached_prompt_tokens: 20,
+            },
+            applied_memory_count: 2,
+            cancelled: false,
+        });
+
+        // Give the spawned task a moment to write to SQLite
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let loaded = super::load_chat_conversation(app_state.clone(), conv_id.clone())
+            .await
+            .unwrap();
+        assert_eq!(loaded.len(), 1, "Assistant message must be loaded");
+        assert_eq!(loaded[0].id, assistant_msg_id);
+        assert_eq!(loaded[0].conversation_id, conv_id);
+        assert_eq!(loaded[0].role, "assistant");
+        assert_eq!(loaded[0].content, "There are 42 users registered.");
+
+        assert!(loaded[0].session_json.is_some());
+        let session: serde_json::Value =
+            serde_json::from_str(loaded[0].session_json.as_ref().unwrap()).unwrap();
+        let segments = session["segments"].as_array().unwrap();
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0]["type"], "thinking");
+        assert_eq!(segments[0]["content"], "Checking database schema...");
+        assert_eq!(segments[0]["streaming"], false);
+
+        assert_eq!(segments[1]["type"], "tool_call");
+        assert_eq!(segments[1]["call"]["name"], "run_readonly_query");
+        assert_eq!(segments[1]["call"]["status"], "completed");
+        assert_eq!(segments[1]["call"]["summary"], "1 row");
+        assert_eq!(
+            segments[1]["call"]["output"]["rows"][0][0],
+            "42"
+        );
+
+        // Verify usage was keyed by conv_id
+        let usage = super::get_ai_usage(app_state, conv_id).await.unwrap();
+        assert_eq!(usage["prompt_tokens"], 150);
+        assert_eq!(usage["completion_tokens"], 45);
     }
 }

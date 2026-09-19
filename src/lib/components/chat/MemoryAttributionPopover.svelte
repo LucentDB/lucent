@@ -91,7 +91,7 @@
   {#if ruleIds.length > 0}
     <ul class="attr-rules">
       {#each ruleIds as id (id)}
-        <li class="attr-rule">{id}</li>
+        <li class="attr-rule selectable">{id}</li>
       {/each}
     </ul>
   {:else}

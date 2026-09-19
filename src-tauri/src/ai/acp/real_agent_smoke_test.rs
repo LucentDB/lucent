@@ -363,28 +363,19 @@ async fn real_agent_smoke_opencode() {
     let events = sink.0.lock().unwrap().clone();
     eprintln!("SMOKE events: {events:?}");
 
-    // The agent called the tool: its completed `tool_call_update` maps to a
-    // `ToolResult` whose (title-enriched) name carries the tool.
+    // The agent called the tool: its completed `tool_call_update` reached the
+    // sink AND the tool executed INSIDE Lucent. Both facts live on the same
+    // event — the bridge buffers its structured `query_result` under the MCP
+    // call id (`CorrelatingSink` never forwards it raw) and the driver pops it
+    // onto the agent's `ToolCallUpdate(Completed)`, so a `ToolResult` with a
+    // `query_result` payload can only exist once the agent reported back.
     let agent_side = events.iter().any(|e| {
-        matches!(e, AiEvent::ToolResult { output: None, tool, .. }
-            if tool.contains("run_readonly_query"))
+        matches!(e, AiEvent::ToolResult { output: Some(out), tool, .. }
+            if tool.contains("run_readonly_query") && out["type"] == "query_result")
     });
     assert!(
         agent_side,
-        "the agent's completed tool_call_update for run_readonly_query reached the sink: {events:?}"
-    );
-
-    // The tool executed INSIDE Lucent: the bridge emitted the structured
-    // query-result event (the interactive grid path) — proof the agent's MCP
-    // call crossed the socket into the main process and ran the real tool
-    // against DuckDB.
-    let structured = events.iter().any(|e| {
-        matches!(e, AiEvent::ToolResult { output: Some(out), .. }
-            if out["type"] == "query_result")
-    });
-    assert!(
-        structured,
-        "the bridge's structured query_result event reached the sink: {events:?}"
+        "the agent's completed tool_call_update for run_readonly_query reached the sink with the bridge's structured query_result: {events:?}"
     );
 
     // The turn ended with a final message (stop_reason end_turn).
@@ -398,6 +389,24 @@ async fn real_agent_smoke_opencode() {
         "the agent produced a final message"
     );
     eprintln!("SMOKE final message: {final_message:?}");
+
+    // End-of-turn usage carries a real prompt/completion split. The regression
+    // this guards: only `usage_update` (context-window occupancy) was read, so
+    // `completion_tokens` stayed pinned at 0 in the UI header forever. The
+    // numbers arrive on `PromptResponse.usage`, behind the crate's
+    // `unstable_end_turn_token_usage` feature.
+    let usage = events
+        .iter()
+        .find_map(|e| match e {
+            AiEvent::Done { usage, .. } => Some(usage.clone()),
+            _ => None,
+        })
+        .expect("Done carries usage");
+    eprintln!("SMOKE usage: {usage:?}");
+    assert!(
+        usage.completion_tokens > 0,
+        "the agent's output tokens reached the sink: {usage:?}"
+    );
 
     // The conversation claim was released — follow-up messages can begin.
     assert!(

@@ -13,6 +13,7 @@ import ChatLandingHarness from './ChatLandingHarness.svelte';
 import { QueryClient } from '@tanstack/svelte-query';
 import { history } from '../../stores/history.svelte.ts';
 import { schemaSummary } from '../../stores/schema-summary.svelte.ts';
+import { aiConfig } from '../../stores/ai-config.svelte.ts';
 import { qk, type HistoryFilter } from '../../queries/keys.ts';
 import type { HistoryEntry } from '../../stores/history.svelte.ts';
 
@@ -71,6 +72,9 @@ beforeEach(() => {
   history.setFilterConnection(null);
   history.setFavoritesOnly(false);
   schemaSummary.reset();
+  aiConfig.provider = 'openai';
+  aiConfig.model = 'gpt-4o';
+  aiConfig.acp = null;
 });
 
 afterEach(cleanup);
@@ -143,6 +147,72 @@ describe('ChatLanding — connected', () => {
     expect(strip).toContain('prod');
     expect(strip).toContain('shop_db');
     expect(strip).toContain('gpt-4o');
+  });
+
+  it('shows ACP agent name in context strip instead of gpt-4o when ACP is configured', () => {
+    aiConfig.provider = 'acp';
+    aiConfig.acp = {
+      agentId: 'opencode',
+      command: null,
+      env: {},
+      autoDenyPermissions: false,
+    };
+    const { container } = setup({
+      connected: true,
+      database: 'shop_db',
+      connectionName: 'prod',
+    });
+    const strip = container.querySelector('.context')?.textContent ?? '';
+    expect(strip).toContain('opencode');
+    expect(strip).not.toContain('gpt-4o');
+  });
+
+  it('shows configured model in context strip when another provider is configured', () => {
+    aiConfig.provider = 'anthropic';
+    aiConfig.model = 'claude-3-5-sonnet';
+    aiConfig.acp = null;
+    const { container } = setup({
+      connected: true,
+      database: 'shop_db',
+      connectionName: 'prod',
+    });
+    const strip = container.querySelector('.context')?.textContent ?? '';
+    expect(strip).toContain('claude-3-5-sonnet');
+    expect(strip).not.toContain('gpt-4o');
+  });
+
+  it('shows OpenCode instead of gpt-4o when provider is opencode and model is leftover gpt-4o', () => {
+    aiConfig.provider = 'opencode';
+    aiConfig.model = 'gpt-4o';
+    aiConfig.acp = null;
+    const { container } = setup({
+      connected: true,
+      database: 'shop_db',
+      connectionName: 'prod',
+    });
+    const strip = container.querySelector('.context')?.textContent ?? '';
+    expect(strip.toLowerCase()).toContain('opencode');
+    expect(strip).not.toContain('gpt-4o');
+  });
+
+  it('shows active provider model and ignores stale acp block when switched away from acp', () => {
+    aiConfig.provider = 'anthropic';
+    aiConfig.model = 'claude-3-5-sonnet';
+    // Stale leftover acp block from previous config
+    aiConfig.acp = {
+      agentId: 'opencode',
+      command: null,
+      env: {},
+      autoDenyPermissions: false,
+    };
+    const { container } = setup({
+      connected: true,
+      database: 'shop_db',
+      connectionName: 'prod',
+    });
+    const strip = container.querySelector('.context')?.textContent ?? '';
+    expect(strip).toContain('claude-3-5-sonnet');
+    expect(strip).not.toContain('opencode');
   });
 
   it('does not repeat a name shared by the connection and the database', () => {

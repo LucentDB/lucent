@@ -232,7 +232,7 @@
   <div class="editor-container" bind:this={container}></div>
 
   {#if error}
-    <div class="error-panel">
+    <div class="error-panel selectable">
       <div class="error-header">
         <span class="error-icon">!</span>
         <span class="error-title">Query Failed</span>

@@ -280,7 +280,7 @@
     <!-- Static stand-in: same font metrics, no editor instance. Clicking or
          scrolling into view upgrades it to CodeMirror. -->
     <div
-      class="sql-static"
+      class="sql-static selectable"
       role="button"
       tabindex="0"
       aria-label="Edit SQL cell"

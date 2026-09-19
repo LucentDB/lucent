@@ -38,7 +38,7 @@
   hint="Installed agents become selectable as providers. Lucent's database tools work with any of them."
 >
   {#if error}
-    <p class="error" role="alert">{error}</p>
+    <p class="error selectable" role="alert">{error}</p>
   {/if}
   <AcpRegistryPanel {agents} {loading} {onInstall} {onUninstall} />
 </PaneSection>

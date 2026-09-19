@@ -55,7 +55,9 @@
             <span class="journal-kind">{obs.kind}</span>
             <span class="journal-origin">{obs.origin}</span>
           </div>
-          <div class="journal-payload">{payloadSummary(obs.payload_json)}</div>
+          <div class="journal-payload selectable">
+            {payloadSummary(obs.payload_json)}
+          </div>
           <div class="journal-meta">
             <span>{formatTimestamp(obs.created_at)}</span>
             {#if obs.occurrence_count > 1}

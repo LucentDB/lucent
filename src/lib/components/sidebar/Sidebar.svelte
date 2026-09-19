@@ -253,7 +253,7 @@
   </div>
 
   {#if error}
-    <div class="sidebar-error">{error}</div>
+    <div class="sidebar-error selectable">{error}</div>
   {/if}
 
   <div class="tree">

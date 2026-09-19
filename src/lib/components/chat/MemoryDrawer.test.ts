@@ -542,6 +542,32 @@ describe('MemoryDrawer — accessible tabs (F-I3)', () => {
   });
 });
 
+describe('MemoryDrawer — single-line SQL snippets stay readable', () => {
+  const snippet =
+    'FROM bookings.tickets t JOIN bookings.segments s ON s.ticket_no = t.ticket_no LEFT JOIN bookings.boarding_passes b ON b.ticket_no = s.ticket_no AND b.flight_id = s.flight_id';
+
+  it('renders the whole single-line snippet, not just its beginning', async () => {
+    vi.mocked(listMemories).mockResolvedValue([
+      memory({ key_phrase: 'user_main_relation', sql_snippet: snippet }),
+    ]);
+    const utils = render(MemoryDrawerHarness);
+    await openDrawer(utils);
+
+    const code = await utils.findByText(snippet);
+    expect(code.tagName).toBe('CODE');
+    expect(code.closest('pre')?.classList.contains('sql-snippet')).toBe(true);
+  });
+
+  it('wraps long lines instead of hiding them behind a horizontal scrollbar', () => {
+    const styles =
+      memoryDrawerSource.match(/<style>([\s\S]*?)<\/style>/)?.[1] ?? '';
+    const rule = styles.match(/\.sql-snippet\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(rule).toMatch(/white-space:\s*pre-wrap/);
+    expect(rule).toMatch(/overflow-wrap:\s*anywhere/);
+    expect(rule).not.toMatch(/overflow-x:\s*auto/);
+  });
+});
+
 describe('MemoryDrawer — reduced motion & typography (F-I7, F-I8)', () => {
   it('disables the drawer slide-in under prefers-reduced-motion', () => {
     expect(memoryDrawerSource).toMatch(

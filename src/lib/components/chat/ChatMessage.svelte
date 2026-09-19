@@ -56,14 +56,14 @@
   }
 </script>
 
-<div class="message {message.role}" class:grouped>
+<div class="message {message.role}" class:grouped data-message-id={message.id}>
   <div class="bubble">
-    {#if message.session}
+    {#if message.session && message.session.segments.length > 0}
       <WorkSession session={message.session} onToggle={handleSessionToggle} />
     {/if}
 
     {#if message.content}
-      <div class="text">{@html rendered}</div>
+      <div class="text selectable">{@html rendered}</div>
     {/if}
 
     {#if message.dmlApproval}

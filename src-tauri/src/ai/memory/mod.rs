@@ -1066,7 +1066,8 @@ impl MemoryManager {
             "INSERT INTO chat_conversations (id, connection_id, title, archived, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(id) DO UPDATE SET
-                title = excluded.title,
+                title = CASE WHEN title = '' OR title = 'New Conversation' THEN excluded.title ELSE title END,
+                connection_id = CASE WHEN excluded.connection_id != '' THEN excluded.connection_id ELSE connection_id END,
                 archived = excluded.archived,
                 updated_at = excluded.updated_at",
             params![conv.id, conv.connection_id, conv.title, conv.archived as i64, conv.created_at, conv.updated_at],
@@ -1119,6 +1120,19 @@ impl MemoryManager {
 
     pub async fn save_message(&self, msg: ChatMessage) -> Result<(), String> {
         let guard = self.conn.lock().await;
+        // Ensure parent conversation row exists so foreign key constraints are satisfied
+        // even if message persistence races conversation creation.
+        guard.execute(
+            "INSERT OR IGNORE INTO chat_conversations (id, connection_id, title, archived, created_at, updated_at)
+             VALUES (?1, '', 'New Conversation', 0, ?2, ?2)",
+            params![msg.conversation_id, msg.created_at],
+        ).map_err(|e| format!("failed to ensure parent conversation: {e}"))?;
+
+        guard.execute(
+            "UPDATE chat_conversations SET updated_at = ?1 WHERE id = ?2",
+            params![msg.created_at, msg.conversation_id],
+        ).map_err(|e| format!("failed to update conversation updated_at: {e}"))?;
+
         guard.execute(
             "INSERT INTO chat_messages (id, conversation_id, role, content, session_json, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -1137,7 +1151,7 @@ impl MemoryManager {
                 "SELECT id, conversation_id, role, content, session_json, created_at
              FROM chat_messages
              WHERE conversation_id = ?1
-             ORDER BY created_at ASC",
+             ORDER BY created_at ASC, rowid ASC",
             )
             .map_err(|e| e.to_string())?;
 
@@ -1543,5 +1557,103 @@ mod tests {
         let pending = mgr.list_observations("conn-a", "open").await.unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].occurrence_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_save_and_list_chat_messages_preserves_session_json_and_order() {
+        let mgr = MemoryManager::open_in_memory().unwrap();
+        mgr.save_conversation(ChatConversation {
+            id: "conv-1".into(),
+            connection_id: "conn-1".into(),
+            title: "Test Conv".into(),
+            archived: false,
+            created_at: 1000,
+            updated_at: 1000,
+        })
+        .await
+        .unwrap();
+
+        let user_msg = ChatMessage {
+            id: "msg-user-1".into(),
+            conversation_id: "conv-1".into(),
+            role: "user".into(),
+            content: "Show me all users".into(),
+            session_json: None,
+            created_at: 1000,
+        };
+        mgr.save_message(user_msg).await.unwrap();
+
+        let session_payload = serde_json::json!({
+            "segments": [
+                {
+                    "type": "thinking",
+                    "content": "Analyzing query and schemas...",
+                    "streaming": false,
+                    "startedAt": 1000,
+                    "durationMs": 450
+                },
+                {
+                    "type": "tool_call",
+                    "call": {
+                        "id": "tc-1",
+                        "name": "run_readonly_query",
+                        "args": { "sql": "SELECT * FROM users LIMIT 10" },
+                        "summary": "10 rows",
+                        "status": "completed",
+                        "output": {
+                            "type": "query_result",
+                            "columns": [{"name": "id", "type": "int"}, {"name": "name", "type": "text"}],
+                            "rows": [["1", "Alice"], ["2", "Bob"]],
+                            "row_count": 2
+                        }
+                    }
+                }
+            ],
+            "startedAt": 1000,
+            "durationMs": 1200,
+            "active": false
+        });
+
+        let assistant_msg = ChatMessage {
+            id: "msg-asst-1".into(),
+            conversation_id: "conv-1".into(),
+            role: "assistant".into(),
+            content: "Found 2 users in the database.".into(),
+            session_json: Some(session_payload.to_string()),
+            created_at: 1000, // Same timestamp to verify rowid tie-breaker
+        };
+        mgr.save_message(assistant_msg).await.unwrap();
+
+        let listed = mgr.list_messages("conv-1").await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].role, "user");
+        assert_eq!(listed[0].content, "Show me all users");
+        assert!(listed[0].session_json.is_none());
+
+        assert_eq!(listed[1].role, "assistant");
+        assert_eq!(listed[1].content, "Found 2 users in the database.");
+        assert!(listed[1].session_json.is_some());
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(listed[1].session_json.as_ref().unwrap()).unwrap();
+        assert_eq!(parsed["segments"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["segments"][0]["type"], "thinking");
+        assert_eq!(parsed["segments"][1]["type"], "tool_call");
+        assert_eq!(parsed["segments"][1]["call"]["status"], "completed");
+
+        // Test conflict update with same ID
+        let updated_asst = ChatMessage {
+            id: "msg-asst-1".into(),
+            conversation_id: "conv-1".into(),
+            role: "assistant".into(),
+            content: "Updated content.".into(),
+            session_json: listed[1].session_json.clone(),
+            created_at: 1000,
+        };
+        mgr.save_message(updated_asst).await.unwrap();
+
+        let listed_after = mgr.list_messages("conv-1").await.unwrap();
+        assert_eq!(listed_after.len(), 2, "conflict update must not duplicate row");
+        assert_eq!(listed_after[1].content, "Updated content.");
     }
 }

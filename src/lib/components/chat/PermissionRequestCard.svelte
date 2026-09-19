@@ -18,7 +18,7 @@
 <div class="perm-card">
   <div class="perm-hdr">
     <span class="perm-icon">🛡️</span>
-    <span class="perm-title">{permission.title}</span>
+    <span class="perm-title selectable">{permission.title}</span>
     <button
       class="perm-close"
       aria-label="Dismiss permission request"
@@ -26,11 +26,11 @@
       onclick={onReject}>×</button
     >
   </div>
-  <p class="perm-desc">{permission.description}</p>
+  <p class="perm-desc selectable">{permission.description}</p>
   {#if permission.options.length > 0}
     <div class="perm-options">
       {#each permission.options as opt (opt.id)}
-        <span class="perm-option">{opt.name}</span>
+        <span class="perm-option selectable">{opt.name}</span>
       {/each}
     </div>
   {/if}

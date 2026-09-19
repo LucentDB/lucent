@@ -577,7 +577,7 @@
           </div>
 
           {#if statusMessage}
-            <div class="status-banner">{statusMessage}</div>
+            <div class="status-banner selectable">{statusMessage}</div>
           {/if}
 
           <div class="drawer-nav" role="tablist" aria-label="Memory views">
@@ -659,9 +659,10 @@
                         >{m.source_trust}</span
                       >
                     </div>
-                    <div class="rule-text">{m.rule_text}</div>
+                    <div class="rule-text selectable">{m.rule_text}</div>
                     {#if m.sql_snippet}
-                      <pre class="sql-snippet"><code>{m.sql_snippet}</code
+                      <pre class="sql-snippet selectable"><code
+                          >{m.sql_snippet}</code
                         ></pre>
                     {/if}
                     <div class="card-footer">
@@ -707,9 +708,10 @@
                         <span class="origin-pill">{m.origin}</span>
                       {/if}
                     </div>
-                    <div class="rule-text">{m.rule_text}</div>
+                    <div class="rule-text selectable">{m.rule_text}</div>
                     {#if m.sql_snippet}
-                      <pre class="sql-snippet"><code>{m.sql_snippet}</code
+                      <pre class="sql-snippet selectable"><code
+                          >{m.sql_snippet}</code
                         ></pre>
                     {/if}
                   </div>
@@ -733,9 +735,11 @@
                         <span class="verified-tag">CONFIRMED</span>
                       {/if}
                     </div>
-                    <div class="rule-text">{m.rule_text}</div>
+                    <div class="rule-text selectable">{m.rule_text}</div>
                     {#if m.steps_json}
-                      <pre class="sql-snippet"><code>{m.steps_json}</code></pre>
+                      <pre class="sql-snippet selectable"><code
+                          >{m.steps_json}</code
+                        ></pre>
                     {/if}
                   </div>
                 {/each}
@@ -759,7 +763,7 @@
                       <span class="key-phrase">{m.key_phrase}</span>
                       <span class="archived-tag">ARCHIVED</span>
                     </div>
-                    <div class="rule-text">{m.rule_text}</div>
+                    <div class="rule-text selectable">{m.rule_text}</div>
                     <div class="card-footer">
                       <span class="meta"
                         >Last accessed: {new Date(
@@ -798,8 +802,8 @@
                       <span class="drift-badge">SCHEMA DRIFT</span>
                       <span class="key-phrase">{alert.table_name}</span>
                     </div>
-                    <div class="drift-reason">{alert.reason}</div>
-                    <div class="rule-text">{alert.rule_text}</div>
+                    <div class="drift-reason selectable">{alert.reason}</div>
+                    <div class="rule-text selectable">{alert.rule_text}</div>
                     <div class="card-footer">
                       <div class="card-actions">
                         <button
@@ -839,11 +843,12 @@
                         <span class="verified-tag">VERIFIED</span>
                       {/if}
                     </div>
-                    <div class="prompt-text">
+                    <div class="prompt-text selectable">
                       <strong>Prompt:</strong>
                       {q.natural_prompt}
                     </div>
-                    <pre class="sql-snippet"><code>{q.sql_text}</code></pre>
+                    <pre class="sql-snippet selectable"><code>{q.sql_text}</code
+                      ></pre>
                     <div class="card-footer">
                       <span class="meta"
                         >Runs: {q.run_count} · Tables: {q.tables_used.join(
@@ -883,7 +888,7 @@
       >
         <h3>Add Learned Rule</h3>
         {#if addError}
-          <div class="error-banner">{addError}</div>
+          <div class="error-banner selectable">{addError}</div>
         {/if}
         <div class="form-group">
           <label for="newCategory">Category</label>
@@ -951,7 +956,7 @@
       >
         <h3>Import Markdown Rules (LUCENT.md)</h3>
         {#if importError}
-          <div class="error-banner">{importError}</div>
+          <div class="error-banner selectable">{importError}</div>
         {/if}
         <div class="form-group">
           <label for="importMarkdown">Paste Markdown Content</label>
@@ -1252,7 +1257,13 @@
     border-radius: 4px;
     font-family: var(--font-mono);
     font-size: 11px;
-    overflow-x: auto;
+    /* A single-line snippet used to hide behind a horizontal scrollbar: the
+       reader saw the first clause and a scroll track, never the SQL. Wrap the
+       line instead, breaking long identifiers only when there is no other
+       break point, so the whole statement is visible at a glance. */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    tab-size: 2;
     color: var(--accent);
     margin: 0;
   }

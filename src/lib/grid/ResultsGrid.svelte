@@ -675,7 +675,7 @@
         <span class="error-panel-icon">!</span>
         <span class="error-panel-title">Query Failed</span>
       </div>
-      <pre class="error-panel-message">{error}</pre>
+      <pre class="error-panel-message selectable">{error}</pre>
     </div>
   {:else if rows.length === 0}
     <!-- Empty state: no rows returned -->

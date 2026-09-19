@@ -269,6 +269,56 @@ body {
     background var(--transition-normal);
 }
 
+/* ─────────────────────────────────────────────────────────────────────────
+   Selection follows content, not chrome. A native window does not paint a
+   text selection when you drag across a toolbar or a tab strip, so the
+   default here is `none` and data surfaces opt back in with `.selectable`
+   (chat messages, rendered Markdown, tool output, logs, error text).
+   `user-select` inherits, so one class on a content root is enough; the
+   control reset keeps buttons unselectable inside it.
+
+   Form controls and CodeMirror are exempt globally. In WKWebView a `none`
+   ancestor disables selection inside a text control, so they declare
+   `text` explicitly rather than inheriting it.
+   ───────────────────────────────────────────────────────────────────────── */
+body {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+input,
+textarea,
+select,
+[contenteditable],
+.cm-content {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Controls are chrome even when they sit inside selectable content. This
+   reset comes before `.selectable` on purpose: an element explicitly marked
+   `.selectable` (e.g. the notebook's static SQL preview, which is a
+   `role="button"` click-to-edit affordance) opts itself back in, while
+   unmarked controls nested in content stay unselectable. */
+button,
+[role='button'],
+[role='menuitem'],
+[role='menuitemcheckbox'],
+[role='option'],
+[role='tab'],
+summary,
+kbd {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Explicit opt-in for data surfaces. Kept last so it wins over the control
+   reset at equal specificity. */
+.selectable {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 button {
   cursor: pointer;
   font: inherit;

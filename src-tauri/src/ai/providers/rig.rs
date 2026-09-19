@@ -234,20 +234,37 @@ where
             .await
             .map_err(|e| LlmError::Api(e.to_string()))?;
 
+        let mut streamed_text = String::new();
+        let mut streamed_thinking = String::new();
+
         while let Some(item) = stream.next().await {
             match item.map_err(|e| LlmError::Api(e.to_string()))? {
                 StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
+                    streamed_thinking.push_str(&reasoning);
                     on_delta(crate::ai::provider::AgentDelta::Thinking(reasoning));
                 }
                 StreamedAssistantContent::Text(t) => {
+                    streamed_text.push_str(&t.text);
                     on_delta(crate::ai::provider::AgentDelta::Text(t.text));
                 }
                 _ => {}
             }
         }
 
-        let (final_text, thinking, tool_calls) =
+        let (mut final_text, mut thinking, tool_calls) =
             split_assistant_content(stream.choice.into_iter().collect());
+
+        if (final_text.is_none() || final_text.as_ref().map(|t| t.is_empty()).unwrap_or(false))
+            && !streamed_text.is_empty()
+        {
+            final_text = Some(streamed_text);
+        }
+
+        if (thinking.is_none() || thinking.as_ref().map(|t| t.is_empty()).unwrap_or(false))
+            && !streamed_thinking.is_empty()
+        {
+            thinking = Some(streamed_thinking);
+        }
 
         let usage = stream
             .response

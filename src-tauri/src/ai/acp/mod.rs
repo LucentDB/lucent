@@ -710,6 +710,8 @@ mod tests {
         Arc::new(CollectorSink(std::sync::Mutex::new(Vec::new())))
     }
 
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// Points the agent sandbox at a tempdir so session creation never
     /// writes into the real ~/.lucent (kept alive for the test duration).
     fn hermetic_workspace() -> tempfile::TempDir {
@@ -723,6 +725,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_is_reused_within_a_conversation() {
+        let _env_lock = ENV_LOCK.lock().await;
         let _ws = hermetic_workspace();
         let acp = AcpState::new();
         let process = stub_process();
@@ -770,6 +773,7 @@ mod tests {
 
     #[tokio::test]
     async fn different_conversations_get_different_sessions() {
+        let _env_lock = ENV_LOCK.lock().await;
         let _ws = hermetic_workspace();
         let acp = AcpState::new();
         let process = stub_process();
@@ -792,6 +796,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_for_never_touches_a_global_pi_mcp_config() {
+        let _env_lock = ENV_LOCK.lock().await;
         let _ws = hermetic_workspace();
         // Plant a fake user ~/.pi/agent/mcp.json with a sentinel, then point
         // HOME at it — session_for must leave it byte-identical (spec D13).
@@ -821,6 +826,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_for_delivers_opencode_config() {
+        let _env_lock = ENV_LOCK.lock().await;
         let _ws = hermetic_workspace();
         let acp = AcpState::new();
         let process = stub_process();

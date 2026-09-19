@@ -11,6 +11,7 @@ import {
   updateToolResult,
   markStoppedToolCalls,
   finalizeSession,
+  persistConversationMessage,
   updateLast,
   clearRejectedDml,
   type TokenUsage,
@@ -171,6 +172,7 @@ export function handleAiEvent(conversationId: string, e: AiChannelEvent) {
         },
         rulesApplied: e.applied_memory_count ?? 0,
       });
+      void persistConversationMessage(conversationId, messageId);
       // One fetch per completed message — not continuous polling — to refresh
       // the header's conversation totals (the backend accumulates on Done).
       void refreshConversationUsage(conversationId);
@@ -210,7 +212,10 @@ async function refreshConversationUsage(conversationId: string): Promise<void> {
 function finalizeLastMessageSession(conversationId: string) {
   const conv = chat.conversations.find((c) => c.id === conversationId);
   const last = conv?.messages[conv.messages.length - 1];
-  if (last) finalizeSession(conversationId, last.id);
+  if (last) {
+    finalizeSession(conversationId, last.id);
+    void persistConversationMessage(conversationId, last.id);
+  }
 }
 
 export function createAiSession(conversationId: string) {
@@ -277,6 +282,8 @@ export async function sendMessage(
   conversationId: string,
   connectionId: string,
   profileId?: string | null,
+  userMessageId?: string | null,
+  assistantMessageId?: string | null,
 ) {
   chat.isStreaming = true;
   chat.error = null;
@@ -287,6 +294,8 @@ export async function sendMessage(
       conversationId,
       connectionId,
       profileId: profileId ?? null,
+      userMessageId: userMessageId ?? null,
+      assistantMessageId: assistantMessageId ?? null,
     });
   } catch (e) {
     chat.isStreaming = false;
@@ -564,6 +573,12 @@ export async function loadChatConversation(
   conversationId: string,
 ): Promise<PersistedChatMessage[]> {
   return invoke('load_chat_conversation', { conversationId });
+}
+
+export async function saveChatMessage(
+  message: PersistedChatMessage,
+): Promise<void> {
+  return invoke('save_chat_message', { message });
 }
 
 export async function deleteChatConversation(

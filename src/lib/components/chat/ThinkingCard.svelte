@@ -57,7 +57,7 @@
 
   {#if open}
     <div
-      class="tc-body"
+      class="tc-body selectable"
       bind:this={bodyEl}
       transition:slide={{ duration: 150 }}
     >

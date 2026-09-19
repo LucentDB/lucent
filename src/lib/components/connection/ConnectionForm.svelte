@@ -576,12 +576,12 @@
     {#if testResult || testError}
       <div class="test-result-row">
         {#if testResult}
-          <span class="test-badge test-success">
+          <span class="test-badge test-success selectable">
             ✓ {testResult}
           </span>
         {/if}
         {#if testError}
-          <span class="test-badge test-error">
+          <span class="test-badge test-error selectable">
             ✕ {testError}
           </span>
         {/if}

@@ -121,7 +121,7 @@
   </header>
 
   <div
-    class="logs-body"
+    class="logs-body selectable"
     bind:this={listEl}
     onscroll={handleScroll}
     aria-live="polite"

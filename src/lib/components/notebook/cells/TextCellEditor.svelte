@@ -167,7 +167,7 @@
         {#if asMarkdown}
           <MarkdownBody {source} {onToggleTask} />
         {:else}
-          <span class="plain">{source}</span>
+          <span class="plain selectable">{source}</span>
         {/if}
       {:else}
         <span class="placeholder">{placeholder}</span>

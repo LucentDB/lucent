@@ -5,7 +5,10 @@
   // Both use this one component, so the two can no longer drift apart.
   import ChatInput from './ChatInput.svelte';
   import Icon from '../icons/Icon.svelte';
-  import { aiConfig } from '../../stores/ai-config.svelte.ts';
+  import {
+    aiConfig,
+    getActiveAiModelDisplay,
+  } from '../../stores/ai-config.svelte.ts';
   import { history } from '../../stores/history.svelte.ts';
   import { historyQuery } from '../../queries/history.ts';
   import { schemaSummary } from '../../stores/schema-summary.svelte.ts';
@@ -66,6 +69,8 @@
     if (database && database !== connectionName) parts.push(database);
     return parts;
   });
+
+  const activeModel = $derived(getActiveAiModelDisplay());
 </script>
 
 <div class="landing">
@@ -84,33 +89,33 @@
             <span class="part">{part}</span>
           {/each}
         </span>
-        <span class="context-right">
-          {#if aiConfig.model}
-            <span class="model">{aiConfig.model}</span>
-          {/if}
-          {#if onOpenSettings}
-            <button
-              class="settings-btn"
-              onclick={onOpenSettings}
-              title="AI settings"
-              aria-label="AI settings"
-            >
-              <Icon name="settings" size={13} />
-            </button>
-          {/if}
-        </span>
       {:else}
         <span class="context-parts">
           <span class="part">No database connected</span>
         </span>
       {/if}
+      <span class="context-right">
+        {#if activeModel}
+          <span class="model">{activeModel}</span>
+        {/if}
+        {#if onOpenSettings}
+          <button
+            class="settings-btn"
+            onclick={onOpenSettings}
+            title="AI settings"
+            aria-label="AI settings"
+          >
+            <Icon name="settings" size={13} />
+          </button>
+        {/if}
+      </span>
     </div>
 
     <!-- No mark and no title. This panel is resizable down to 280px, where a
          42px badge, an h1 and a centred two-line subtitle pushed the input
          and every suggestion below the fold. The input is the thing you came
          for, so it goes first, and one line says what it will do. -->
-    <p class="intro" style="--i: 1">
+    <p class="intro selectable" style="--i: 1">
       {#if connected}
         Ask about {#if database}<strong>{database}</strong>{:else}your database{/if}.
         Lucent reads the schema and writes the SQL.
@@ -152,7 +157,7 @@
           {:else}
             {#each CAPABILITIES as c (c.text)}
               <div class="item capability">
-                <span class="item-label wrap">{c.text}</span>
+                <span class="item-label wrap selectable">{c.text}</span>
               </div>
             {/each}
           {/if}

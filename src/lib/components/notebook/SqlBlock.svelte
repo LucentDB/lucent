@@ -8,7 +8,7 @@
 </script>
 
 <!-- prettier-ignore -->
-<pre class="sql-block" style="--sql-max-height: {maxHeight}"><code>{#each tokens as token}{#if token.cls}<span class={token.cls}>{token.text}</span>{:else}{token.text}{/if}{/each}</code></pre>
+<pre class="sql-block selectable" style="--sql-max-height: {maxHeight}"><code>{#each tokens as token}{#if token.cls}<span class={token.cls}>{token.text}</span>{:else}{token.text}{/if}{/each}</code></pre>
 
 <style>
   .sql-block {

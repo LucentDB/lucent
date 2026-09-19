@@ -191,9 +191,11 @@
       </div>
 
       {#if cell.error}
-        <div class="cell-error">
+        <div class="cell-error selectable">
           <span class="error-icon" aria-hidden="true">⚠</span>
-          <span class="error-message">{errorMessage(cell.error)}</span>
+          <span class="error-message selectable"
+            >{errorMessage(cell.error)}</span
+          >
         </div>
       {/if}
 
@@ -254,7 +256,7 @@
               onCountAll={() => model.cellView.countAll(cell.id)}
             />
           {:else if isTextOutput}
-            <pre class="text-output">{textContent}</pre>
+            <pre class="text-output selectable">{textContent}</pre>
           {/if}
         </div>
       {/if}
