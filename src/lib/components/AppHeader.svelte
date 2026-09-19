@@ -11,13 +11,43 @@
   import ReadOnlyBadge from './connection/ReadOnlyBadge.svelte';
   import DbIcon from './icons/DbIcon.svelte';
 
+  interface Props {
+    config?: any;
+    connected?: boolean;
+    showAiSettings?: boolean;
+    showChatPanel?: boolean;
+    showLogs?: boolean;
+    hasTabs?: boolean;
+    connectionId?: string;
+    leftWidth?: number;
+    sidebarCollapsed?: boolean;
+    onToggleSidebar?: () => void;
+    onToggleTheme?: () => void;
+    onToggleAi?: () => void;
+    onToggleLogs?: () => void;
+    onToggleChat?: () => void;
+    onTogglePalette?: () => void;
+    onOpenChat?: () => void;
+    tabs?: any[];
+    activeTabId?: string;
+    view?: string;
+    onSwitchTab?: (id: string) => void;
+    onCloseTab?: (id: string) => void;
+    onNewQuery?: () => void;
+    onNotebookSave?: (id: string) => void;
+    onNotebookSaveAs?: (id: string) => void;
+    onNotebookOpen?: () => void;
+    isTabDirty?: (id: string) => boolean;
+    onCloseTabs?: (ids: string[]) => void;
+  }
+
   let {
-    config,
-    connected,
-    showAiSettings,
-    showChatPanel,
+    config = null,
+    connected = false,
+    showAiSettings = false,
+    showChatPanel = false,
     showLogs = false,
-    hasTabs,
+    hasTabs = false,
     connectionId = '',
     leftWidth = 0,
     sidebarCollapsed = false,
@@ -42,7 +72,7 @@
     isTabDirty = (_id: string) => false,
     // batch close callbacks
     onCloseTabs,
-  } = $props();
+  }: Props = $props();
 
   let tabsEl: HTMLDivElement;
   let contextMenu = $state<{
@@ -217,6 +247,7 @@
           class="icon-btn sidebar-toggle"
           onclick={onToggleSidebar}
           title={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
+          aria-label={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}
         >
           <svg
             width="16"
@@ -277,15 +308,19 @@
                   }
                 }}
                 role="button"
-                tabindex="-1">×</span
+                tabindex="-1"
+                aria-label="Close tab">×</span
               >
             </button>
           {/each}
         </div>
 
         <div class="new-tab-group">
-          <button class="new-tab-btn" onclick={handleNewDbTab} title="New Query"
-            >+</button
+          <button
+            class="new-tab-btn"
+            onclick={handleNewDbTab}
+            title="New Query"
+            aria-label="New Query">+</button
           >
         </div>
       {/if}
@@ -311,7 +346,12 @@
     {/if}
 
     <div class="actions">
-      <button class="icon-btn ai-btn" onclick={onToggleAi} title="AI Settings">
+      <button
+        class="icon-btn ai-btn"
+        onclick={onToggleAi}
+        title="AI Settings"
+        aria-label="AI Settings"
+      >
         <svg
           width="18"
           height="18"
@@ -332,6 +372,7 @@
         class:active={showLogs}
         onclick={onToggleLogs}
         title="Worker logs"
+        aria-label="Worker logs"
       >
         <svg
           width="16"
@@ -353,7 +394,11 @@
       </button>
 
       {#if connected}
-        <button class="search-btn" onclick={onTogglePalette}>
+        <button
+          class="search-btn"
+          onclick={onTogglePalette}
+          aria-label="Search command palette"
+        >
           <svg
             width="14"
             height="14"
@@ -370,7 +415,12 @@
           <span class="kbd">⌘K</span>
         </button>
 
-        <button class="icon-btn" onclick={onToggleTheme} title="Toggle theme">
+        <button
+          class="icon-btn"
+          onclick={onToggleTheme}
+          title="Toggle theme"
+          aria-label="Toggle theme"
+        >
           <svg
             width="16"
             height="16"
@@ -415,6 +465,7 @@
           class:full={!hasTabs}
           onclick={onToggleChat}
           title={hasTabs ? 'Toggle AI Chat' : 'AI Chat'}
+          aria-label={hasTabs ? 'Toggle AI Chat' : 'AI Chat'}
         >
           <svg
             width="18"
