@@ -6,10 +6,12 @@
 brew install --cask lucentdb/lucent/lucent
 ```
 
-Or tap first, then install:
+Or tap first, then install — this needs an extra step, because Homebrew 6 and
+later refuse to load a cask from a tap they have not been told to trust:
 
 ```bash
 brew tap lucentdb/lucent
+brew trust lucentdb/lucent
 brew install --cask lucent
 ```
 
