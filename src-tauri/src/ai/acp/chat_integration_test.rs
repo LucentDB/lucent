@@ -92,8 +92,9 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
     let app = tauri::test::mock_app();
     let state = crate::commands::AppState::new();
     *state.ai_config.write().await = cfg;
+    let conv_id = format!("conv-{}", uuid::Uuid::new_v4());
     state.conversations.insert(
-        "conv-1".into(),
+        conv_id.clone(),
         Arc::new(Mutex::new(ConversationState::new("conn-1".into()))),
     );
     app.manage(state);
@@ -117,10 +118,11 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
         &state,
         app.handle(),
         channel,
-        "conv-1".into(),
+        conv_id.clone(),
         "hi".into(),
         "system preamble".into(),
         3,
+        None,
     )
     .await
     .expect("the full ACP turn completes");
@@ -143,10 +145,7 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
             cancelled,
             ..
         } => {
-            // Mirrors the rig path: `DatabaseAgent::chat` keys the Done
-            // event by `ConversationState.connection_id` — the ACP driver
-            // keeps the same contract.
-            assert_eq!(conversation_id, "conn-1");
+            assert_eq!(conversation_id, &conv_id);
             assert_eq!(final_message, "Hello");
             assert_eq!(
                 *applied_memory_count, 3,
@@ -157,12 +156,25 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
         other => panic!("expected Done, got {other:?}"),
     }
 
+    // Verify that TauriSink persisted the assistant response and thinking to memory_manager
+    // with the real conversation_id
+    let persisted_msgs = state.memory_manager.list_messages(&conv_id).await.unwrap();
+    assert_eq!(persisted_msgs.len(), 1, "Assistant message must be persisted for conv_id");
+    assert_eq!(persisted_msgs[0].role, "assistant");
+    assert_eq!(persisted_msgs[0].content, "Hello");
+    assert!(persisted_msgs[0].session_json.is_some());
+    let session_val: serde_json::Value =
+        serde_json::from_str(persisted_msgs[0].session_json.as_ref().unwrap()).unwrap();
+    let segments = session_val["segments"].as_array().unwrap();
+    let thinking_seg = segments.iter().find(|s| s["type"] == "thinking").expect("thinking segment present");
+    assert_eq!(thinking_seg["content"], "thinking…");
+
     // The turn released the conversation claim — follow-up messages can
     // begin (the DML-hold precondition only applies while the prompt is
     // unresolved).
     let conv = state
         .conversations
-        .get("conv-1")
+        .get(&conv_id)
         .expect("conversation present");
     assert!(
         matches!(conv.lock().await.state, AgentState::Idle),
@@ -172,7 +184,7 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
     // Session-per-conversation state is live: the session and the connection
     // task both exist for the next turn.
     assert!(
-        state.acp.sessions.lock().await.contains_key("conv-1"),
+        state.acp.sessions.lock().await.contains_key(&conv_id),
         "session cached for the conversation"
     );
     assert!(

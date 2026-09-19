@@ -26,4 +26,7 @@ flate2 = "1"
 bzip2 = "0.5"
 tar = "0.4"
 zip = "2"
-agent-client-protocol = "1"
+# `unstable_end_turn_token_usage` adds `PromptResponse.usage` — the only
+# ACP channel that carries a real prompt/completion split (opencode sends
+# it; `usage_update` is context-window occupancy only).
+agent-client-protocol = { version = "1", features = ["unstable_end_turn_token_usage"] }

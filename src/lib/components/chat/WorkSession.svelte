@@ -16,7 +16,10 @@
   let kind = $derived(
     session.segments.some((s) => s.type === 'tool_call') ? 'Worked' : 'Thought',
   );
-  let showExpanded = $derived(session.expanded ?? session.active);
+  let isExpanded = $state<boolean | null>(null);
+  let showExpanded = $derived(
+    isExpanded !== null ? isExpanded : (session.expanded ?? session.active),
+  );
 
   function formatDuration(ms: number | undefined): string {
     const seconds = Math.max(1, Math.round((ms ?? 0) / 1000));
@@ -32,7 +35,9 @@
   );
 
   function handleClick() {
-    onToggle?.(!showExpanded);
+    const next = !showExpanded;
+    isExpanded = next;
+    onToggle?.(next);
   }
 
   let bodyEl: HTMLDivElement | undefined = $state();
@@ -90,7 +95,7 @@
             />
           </div>
         {:else if segment.type === 'note'}
-          <div class="segment segment-note">
+          <div class="segment segment-note selectable">
             {@html renderMarkdown(segment.content)}
           </div>
         {:else if segment.type === 'tool_call'}

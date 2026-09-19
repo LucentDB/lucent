@@ -22,6 +22,8 @@ import {
   rejectDml,
   rejectPendingDml,
   saveAiSettings,
+  saveChatMessage,
+  sendMessage,
   type AgentPermissionPayload,
 } from './ai.ts';
 import { aiConfig } from '../stores/ai-config.svelte.ts';
@@ -227,12 +229,20 @@ describe('handleAiEvent', () => {
     expect(invokeMock).toHaveBeenCalledWith('get_ai_usage', {
       conversationId: conv.id,
     });
-    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith('save_chat_message', expect.objectContaining({
+      message: expect.objectContaining({
+        id: 'm1',
+        conversation_id: conv.id,
+      }),
+    }));
   });
 
   it('keeps the previous usage when the get_ai_usage fetch fails', async () => {
     const conv = seedActiveConversationWithMessage('m1');
-    invokeMock.mockRejectedValue(new Error('nope'));
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_ai_usage') throw new Error('nope');
+      return undefined;
+    });
     handleAiEvent(conv.id, {
       type: 'done',
       conversation_id: conv.id,
@@ -245,9 +255,35 @@ describe('handleAiEvent', () => {
       },
     });
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledTimes(1);
+      expect(invokeMock).toHaveBeenCalledWith('get_ai_usage', {
+        conversationId: conv.id,
+      });
     });
     expect(getConv(conv.id).usage).toBeNull();
+  });
+
+  it('persists the completed assistant message on done', async () => {
+    const conv = seedActiveConversationWithMessage('m1');
+    handleAiEvent(conv.id, {
+      type: 'done',
+      conversation_id: conv.id,
+      final_message: 'Finished task',
+      cancelled: false,
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        cached_prompt_tokens: 0,
+      },
+    });
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('save_chat_message', expect.objectContaining({
+        message: expect.objectContaining({
+          id: 'm1',
+          conversation_id: conv.id,
+          role: 'assistant',
+        }),
+      }));
+    });
   });
 
   it('updates the correct tool_call segment by id on tool_result', () => {
@@ -852,3 +888,58 @@ describe('listAiModels', () => {
     });
   });
 });
+
+describe('saveChatMessage', () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+
+  it('invokes save_chat_message with persisted chat message payload', async () => {
+    invokeMock.mockResolvedValue(undefined);
+    const msg = {
+      id: 'msg-1',
+      conversation_id: 'conv-1',
+      role: 'assistant',
+      content: 'Here is your result',
+      session_json: '{"segments":[]}',
+      created_at: 1700000000,
+    };
+    await saveChatMessage(msg);
+    expect(invokeMock).toHaveBeenCalledWith('save_chat_message', {
+      message: msg,
+    });
+  });
+});
+
+describe('sendMessage', () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    chat.isStreaming = false;
+    chat.error = null;
+  });
+
+  it('passes userMessageId and assistantMessageId to invoke ai_chat', async () => {
+    invokeMock.mockResolvedValue(undefined);
+    const channel = {} as any;
+    await sendMessage(
+      'hello',
+      channel,
+      'conv-1',
+      'conn-1',
+      'profile-1',
+      'user-msg-id',
+      'asst-msg-id',
+    );
+    expect(invokeMock).toHaveBeenCalledWith('ai_chat', {
+      message: 'hello',
+      channel,
+      conversationId: 'conv-1',
+      connectionId: 'conn-1',
+      profileId: 'profile-1',
+      userMessageId: 'user-msg-id',
+      assistantMessageId: 'asst-msg-id',
+    });
+    expect(chat.isStreaming).toBe(true);
+  });
+});
+

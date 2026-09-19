@@ -4,8 +4,8 @@ use uuid::Uuid;
 use super::{AiToolContext, ToolError, ToolOutput};
 use crate::ai::memory::{
     compute_memory_doc_hash, extract_and_link_entities, sanitize_rule_text, sanitize_sql_snippet,
-    MemoryCategory, MemoryItem, MemoryScope, MemoryStatus, SourceTrust, MEMORY_FORMAT_VERSION,
-    MEMORY_MODEL_NAME, TOOL_RULE_STABILITY_HOURS,
+    InjectionClass, MemoryCategory, MemoryItem, MemoryScope, MemoryStatus, Origin, SourceTrust,
+    MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME, TOOL_RULE_STABILITY_HOURS,
 };
 use crate::query_history;
 
@@ -152,6 +152,13 @@ impl SaveMemory {
             embedding,
             created_at: now,
             updated_at: now,
+            injection: InjectionClass::Retrieved,
+            preference_key: None,
+            origin: Origin::Agent,
+            steps_json: None,
+            merge_group_id: None,
+            confirmed: false,
+            confirmation_conv_id: None,
         };
 
         // B-C2: write through the app's manager. `open_default()` here would

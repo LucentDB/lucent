@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use lucent_protocol::{ConnectionId, QueryId};
-use tauri::State;
+use tauri::{Manager, State};
 use uuid::Uuid;
 
 use crate::ai::agent::{AgentSink, AgentState, ConversationState};
@@ -294,6 +294,7 @@ pub async fn notebook_restart_session(
 
 #[tauri::command]
 pub async fn notebook_run_cell(
+    app_handle: tauri::AppHandle,
     session_key: String,
     cell_id: String,
     cells: Vec<CellModel>,
@@ -324,7 +325,16 @@ pub async fn notebook_run_cell(
         }
         CellKind::Ai => {
             log::info!("notebook_run_cell: running AI cell {cell_id}");
-            run_ai_cell(cell, &cells, conn_id, &session_key, channel, &state).await
+            run_ai_cell(
+                cell,
+                &cells,
+                conn_id,
+                &session_key,
+                channel,
+                &app_handle,
+                &state,
+            )
+            .await
         }
         CellKind::Markdown => Ok(CellOutput::Text(TextOutput {
             content: cell.source.clone(),
@@ -741,6 +751,7 @@ async fn run_ai_cell(
     conn_id: ConnectionId,
     session_key: &str,
     channel: tauri::ipc::Channel<NotebookEvent>,
+    app_handle: &tauri::AppHandle,
     state: &State<'_, AppState>,
 ) -> Result<CellOutput, CommandError> {
     let start = std::time::Instant::now();
@@ -936,7 +947,7 @@ async fn run_ai_cell(
             full_prompt,
             conv.clone(),
             sink.clone(),
-            cancel,
+            cancel.clone(),
             // Notebook cells build their own prompt and inject no memories.
             0,
         ),
@@ -958,6 +969,35 @@ async fn run_ai_cell(
     if is_acp {
         state.acp.drop_session(&acp_session_key).await;
     }
+
+    // Detached observation capture: the cell run is over (success, error, or
+    // timeout), so a deterministic explicit-request observation is recorded off
+    // the critical path — it must never delay `CellDone`. The memory subsystem
+    // keys on the frontend memory key, falling back to this cell's connection.
+    let observer_handle = app_handle.clone();
+    let observer_cell_source = cell.source.clone();
+    let observer_connection_id = connection_id_str.clone();
+    let observer_cell_id = cell_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = observer_handle.state::<AppState>();
+        let connection_key = state
+            .memory_connection_key
+            .lock()
+            .await
+            .clone()
+            .unwrap_or(observer_connection_id);
+        let turn = crate::ai::memory::TurnOutcome {
+            connection_key,
+            conversation_id: observer_cell_id,
+            turn_id: Uuid::new_v4().to_string(),
+            runtime: crate::ai::memory::TurnRuntime::Notebook,
+            user_text: Some(observer_cell_source),
+            assistant_text: None,
+            executed_sql: vec![],
+            tool_calls: vec![],
+        };
+        crate::ai::memory::record_turn_observations(&state, turn).await;
+    });
 
     let duration_ms = start.elapsed().as_millis() as u64;
     log::info!("AI cell '{cell_id}': agent loop completed in {duration_ms}ms");
@@ -1003,9 +1043,22 @@ async fn run_ai_cell(
             return Err(CommandError::new("agent_error", e.to_string()));
         }
         Err(_) => {
-            log::error!("AI cell '{cell_id}' agent timed out after 300s");
+            log::error!("AI cell '{cell_id}' timed out");
+            cancel.cancel();
+            let stderr_note = if is_acp {
+                if let Some(acp_cfg) = config.acp.as_ref() {
+                    let snip = state.acp.agent_stderr_snippet(&acp_cfg.agent_id);
+                    state.acp.kill_agent(&acp_cfg.agent_id).await;
+                    snip.map(|s| format!(" Last agent output:\n{}", s))
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
             let error = CellError::QueryError {
-                message: "Agent timed out after 300 seconds. Try simplifying the question.".into(),
+                message: format!("Agent timed out after 300 seconds.{}", stderr_note),
                 sql_error: String::new(),
             };
             let _ = channel.send(NotebookEvent::CellError {

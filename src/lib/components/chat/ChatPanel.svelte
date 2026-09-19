@@ -4,14 +4,74 @@
   import ChatLanding from './ChatLanding.svelte';
   import TypingIndicator from './TypingIndicator.svelte';
   import MemoryDrawer from './MemoryDrawer.svelte';
+  import PreviousChatsDrawer from './PreviousChatsDrawer.svelte';
   import {
     chat,
     getConversationTitle,
     formatUsageLine,
+    openConversation,
+    closeOtherTabs,
+    closeTabsToRight,
+    closeTabsToLeft,
+    closeAllTabs,
   } from '../../stores/chat.svelte.ts';
+  import TabContextMenu from '../TabContextMenu.svelte';
+  import type { TabMenuItem } from '../tab-menu.ts';
+  import { computeTurnLayout } from './chat-scroll.ts';
 
   let showMemoryDrawer = $state(false);
   let memoryTriggerEl = $state<HTMLButtonElement | null>(null);
+  let showPreviousChats = $state(false);
+  let previousChatsTriggerEl = $state<HTMLButtonElement | null>(null);
+  let tabMenu = $state<{ x: number; y: number; convId: string } | null>(null);
+
+  async function handleSelectPreviousConv(convId: string) {
+    showPreviousChats = false;
+    await openConversation(convId);
+    onSwitchConv?.(convId);
+  }
+
+  function handleTabContextMenu(e: MouseEvent, convId: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    tabMenu = { x: e.clientX, y: e.clientY, convId };
+  }
+
+  // Same items and icons as the DB tab strip in AppHeader (shared
+  // TabContextMenu), so tab management feels identical everywhere.
+  const tabMenuItems = $derived.by<TabMenuItem[]>(() => {
+    const menu = tabMenu;
+    if (!menu) return [];
+    const id = menu.convId;
+    return [
+      {
+        label: 'Close Tab',
+        icon: 'close',
+        action: () => onCloseConv?.(id),
+      },
+      {
+        label: 'Close Others',
+        icon: 'close-others',
+        action: () => closeOtherTabs(id),
+      },
+      {
+        label: 'Close to the Right',
+        icon: 'close-right',
+        action: () => closeTabsToRight(id),
+      },
+      {
+        label: 'Close to the Left',
+        icon: 'close-left',
+        action: () => closeTabsToLeft(id),
+      },
+      { separator: true },
+      {
+        label: 'Close All',
+        icon: 'close-all',
+        action: () => closeAllTabs(),
+      },
+    ];
+  });
 
   let {
     onSend,
@@ -44,7 +104,93 @@
     onOpenSettings?: () => void;
   } = $props();
 
-  let msgsEl: HTMLDivElement;
+  let msgsEl = $state<HTMLDivElement>();
+  let tailSpacerEl = $state<HTMLDivElement>();
+  // Bound so a panel resize re-runs the turn layout (the effect reads it).
+  let viewportHeight = $state(0);
+
+  // ── Turn scroll choreography ─────────────────────────────────────────
+  // Sending pins the newest user message to the top of the viewport and a
+  // spacer absorbs the height the turn has not used yet, so the thinking and
+  // response stream into empty space below instead of pushing the message
+  // off-screen. Once the response outgrows the viewport the view follows the
+  // tail — unless the reader scrolled away, in which case their position is
+  // left alone. See `chat-scroll.ts` for the geometry.
+  let anchorMessageId: string | null = null;
+  let anchorPending = false;
+  let followTail = true;
+  let lastScrollTop = 0;
+  // The bottom-most scroll position as of the last layout. Comparing against
+  // this instead of a fresh `scrollHeight` keeps "reader returned to the
+  // bottom" from being missed when text streams in between their scroll and
+  // the scroll event that reports it.
+  let lastMaxScrollTop = 0;
+
+  /** "At the bottom" tolerance in px. */
+  const BOTTOM_SLACK = 32;
+
+  function handleSend(m: string) {
+    anchorPending = true;
+    followTail = true;
+    onSend(m);
+  }
+
+  /** Offset of `el`'s top within the scrollable content of `container`. */
+  function offsetWithin(el: HTMLElement, container: HTMLElement): number {
+    return (
+      el.getBoundingClientRect().top -
+      container.getBoundingClientRect().top +
+      container.scrollTop
+    );
+  }
+
+  // Scroll events fire for programmatic scrolls too. Landing at the bottom
+  // re-arms following; an upward move is the reader taking over, and
+  // following stops until they return to the bottom.
+  function handleScroll() {
+    if (!msgsEl) return;
+    const top = msgsEl.scrollTop;
+    if (top >= lastMaxScrollTop - BOTTOM_SLACK) followTail = true;
+    else if (top < lastScrollTop - 2) followTail = false;
+    lastScrollTop = top;
+  }
+
+  function recordScrollPosition() {
+    if (!msgsEl) return;
+    lastScrollTop = msgsEl.scrollTop;
+    lastMaxScrollTop = msgsEl.scrollHeight - msgsEl.clientHeight;
+  }
+
+  function layoutTurn() {
+    if (!msgsEl || !tailSpacerEl) return;
+
+    const anchorEl = anchorMessageId
+      ? msgsEl.querySelector<HTMLElement>(
+          `[data-message-id="${anchorMessageId}"]`,
+        )
+      : null;
+
+    if (!anchorEl) {
+      tailSpacerEl.style.height = '0px';
+      if (followTail) msgsEl.scrollTop = msgsEl.scrollHeight;
+      recordScrollPosition();
+      return;
+    }
+
+    const layout = computeTurnLayout(
+      {
+        viewportHeight: msgsEl.clientHeight,
+        scrollHeight: msgsEl.scrollHeight,
+        spacerHeight: tailSpacerEl.offsetHeight,
+        anchorTop: offsetWithin(anchorEl, msgsEl),
+      },
+      followTail,
+    );
+
+    tailSpacerEl.style.height = `${layout.spacerHeight}px`;
+    if (layout.scrollTop !== null) msgsEl.scrollTop = layout.scrollTop;
+    recordScrollPosition();
+  }
 
   const conv = $derived(
     chat.conversations.find((c) => c.id === chat.activeConversationId),
@@ -58,21 +204,51 @@
   );
 
   $effect(() => {
-    if (hasMessages && msgsEl && conv) {
-      // Read content and segment state to establish reactive dependency —
-      // without this, streaming text appends and thinking segments don't
-      // trigger a scroll because $effect only watches `hasMessages`
-      // (a boolean that never changes once true).
-      const last = conv.messages[conv.messages.length - 1];
-      if (last) {
-        void last.content;
-        void last.session?.segments.length;
-        void last.session?.segments.at(-1)?.type;
+    if (!hasMessages || !msgsEl || !conv) return;
+    // A send pins the newest user message; the rest of the turn keeps the
+    // same anchor. Only a fresh send re-anchors.
+    if (anchorPending) {
+      const anchor = [...conv.messages]
+        .reverse()
+        .find((m) => m.role === 'user');
+      if (anchor) {
+        anchorMessageId = anchor.id;
+        anchorPending = false;
       }
-      requestAnimationFrame(() => {
-        if (msgsEl) msgsEl.scrollTop = msgsEl.scrollHeight;
-      });
     }
+    // Read content and segment state to establish reactive dependency —
+    // without this, streaming text appends and thinking segments don't
+    // trigger a scroll because $effect only watches `hasMessages`
+    // (a boolean that never changes once true).
+    const last = conv.messages[conv.messages.length - 1];
+    if (last) {
+      void last.content;
+      void last.session?.segments.length;
+      void last.session?.segments.at(-1)?.type;
+      // Approval and permission cards appear mid-turn without new text;
+      // they must still scroll into view.
+      void last.dmlApproval;
+      void last.permissionRequest;
+    }
+    // A resized panel changes how much space the turn has.
+    void viewportHeight;
+    requestAnimationFrame(layoutTurn);
+  });
+
+  // Switching conversations starts a fresh scroll state — no stale anchor or
+  // spacer from the previous thread. A conversation created by a send is not
+  // a switch: its anchor must survive (the id goes null -> new, and the send
+  // that caused it sets `anchorPending`).
+  let lastConversationId: string | null = null;
+  $effect(() => {
+    const id = chat.activeConversationId;
+    if (lastConversationId !== null && id !== lastConversationId) {
+      anchorMessageId = null;
+      anchorPending = false;
+      followTail = true;
+      if (tailSpacerEl) tailSpacerEl.style.height = '0px';
+    }
+    lastConversationId = id;
   });
 </script>
 
@@ -85,6 +261,7 @@
           class="conv-tab"
           class:active={c.id === chat.activeConversationId}
           onclick={() => onSwitchConv?.(c.id)}
+          oncontextmenu={(e) => handleTabContextMenu(e, c.id)}
           title={getConversationTitle(c)}
         >
           <span class="conv-tab-label">{getConversationTitle(c)}</span>
@@ -121,8 +298,12 @@
         class="panel-icon-btn"
         class:active={showMemoryDrawer}
         bind:this={memoryTriggerEl}
-        onclick={() => (showMemoryDrawer = !showMemoryDrawer)}
+        onclick={() => {
+          showMemoryDrawer = !showMemoryDrawer;
+          if (showMemoryDrawer) showPreviousChats = false;
+        }}
         title="AI Memory & Rules (Cmd+Shift+M)"
+        aria-label="AI Memory & Rules"
       >
         <svg
           width="13"
@@ -134,16 +315,44 @@
           stroke-linecap="round"
           stroke-linejoin="round"
         >
-          <path
-            d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8z"
-          />
-          <path d="M12 6v6l4 2" />
+          <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z" />
+          <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z" />
+          <path d="M12 5v13" />
+          <path d="M15.5 13a3.5 3.5 0 0 0-3.5 3.5" />
+          <path d="M8.5 13a3.5 3.5 0 0 1 3.5 3.5" />
+        </svg>
+      </button>
+      <button
+        class="panel-icon-btn"
+        class:active={showPreviousChats}
+        bind:this={previousChatsTriggerEl}
+        onclick={() => {
+          showPreviousChats = !showPreviousChats;
+          if (showPreviousChats) showMemoryDrawer = false;
+        }}
+        title="Previous chats"
+        aria-label="Previous chats"
+      >
+        <svg
+          width="13"
+          height="13"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+          <path d="M3 3v5h5" />
+          <path d="M12 7v5l4 2" />
         </svg>
       </button>
       <button
         class="panel-icon-btn"
         onclick={onNewChat}
         title="New conversation"
+        aria-label="New conversation"
       >
         <svg
           width="13"
@@ -167,6 +376,7 @@
         class="panel-icon-btn close-btn"
         onclick={onClose}
         title="Close AI panel"
+        aria-label="Close AI panel"
       >
         <svg
           width="13"
@@ -198,11 +408,16 @@
           tabindex="0"
           onclick={() => (conv.error = null)}
         >
-          <span class="conv-error-text">{conv.error}</span>
+          <span class="conv-error-text selectable">{conv.error}</span>
           <span class="conv-error-dismiss">×</span>
         </div>
       {/if}
-      <div class="messages" bind:this={msgsEl}>
+      <div
+        class="messages"
+        bind:this={msgsEl}
+        bind:clientHeight={viewportHeight}
+        onscroll={handleScroll}
+      >
         {#each conv!.messages as m, i (m.id)}
           <ChatMessage
             message={m}
@@ -219,14 +434,23 @@
         <TypingIndicator
           visible={chat.isStreaming && conv?.messages.at(-1)?.role === 'user'}
         />
+
+        <!-- Absorbs the viewport height a streaming turn has not used yet, so
+             the sent message can sit at the top with the response growing
+             into the space below it (see `chat-scroll.ts`). -->
+        <div
+          class="tail-spacer"
+          bind:this={tailSpacerEl}
+          aria-hidden="true"
+        ></div>
       </div>
 
       <div class="input-area">
-        <ChatInput {onSend} />
+        <ChatInput onSend={handleSend} />
       </div>
     {:else}
       <ChatLanding
-        {onSend}
+        onSend={handleSend}
         {connected}
         {database}
         {connectionName}
@@ -240,6 +464,22 @@
     connectionId={conv?.connectionId}
     triggerEl={memoryTriggerEl}
   />
+
+  <PreviousChatsDrawer
+    bind:isOpen={showPreviousChats}
+    connectionId={conv?.connectionId}
+    triggerEl={previousChatsTriggerEl}
+    onSelectConv={handleSelectPreviousConv}
+  />
+
+  {#if tabMenu}
+    <TabContextMenu
+      x={tabMenu.x}
+      y={tabMenu.y}
+      items={tabMenuItems}
+      onClose={() => (tabMenu = null)}
+    />
+  {/if}
 </aside>
 
 <style>
@@ -414,7 +654,16 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    scroll-behavior: smooth;
+    /* Deliberately no `scroll-behavior: smooth`: programmatic scrolling here
+       tracks streaming text frame by frame, and a smooth animation never
+       catches up — the newest thinking/response ended up below the fold. */
+  }
+
+  /* Sized in px by the turn layout; 0 when nothing is streaming or the
+     response already fills the viewport. */
+  .tail-spacer {
+    flex: 0 0 auto;
+    min-height: 0;
   }
   .messages::-webkit-scrollbar {
     width: 4px;

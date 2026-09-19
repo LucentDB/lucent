@@ -70,7 +70,7 @@
   {#if loading}
     <div class="loading-state">Loading source...</div>
   {:else if error}
-    <div class="error-state">{error}</div>
+    <div class="error-state selectable">{error}</div>
   {:else}
     <div class="editor-wrapper" bind:this={container}></div>
   {/if}

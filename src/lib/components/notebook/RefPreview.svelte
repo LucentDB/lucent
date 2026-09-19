@@ -105,7 +105,7 @@
       {show ? '▾' : '▸'} Resolved query
     </button>
     {#if show}
-      <pre class="preview-sql">{preview}</pre>
+      <pre class="preview-sql selectable">{preview}</pre>
     {/if}
   </div>
 {/if}

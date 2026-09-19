@@ -529,8 +529,8 @@ mod tests {
 
     fn drift_memory(id: &str, connection_key: &str) -> crate::ai::memory::MemoryItem {
         use crate::ai::memory::{
-            compute_memory_doc_hash, MemoryCategory, MemoryItem, MemoryScope, MemoryStatus,
-            SourceTrust, MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME,
+            compute_memory_doc_hash, InjectionClass, MemoryCategory, MemoryItem, MemoryScope,
+            MemoryStatus, Origin, SourceTrust, MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME,
         };
         let rule_text = "Active users are identified by users.id";
         MemoryItem {
@@ -563,6 +563,13 @@ mod tests {
             embedding: vec![],
             created_at: 1000,
             updated_at: 1000,
+            injection: InjectionClass::Retrieved,
+            preference_key: None,
+            origin: Origin::Agent,
+            steps_json: None,
+            merge_group_id: None,
+            confirmed: false,
+            confirmation_conv_id: None,
         }
     }
 

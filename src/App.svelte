@@ -51,11 +51,11 @@
   import { editorSchema } from './lib/stores/editor-schema.svelte.ts';
   import { connections } from './lib/stores/connections.svelte.ts';
   import { indexing } from './lib/stores/indexing.svelte.ts';
+  import { loadAiConfig } from './lib/stores/ai-config.svelte.ts';
   import StatusBar from './lib/components/statusbar/StatusBar.svelte';
   import { addRecentConnection } from './lib/stores/recent.js';
   import {
     chat,
-    createConversation,
     addMessage,
     getActive,
     updateLast,
@@ -65,6 +65,7 @@
     closeTab as closeChatTab,
     switchTab as switchChatTab,
     hydrateConversations,
+    persistConversationMessage,
   } from './lib/stores/chat.svelte.ts';
   import {
     createAiSession,
@@ -239,6 +240,8 @@
     // Restore chat conversations persisted in memory.db. Fired once here, not
     // per panel mount, so it cannot clobber live state on re-render.
     void hydrateConversations();
+    // Load saved AI settings into aiConfig store on startup.
+    void loadAiConfig();
   });
 
   let unlistenMenu = null;
@@ -319,20 +322,23 @@
 
   async function handleAiSend(message) {
     if (!chat.activeConversationId) {
-      const conv = createConversation(activeConnectionId);
-      chat.conversations = [...chat.conversations, conv];
-      chat.activeConversationId = conv.id;
+      createNewChatTab(activeConnectionId);
     }
     const convId = chat.activeConversationId;
 
+    const userMessageId = crypto.randomUUID();
+    const assistantMessageId = crypto.randomUUID();
+
     addMessage(convId, {
-      id: crypto.randomUUID(),
+      id: userMessageId,
       role: 'user',
       content: message,
       createdAt: Date.now(),
     });
+    void persistConversationMessage(convId, userMessageId);
+
     addMessage(convId, {
-      id: crypto.randomUUID(),
+      id: assistantMessageId,
       role: 'assistant',
       content: '',
       createdAt: Date.now(),
@@ -383,6 +389,8 @@
       convId,
       activeConnectionId,
       connections.activeProfileId,
+      userMessageId,
+      assistantMessageId,
     );
   }
 
@@ -1019,7 +1027,6 @@
       {showChatPanel}
       {showLogs}
       {hasTabs}
-      connectionId={activeConnectionId}
       leftWidth={sidebarCollapsed ? SIDEBAR_RAIL_WIDTH : sidebarWidth}
       {sidebarCollapsed}
       onToggleSidebar={() => (sidebarCollapsed = !sidebarCollapsed)}
@@ -1030,7 +1037,6 @@
         if (hasTabs) showChatPanel = !showChatPanel;
       }}
       onTogglePalette={() => (showPalette = true)}
-      onOpenChat={() => (showChatPanel = true)}
       {tabs}
       {activeTabId}
       {view}
@@ -1270,6 +1276,7 @@
               onNewChat={() => createNewChatTab(activeConnectionId)}
               onSwitchConv={switchChatTab}
               onCloseConv={closeChatTab}
+              onClose={goToQuery}
             />
           </div>
         {/if}
@@ -1299,12 +1306,12 @@
 </QueryClientProvider>
 
 {#if queryError}
-  <div class="toast toast-error" onclick={() => (queryError = null)}>
+  <div class="toast toast-error selectable" onclick={() => (queryError = null)}>
     {queryError}
   </div>
 {/if}
 {#if chat.error}
-  <div class="toast toast-error" onclick={() => (chat.error = null)}>
+  <div class="toast toast-error selectable" onclick={() => (chat.error = null)}>
     {chat.error}
   </div>
 {/if}

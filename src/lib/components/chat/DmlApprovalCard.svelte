@@ -35,17 +35,17 @@
       <span class="dml-title">Review DML Statement</span>
     {/if}
   </div>
-  <p class="dml-desc">{dml.description}</p>
-  <pre class="dml-sql"><code>{dml.sql}</code></pre>
+  <p class="dml-desc selectable">{dml.description}</p>
+  <pre class="dml-sql selectable"><code>{dml.sql}</code></pre>
   {#if done}
-    <div class="dml-result">
+    <div class="dml-result selectable">
       <strong>{resultLabel}</strong> rows affected
     </div>
   {:else if error}
-    <div class="dml-error">{error}</div>
+    <div class="dml-error selectable">{error}</div>
   {:else}
     {#if dml.estimatedRowsAffected !== null}
-      <div class="dml-blast">
+      <div class="dml-blast selectable">
         <span class="blast-icon">⚠️</span>
         <span
           >Estimated rows affected: <strong

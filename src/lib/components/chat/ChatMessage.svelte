@@ -4,6 +4,7 @@
   import DmlApprovalCard from './DmlApprovalCard.svelte';
   import PermissionRequestCard from './PermissionRequestCard.svelte';
   import WorkSession from './WorkSession.svelte';
+  import MemoryAttributionPopover from './MemoryAttributionPopover.svelte';
   import { chat, setSessionExpanded } from '../../stores/chat.svelte.ts';
 
   let {
@@ -28,6 +29,19 @@
 
   let rendered = $derived(renderMarkdown(message.content));
 
+  // R24: the pill toggles an attribution popover. The Memory Drawer action
+  // lives inside the popover, so the pill no longer needs a drawer handler to
+  // render — it degrades to showing the applied rules on its own.
+  let showAttribution = $state(false);
+  let pillEl = $state<HTMLButtonElement>();
+
+  // Closing from inside the popover (Escape or the close button) must return
+  // focus to the pill that opened it, not leave it on <body>.
+  function closeAttribution() {
+    showAttribution = false;
+    pillEl?.focus();
+  }
+
   // The DML card lives on a message, but its outcome (rows affected / error,
   // C1) is conversation-level state — derive it so the card re-renders when
   // execute_dml resolves.
@@ -42,14 +56,14 @@
   }
 </script>
 
-<div class="message {message.role}" class:grouped>
+<div class="message {message.role}" class:grouped data-message-id={message.id}>
   <div class="bubble">
-    {#if message.session}
+    {#if message.session && message.session.segments.length > 0}
       <WorkSession session={message.session} onToggle={handleSessionToggle} />
     {/if}
 
     {#if message.content}
-      <div class="text">{@html rendered}</div>
+      <div class="text selectable">{@html rendered}</div>
     {/if}
 
     {#if message.dmlApproval}
@@ -70,7 +84,7 @@
       />
     {/if}
 
-    {#if message.role === 'assistant' && (message.rulesApplied ?? 0) > 0 && onOpenMemoryDrawer}
+    {#if message.role === 'assistant' && (message.rulesApplied ?? 0) > 0}
       <div class="message-meta-row">
         {#if message.usage && message.usage.promptTokens + message.usage.completionTokens > 0}
           <div class="usage">
@@ -79,7 +93,8 @@
         {/if}
         <button
           class="memory-pill"
-          onclick={onOpenMemoryDrawer}
+          bind:this={pillEl}
+          onclick={() => (showAttribution = !showAttribution)}
           aria-label="{message.rulesApplied} {message.rulesApplied === 1
             ? 'rule'
             : 'rules'} applied. Open Memory Drawer"
@@ -89,6 +104,13 @@
           {message.rulesApplied === 1 ? 'rule' : 'rules'} applied
         </button>
       </div>
+      {#if showAttribution}
+        <MemoryAttributionPopover
+          ruleIds={message.appliedRuleIds ?? []}
+          onClose={closeAttribution}
+          onOpenDrawer={onOpenMemoryDrawer}
+        />
+      {/if}
     {:else if message.usage && message.usage.promptTokens + message.usage.completionTokens > 0}
       <div class="usage">
         ~{message.usage.promptTokens + message.usage.completionTokens} tokens

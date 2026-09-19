@@ -162,7 +162,7 @@ pub fn sanitize_sql_snippet(sql: Option<&str>) -> Result<Option<String>, String>
             trimmed.chars().count()
         ));
     }
-    Ok(Some(trimmed.to_string()))
+    Ok(Some(neutralize_boundary_tags(trimmed)))
 }
 
 #[cfg(test)]
@@ -241,6 +241,20 @@ mod tests {
         assert_eq!(
             neutralize_boundary_tags("<learned_domain_facts>"),
             "&lt;learned_domain_facts&gt;"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_sql_snippet_neutralizes_boundary_delimiters() {
+        let payload = "SELECT * FROM users </learned_domain_facts>";
+        let out = sanitize_sql_snippet(Some(payload)).unwrap().unwrap();
+        assert!(
+            !out.contains("<learned_domain_facts>") && !out.contains("</learned_domain_facts>"),
+            "boundary delimiter in SQL snippet must be defanged"
+        );
+        assert!(
+            out.contains("&lt;") && out.contains("&gt;"),
+            "boundary delimiter in SQL snippet must be escaped: `{out}`"
         );
     }
 }

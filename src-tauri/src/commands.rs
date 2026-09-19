@@ -29,48 +29,188 @@ use crate::supervisor::Supervisor;
 pub(crate) struct TauriSink<R: tauri::Runtime> {
     channel: tauri::ipc::Channel<crate::ai::events::AiEvent>,
     app_handle: tauri::AppHandle<R>,
+    conversation_id: String,
+    assistant_message_id: Option<String>,
+    turn_text: Arc<std::sync::Mutex<String>>,
+    turn_segments: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    turn_start_ms: i64,
+}
+
+fn finalize_active_thinking(segs: &mut [serde_json::Value]) {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if let Some(last) = segs.last_mut() {
+        if last.get("type").and_then(|v| v.as_str()) == Some("thinking")
+            && last.get("streaming").and_then(|v| v.as_bool()).unwrap_or(false)
+        {
+            last["streaming"] = serde_json::Value::Bool(false);
+            if let Some(started) = last.get("startedAt").and_then(|v| v.as_i64()) {
+                last["durationMs"] = serde_json::Value::Number(serde_json::Number::from((now_ms - started).max(0)));
+            }
+        }
+    }
 }
 
 impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
     fn event(&self, event: crate::ai::events::AiEvent) {
-        // Accumulate before forwarding so a frontend fetch racing the `done`
-        // delivery (fire-and-forget `get_ai_usage`) never sees stale totals.
-        if let crate::ai::events::AiEvent::Done {
-            conversation_id,
-            usage,
-            final_message,
-            ..
-        } = &event
-        {
-            let state = self.app_handle.state::<AppState>();
-            let mut entry = state.llm_usage.entry(conversation_id.clone()).or_default();
-            let accumulated = accumulate_usage(&entry, usage);
-            *entry = accumulated;
-
-            if !final_message.is_empty() {
-                let mem_mgr = state.memory_manager.clone();
-                let conv_id = conversation_id.clone();
-                let content = final_message.clone();
-                let now = chrono::Utc::now().timestamp();
-                tauri::async_runtime::spawn(async move {
-                    let msg = crate::ai::memory::ChatMessage {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        conversation_id: conv_id,
-                        role: "assistant".into(),
-                        content,
-                        session_json: None,
-                        created_at: now,
-                    };
-                    let _ = mem_mgr.save_message(msg).await;
-                });
+        match &event {
+            crate::ai::events::AiEvent::Thinking { content } => {
+                let mut segs = self.turn_segments.lock().unwrap();
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                if let Some(last) = segs.last_mut() {
+                    if last.get("type").and_then(|v| v.as_str()) == Some("thinking")
+                        && last.get("streaming").and_then(|v| v.as_bool()).unwrap_or(false)
+                    {
+                        if let Some(c) = last.get_mut("content") {
+                            if let Some(s) = c.as_str() {
+                                *c = serde_json::Value::String(format!("{s}{content}"));
+                            }
+                        }
+                    } else {
+                        segs.push(serde_json::json!({
+                            "type": "thinking",
+                            "content": content,
+                            "streaming": true,
+                            "startedAt": now_ms,
+                        }));
+                    }
+                } else {
+                    segs.push(serde_json::json!({
+                        "type": "thinking",
+                        "content": content,
+                        "streaming": true,
+                        "startedAt": now_ms,
+                    }));
+                }
             }
+            crate::ai::events::AiEvent::Text { content } => {
+                let mut segs = self.turn_segments.lock().unwrap();
+                finalize_active_thinking(&mut segs);
+                let mut text = self.turn_text.lock().unwrap();
+                text.push_str(content);
+            }
+            crate::ai::events::AiEvent::Notice { content } => {
+                let mut segs = self.turn_segments.lock().unwrap();
+                finalize_active_thinking(&mut segs);
+                segs.push(serde_json::json!({
+                    "type": "note",
+                    "content": content,
+                }));
+            }
+            crate::ai::events::AiEvent::ToolCalls { tools } => {
+                let mut segs = self.turn_segments.lock().unwrap();
+                finalize_active_thinking(&mut segs);
+                for t in tools {
+                    segs.push(serde_json::json!({
+                        "type": "tool_call",
+                        "call": {
+                            "id": t.id,
+                            "name": t.name,
+                            "args": t.args,
+                            "summary": serde_json::Value::Null,
+                            "status": "running",
+                        }
+                    }));
+                }
+            }
+            crate::ai::events::AiEvent::ToolResult { id, summary, output, input, status, .. } => {
+                let mut segs = self.turn_segments.lock().unwrap();
+                for seg in segs.iter_mut() {
+                    if seg.get("type").and_then(|v| v.as_str()) == Some("tool_call") {
+                        if let Some(call) = seg.get_mut("call") {
+                            if call.get("id").and_then(|v| v.as_str()) == Some(id) {
+                                call["summary"] = serde_json::Value::String(summary.clone());
+                                if let Some(out) = output {
+                                    call["output"] = out.clone();
+                                }
+                                if let Some(inp) = input {
+                                    call["args"] = inp.clone();
+                                }
+                                call["status"] = serde_json::Value::String(match status {
+                                    crate::ai::events::ToolResultStatus::Completed => "completed".into(),
+                                    crate::ai::events::ToolResultStatus::Failed => "failed".into(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            crate::ai::events::AiEvent::Done {
+                usage,
+                final_message,
+                cancelled,
+                ..
+            } => {
+                let mut segs = self.turn_segments.lock().unwrap();
+                finalize_active_thinking(&mut segs);
+                if *cancelled {
+                    for seg in segs.iter_mut() {
+                        if seg.get("type").and_then(|v| v.as_str()) == Some("tool_call") {
+                            if let Some(call) = seg.get_mut("call") {
+                                if call.get("status").and_then(|v| v.as_str()) == Some("running") {
+                                    call["status"] = serde_json::Value::String("stopped".into());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let state = self.app_handle.state::<AppState>();
+                let mut entry = state.llm_usage.entry(self.conversation_id.clone()).or_default();
+                let accumulated = accumulate_usage(&entry, usage);
+                *entry = accumulated;
+
+                let streamed_text = self.turn_text.lock().unwrap().clone();
+                let content = if !final_message.is_empty() {
+                    final_message.clone()
+                } else {
+                    streamed_text
+                };
+
+                let session_json = if !segs.is_empty() {
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    Some(serde_json::json!({
+                        "segments": *segs,
+                        "startedAt": self.turn_start_ms,
+                        "durationMs": (now_ms - self.turn_start_ms).max(0),
+                        "active": false,
+                    }).to_string())
+                } else {
+                    None
+                };
+
+                if !content.is_empty() || session_json.is_some() {
+                    let mem_mgr = state.memory_manager.clone();
+                    let conv_id = self.conversation_id.clone();
+                    let msg_id = self.assistant_message_id.clone()
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                    let now = chrono::Utc::now().timestamp();
+                    tauri::async_runtime::spawn(async move {
+                        let msg = crate::ai::memory::ChatMessage {
+                            id: msg_id,
+                            conversation_id: conv_id,
+                            role: "assistant".into(),
+                            content,
+                            session_json,
+                            created_at: now,
+                        };
+                        if let Err(e) = mem_mgr.save_message(msg).await {
+                            log::error!("Failed to save assistant chat message: {e}");
+                        }
+                    });
+                }
+            }
+            _ => {}
         }
         let _ = self.channel.send(event);
     }
     fn dml_approval(&self, payload: crate::ai::events::DmlApprovalPayload) {
+        let mut segs = self.turn_segments.lock().unwrap();
+        finalize_active_thinking(&mut segs);
         let _ = self.app_handle.emit("ai:dml_approval", payload);
     }
     fn permission_request(&self, payload: crate::ai::events::AgentPermissionPayload) {
+        let mut segs = self.turn_segments.lock().unwrap();
+        finalize_active_thinking(&mut segs);
         let _ = self.app_handle.emit("ai:agent_permission", payload);
     }
 }
@@ -240,6 +380,17 @@ pub struct AppState {
     /// Per-conversation accumulated LLM token usage, keyed by conversation id.
     /// Fed by `TauriSink` on every `AiEvent::Done`; read by `get_ai_usage`.
     pub llm_usage: DashMap<String, TokenUsage>,
+    /// Session-frozen profile snapshots, keyed by conversation id. Built once
+    /// on the conversation's first memory-enabled turn and reused unchanged
+    /// for the rest of the session (rules learned mid-conversation do not
+    /// retroactively alter a prompt already in flight).
+    pub profile_snapshots: Arc<DashMap<String, crate::ai::memory::ProfileSnapshot>>,
+    /// Shared idle clock for the sleep-time compute daemon. Query execution and
+    /// AI chat `touch()` it; the daemon in `lib.rs` reads it to decide when the
+    /// app has been idle long enough to run consolidation. Owned here (rather
+    /// than managed separately by Tauri) so both the hot paths and the daemon
+    /// see one tracker.
+    pub idle_tracker: Arc<crate::ai::memory::IdleTracker>,
     /// Capabilities of the connected driver. `None` when disconnected.
     /// Phase 2 moves this onto `LiveConnection`; `capabilities()` is the seam
     /// that keeps that a small change.
@@ -315,6 +466,8 @@ impl AppState {
             notebook_sessions: DashMap::new(),
             logs: crate::supervisor::new_log_buffer(),
             llm_usage: DashMap::new(),
+            profile_snapshots: Arc::new(DashMap::new()),
+            idle_tracker: Arc::new(crate::ai::memory::IdleTracker::new()),
             indexing,
             acp_http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(60))
@@ -1626,6 +1779,9 @@ pub async fn execute_query(
     sort: Option<Vec<crate::query_paging::SortSpec>>,
     filters: Vec<crate::query_paging::FilterSpec>,
 ) -> Result<ExecuteResult, CommandError> {
+    // Running a query is user activity: reset the idle clock the sleep-time
+    // compute daemon watches so consolidation never fires mid-workload.
+    state.idle_tracker.touch();
     let sort = sort.unwrap_or_default();
     let conn_id = (*state.current_connection_id.lock().await)
         .ok_or_else(|| CommandError::new("QueryError", "not connected — connect first"))?;
@@ -2346,7 +2502,7 @@ async fn build_system_prompt(
     state: &AppState,
     connection_id: &str,
 ) -> (String, crate::ai::mschema::ContextTier) {
-    let (prompt, tier, _) = build_system_prompt_with_query(state, connection_id, None).await;
+    let (prompt, tier, _) = build_system_prompt_with_query(state, connection_id, None, None).await;
     (prompt, tier)
 }
 
@@ -2357,6 +2513,7 @@ async fn build_system_prompt_with_query(
     state: &AppState,
     connection_id: &str,
     query: Option<&str>,
+    conversation_id: Option<&str>,
 ) -> (String, crate::ai::mschema::ContextTier, usize) {
     // Static prompt + tier selection happen under the schema_graph lock. The
     // guard is scoped to this block and dropped before any memory work:
@@ -2421,6 +2578,46 @@ async fn build_system_prompt_with_query(
         .is_memory_enabled(connection_id);
     let mut applied_memory_count = 0usize;
     if enable_memory {
+        // Profile plane: rules that apply to every turn for this connection.
+        // The snapshot is built once for the conversation and then frozen —
+        // a miss builds from the DB, a hit reuses the stored snapshot without
+        // rebuilding, so rules learned mid-session never mutate an in-flight
+        // prompt. Injected before the per-query retrieved block.
+        if let Some(conv) = conversation_id {
+            let cached = state.profile_snapshots.get(conv).map(|r| r.clone());
+            let snapshot = match cached {
+                Some(snapshot) => snapshot,
+                None => {
+                    match crate::ai::memory::ProfileSnapshot::build(
+                        &state.memory_manager,
+                        connection_id,
+                        crate::ai::memory::PROFILE_CAPACITY_TOKENS,
+                    )
+                    .await
+                    {
+                        Ok(snapshot) => {
+                            state
+                                .profile_snapshots
+                                .insert(conv.to_string(), snapshot.clone());
+                            snapshot
+                        }
+                        Err(e) => {
+                            log::warn!("profile snapshot build failed: {e}");
+                            crate::ai::memory::ProfileSnapshot {
+                                connection_key: connection_id.to_string(),
+                                memories: Vec::new(),
+                                built_at: 0,
+                            }
+                        }
+                    }
+                }
+            };
+            if let Some(profile_block) = crate::ai::memory::format_profile_block(&snapshot.memories)
+            {
+                prompt.push_str(&profile_block);
+            }
+        }
+
         if let Some(user_query) = query {
             let q_vec = if let Some(emb) = state.get_or_init_memory_embedder().await {
                 emb.embed_query(user_query).await.ok()
@@ -2540,6 +2737,7 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
     message: String,
     system_prompt: String,
     applied_memory_count: usize,
+    assistant_message_id: Option<String>,
 ) -> Result<(), String> {
     let conv = state
         .conversations
@@ -2679,6 +2877,11 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
     let sink: Arc<dyn AgentSink> = Arc::new(TauriSink {
         channel,
         app_handle: app_handle.clone(),
+        conversation_id: conversation_id.clone(),
+        assistant_message_id,
+        turn_text: Arc::new(std::sync::Mutex::new(String::new())),
+        turn_segments: Arc::new(std::sync::Mutex::new(Vec::new())),
+        turn_start_ms: chrono::Utc::now().timestamp_millis(),
     });
     let app_err = app_handle.clone();
     let conv_err = conv.clone();
@@ -2691,7 +2894,7 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
             system_prompt,
             conv,
             sink,
-            cancel,
+            cancel.clone(),
             applied_memory_count,
         ),
     )
@@ -2713,12 +2916,24 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
         }
         Err(_) => {
             log::error!("Agent timed out after 300s");
+            cancel.cancel();
+            let stderr_note = if is_acp {
+                if let Some(acp_cfg) = config.acp.as_ref() {
+                    let snip = state.acp.agent_stderr_snippet(&acp_cfg.agent_id);
+                    state.acp.kill_agent(&acp_cfg.agent_id).await;
+                    snip.map(|s| format!(" Last agent output:\n{}", s))
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
             let _ = app_err.emit(
                 "ai:error",
                 AiErrorPayload {
                     conversation_id: conversation_id.clone(),
-                    message: "Agent timed out after 300 seconds. Try simplifying the question."
-                        .into(),
+                    message: format!("Agent timed out after 300 seconds. Try simplifying the question.{}", stderr_note)
                 },
             );
             let mut s = conv_err.lock().await;
@@ -2738,7 +2953,12 @@ pub async fn ai_chat(
     conversation_id: String,
     connection_id: String,
     profile_id: Option<String>,
+    user_message_id: Option<String>,
+    assistant_message_id: Option<String>,
 ) -> Result<(), String> {
+    // A chat turn is user activity: reset the idle clock so the sleep-time
+    // compute daemon does not fire while the user is actively working.
+    state.idle_tracker.touch();
     // Correlate the whole turn (including bridged `log::` lines) under the
     // `ai_chat` span.
     let span = crate::trace::ai_chat_span(&conversation_id);
@@ -2750,6 +2970,8 @@ pub async fn ai_chat(
         conversation_id,
         connection_id,
         profile_id,
+        user_message_id,
+        assistant_message_id,
     )
     .instrument(span)
     .await
@@ -2763,6 +2985,8 @@ async fn ai_chat_impl(
     conversation_id: String,
     connection_id: String,
     profile_id: Option<String>,
+    user_message_id: Option<String>,
+    assistant_message_id: Option<String>,
 ) -> Result<(), String> {
     // Verify a database connection is active before starting the AI agent.
     // Without this, the agent wastes tokens and time on tools that will all
@@ -2871,10 +3095,11 @@ async fn ai_chat_impl(
         })
         .await;
 
+    let user_msg_id = user_message_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let _ = state
         .memory_manager
         .save_message(crate::ai::memory::ChatMessage {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: user_msg_id,
             conversation_id: conversation_id.clone(),
             role: "user".into(),
             content: message.clone(),
@@ -2883,11 +3108,24 @@ async fn ai_chat_impl(
         })
         .await;
 
-    let (system_prompt, _context_tier, applied_memory_count) =
-        build_system_prompt_with_query(&state, &connection_id, Some(&message)).await;
+    let (system_prompt, _context_tier, applied_memory_count) = build_system_prompt_with_query(
+        &state,
+        &connection_id,
+        Some(&message),
+        Some(&conversation_id),
+    )
+    .await;
     log::info!("System prompt complete ({} bytes)", system_prompt.len());
 
-    run_agent_turn(
+    // `run_agent_turn` consumes `message`; keep a copy for the observer so an
+    // explicit "remember that …" in this turn is captured at completion. The
+    // memory subsystem keys on the frontend memory key, falling back to the
+    // command's `connection_id` when no connect-time key was captured.
+    let observer_user_text = message.clone();
+    let observer_connection_id = connection_id.clone();
+    let observer_conversation_id = conversation_id.clone();
+
+    let result = run_agent_turn(
         &state,
         &app_handle,
         channel,
@@ -2895,8 +3133,36 @@ async fn ai_chat_impl(
         message,
         system_prompt,
         applied_memory_count,
+        assistant_message_id,
     )
-    .await
+    .await;
+
+    // Detached: observation capture must never delay the final token, so it
+    // runs on its own task after the turn has returned. Covers both the rig and
+    // ACP drivers, which share `run_agent_turn`.
+    let observer_handle = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = observer_handle.state::<AppState>();
+        let connection_key = state
+            .memory_connection_key
+            .lock()
+            .await
+            .clone()
+            .unwrap_or(observer_connection_id);
+        let turn = crate::ai::memory::TurnOutcome {
+            connection_key,
+            conversation_id: observer_conversation_id,
+            turn_id: Uuid::new_v4().to_string(),
+            runtime: crate::ai::memory::TurnRuntime::Rig,
+            user_text: Some(observer_user_text),
+            assistant_text: None,
+            executed_sql: vec![],
+            tool_calls: vec![],
+        };
+        crate::ai::memory::record_turn_observations(&state, turn).await;
+    });
+
+    result
 }
 
 #[tauri::command]
@@ -2942,6 +3208,7 @@ pub async fn ai_cancel(state: State<'_, AppState>, conversation_id: String) -> R
 fn evict_conversation(state: &AppState, conversation_id: &str) {
     state.conversations.remove(conversation_id);
     state.llm_usage.remove(conversation_id);
+    state.profile_snapshots.remove(conversation_id);
 }
 
 #[tauri::command]
@@ -3089,6 +3356,7 @@ pub async fn execute_dml(
         system_prompt,
         // Resume-after-DML builds no memory block, so no rules were applied.
         0,
+        None,
     )
     .await?;
 
@@ -3400,6 +3668,14 @@ pub async fn load_chat_conversation(
 }
 
 #[tauri::command]
+pub async fn save_chat_message(
+    state: State<'_, AppState>,
+    message: crate::ai::memory::ChatMessage,
+) -> Result<(), String> {
+    state.memory_manager.save_message(message).await
+}
+
+#[tauri::command]
 pub async fn delete_chat_conversation(
     state: State<'_, AppState>,
     conversation_id: String,
@@ -3422,6 +3698,37 @@ pub async fn list_memories(
         .await
 }
 
+/// F (R23): raw captured observations for the Journal tab. The memory manager
+/// already could list them; this exposes that through IPC.
+#[tauri::command]
+pub async fn list_observations(
+    state: State<'_, AppState>,
+    connection_key: String,
+    status: String,
+) -> Result<Vec<crate::ai::memory::Observation>, String> {
+    state
+        .memory_manager
+        .list_observations(&connection_key, &status)
+        .await
+}
+
+/// F (R23): the always-on profile plane for the drawer's Profile tab. Derived
+/// from the same connection-scoped list, filtered to `injection == Always`.
+#[tauri::command]
+pub async fn list_always_memories(
+    state: State<'_, AppState>,
+    connection_key: String,
+) -> Result<Vec<crate::ai::memory::MemoryItem>, String> {
+    let all = state
+        .memory_manager
+        .list_memories(&connection_key, false)
+        .await?;
+    Ok(all
+        .into_iter()
+        .filter(|m| m.injection == crate::ai::memory::InjectionClass::Always)
+        .collect())
+}
+
 #[tauri::command]
 pub async fn save_memory_manual(
     state: State<'_, AppState>,
@@ -3432,16 +3739,51 @@ pub async fn save_memory_manual(
     sql_snippet: Option<String>,
     scope: Option<String>,
 ) -> Result<crate::ai::memory::MemoryItem, String> {
+    save_memory_manual_impl(
+        &state,
+        connection_key,
+        category,
+        key_phrase,
+        rule_text,
+        sql_snippet,
+        scope,
+    )
+    .await
+}
+
+/// Finding A: the manual save path is the only production producer of the
+/// always-on profile plane. A `Preference` is a user's explicit standing
+/// instruction, so it is saved with `injection = Always` and the key phrase as
+/// its `preference_key`; every other category stays retrieved-only. The agent
+/// tool path (`ai::tools::memory`) deliberately remains `Retrieved` — an agent
+/// cannot promote itself. Split from the command so tests can exercise the
+/// exact mapping without a Tauri `State`.
+async fn save_memory_manual_impl(
+    state: &AppState,
+    connection_key: String,
+    category: String,
+    key_phrase: String,
+    rule_text: String,
+    sql_snippet: Option<String>,
+    scope: Option<String>,
+) -> Result<crate::ai::memory::MemoryItem, String> {
     use crate::ai::memory::security::{sanitize_rule_text, sanitize_sql_snippet, SourceTrust};
     use crate::ai::memory::{
-        compute_memory_doc_hash, MemoryCategory, MemoryItem, MemoryScope, MemoryStatus,
-        MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME, USER_EXPLICIT_STABILITY_HOURS,
+        compute_memory_doc_hash, InjectionClass, MemoryCategory, MemoryItem, MemoryScope,
+        MemoryStatus, Origin, MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME,
+        USER_EXPLICIT_STABILITY_HOURS,
     };
 
     let sanitized_rule = sanitize_rule_text(&rule_text)?;
     let sanitized_sql = sanitize_sql_snippet(sql_snippet.as_deref())?;
 
     let cat = MemoryCategory::from_str(&category);
+    let is_preference = cat == MemoryCategory::Preference;
+    let preference_key = if is_preference {
+        Some(key_phrase.clone())
+    } else {
+        None
+    };
     let sc = scope
         .as_deref()
         .map(MemoryScope::from_str)
@@ -3511,6 +3853,17 @@ pub async fn save_memory_manual(
         embedding,
         created_at: now,
         updated_at: now,
+        injection: if is_preference {
+            InjectionClass::Always
+        } else {
+            InjectionClass::Retrieved
+        },
+        preference_key,
+        origin: Origin::Agent,
+        steps_json: None,
+        merge_group_id: None,
+        confirmed: false,
+        confirmation_conv_id: None,
     };
 
     state
@@ -3606,6 +3959,16 @@ pub async fn import_memories_markdown(
             };
 
         let id = uuid::Uuid::new_v4().to_string();
+        // Finding A: an imported `preference` is a user-authored standing
+        // instruction, same as a manual save, so it enters the always-on
+        // profile plane with its key phrase as the preference key. All other
+        // imported categories stay retrieved-only.
+        let is_preference = rule.category == crate::ai::memory::MemoryCategory::Preference;
+        let preference_key = if is_preference {
+            Some(rule.key_phrase.clone())
+        } else {
+            None
+        };
         let doc_hash = crate::ai::memory::compute_memory_doc_hash(&format!(
             "{} {}",
             rule.key_phrase, sanitized_rule
@@ -3663,6 +4026,17 @@ pub async fn import_memories_markdown(
             embedding,
             created_at: now,
             updated_at: now,
+            injection: if is_preference {
+                crate::ai::memory::InjectionClass::Always
+            } else {
+                crate::ai::memory::InjectionClass::Retrieved
+            },
+            preference_key,
+            origin: crate::ai::memory::Origin::Agent,
+            steps_json: None,
+            merge_group_id: None,
+            confirmed: false,
+            confirmation_conv_id: None,
         };
         if state
             .memory_manager
@@ -3816,7 +4190,8 @@ mod memory_embedder_lock_scope_tests {
         connection_id: &'static str,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            build_system_prompt_with_query(&state, connection_id, Some("recent invoices")).await;
+            build_system_prompt_with_query(&state, connection_id, Some("recent invoices"), None)
+                .await;
         })
     }
 
@@ -3865,8 +4240,8 @@ mod applied_memory_count_tests {
     use super::{build_system_prompt_with_query, AppState, MemoryEmbedderTestGate};
     use crate::ai::config::AiConfig;
     use crate::ai::memory::{
-        compute_memory_doc_hash, MemoryCategory, MemoryItem, MemoryManager, MemoryScope,
-        MemoryStatus, SourceTrust, MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME,
+        compute_memory_doc_hash, InjectionClass, MemoryCategory, MemoryItem, MemoryManager,
+        MemoryScope, MemoryStatus, Origin, SourceTrust, MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME,
     };
     use std::sync::Arc;
 
@@ -3913,11 +4288,114 @@ mod applied_memory_count_tests {
                 embedding: vec![0.0; 384],
                 created_at: now,
                 updated_at: now,
+                injection: InjectionClass::Retrieved,
+                preference_key: None,
+                origin: Origin::Agent,
+                steps_json: None,
+                merge_group_id: None,
+                confirmed: false,
+                confirmation_conv_id: None,
             },
             &[],
         )
         .await
         .unwrap();
+    }
+
+    /// An `Always`-injected, active, global-scope rule, so `ProfileSnapshot`
+    /// picks it up for any connection.
+    async fn seed_profile_rule(mgr: &MemoryManager, rule_text: &str) {
+        let now = chrono::Utc::now().timestamp();
+        mgr.save_memory(
+            MemoryItem {
+                id: uuid::Uuid::new_v4().to_string(),
+                connection_key: "global".into(),
+                scope: MemoryScope::Global,
+                scope_key: "global".into(),
+                category: MemoryCategory::Preference,
+                key_phrase: "profile_rule".into(),
+                rule_text: rule_text.into(),
+                sql_snippet: None,
+                importance: 0.9,
+                stability_hours: 720.0,
+                last_accessed_at: now,
+                access_count: 1,
+                source_trust: SourceTrust::UserExplicit,
+                source_conv_id: None,
+                source_turn_id: None,
+                source_tool_id: None,
+                status: MemoryStatus::Active,
+                supersedes_id: None,
+                valid_from: now,
+                valid_until: None,
+                learned_at: now,
+                tombstone: false,
+                tombstoned_at: None,
+                doc_hash: compute_memory_doc_hash(rule_text),
+                embedding_model: MEMORY_MODEL_NAME.into(),
+                embedding_version: MEMORY_FORMAT_VERSION,
+                embedding: vec![0.0; 384],
+                created_at: now,
+                updated_at: now,
+                injection: InjectionClass::Always,
+                preference_key: None,
+                origin: Origin::Owner,
+                steps_json: None,
+                merge_group_id: None,
+                confirmed: false,
+                confirmation_conv_id: None,
+            },
+            &[],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// R13: the profile block is session-frozen. A rule inserted *after* a
+    /// conversation's first prompt build must not appear in later prompts for
+    /// that same conversation, while a different conversation id (fresh key)
+    /// sees the new rule. This fails if the get-or-insert ever rebuilds on a
+    /// cache hit, and it exercises the profile-before-retrieved no-query path
+    /// without touching the embedder.
+    #[tokio::test]
+    async fn profile_block_is_frozen_per_conversation_and_ignores_later_rules() {
+        const FIRST: &str = "Always qualify timestamps with the reporting timezone";
+        const SECOND: &str = "Always wrap deletes in an explicit transaction";
+
+        let state = state();
+        *state.ai_config.write().await = AiConfig::default();
+        seed_profile_rule(&state.memory_manager, FIRST).await;
+
+        // First turn for the conversation builds and stores the snapshot.
+        let (first_prompt, _, _) =
+            build_system_prompt_with_query(&state, "conn-freeze", None, Some("conv-freeze")).await;
+        assert!(
+            first_prompt.contains(FIRST),
+            "first build must inject the profile rule"
+        );
+
+        // Rule learned mid-session — must not leak into the frozen snapshot.
+        seed_profile_rule(&state.memory_manager, SECOND).await;
+
+        let (second_prompt, _, _) =
+            build_system_prompt_with_query(&state, "conn-freeze", None, Some("conv-freeze")).await;
+        assert!(
+            !second_prompt.contains(SECOND),
+            "frozen snapshot must not pick up a rule learned after the first build"
+        );
+        assert_eq!(
+            first_prompt, second_prompt,
+            "the same conversation must reuse the byte-identical snapshot"
+        );
+
+        // A different conversation id has its own key and builds fresh, so it
+        // sees the rule learned after the first conversation was frozen.
+        let (other_prompt, _, _) =
+            build_system_prompt_with_query(&state, "conn-freeze", None, Some("conv-other")).await;
+        assert!(
+            other_prompt.contains(SECOND),
+            "a fresh conversation key must see the newly learned rule"
+        );
     }
 
     /// F-C2 producer: the count comes from the retrieval that feeds the
@@ -3930,16 +4408,16 @@ mod applied_memory_count_tests {
         seed_rule(&state.memory_manager, "conn-fc2").await;
 
         let (_prompt, _tier, count) =
-            build_system_prompt_with_query(&state, "conn-fc2", Some("recent invoices")).await;
+            build_system_prompt_with_query(&state, "conn-fc2", Some("recent invoices"), None).await;
         assert_eq!(count, 1, "one matching rule retrieved → one applied");
 
         let (_prompt, _tier, count) =
-            build_system_prompt_with_query(&state, "conn-fc2", None).await;
+            build_system_prompt_with_query(&state, "conn-fc2", None, None).await;
         assert_eq!(count, 0, "no query → no retrieval");
 
         state.ai_config.write().await.enable_ai_memory = false;
         let (_prompt, _tier, count) =
-            build_system_prompt_with_query(&state, "conn-fc2", Some("recent invoices")).await;
+            build_system_prompt_with_query(&state, "conn-fc2", Some("recent invoices"), None).await;
         assert_eq!(count, 0, "disabled memory applies no rules");
     }
 }
@@ -4577,5 +5055,318 @@ mod memory_connection_key_tests {
             "localhost:5432/analytics",
             "inline connects key memories by host:port/database (App.svelte)"
         );
+    }
+}
+
+#[cfg(test)]
+mod observer_seam_tests {
+    use super::AppState;
+    use crate::ai::memory::{record_turn_observations, Origin, TurnOutcome, TurnRuntime};
+
+    #[tokio::test]
+    async fn test_turn_completion_records_explicit_request_observation() {
+        let state = AppState::new();
+        let turn = TurnOutcome {
+            connection_key: "conn-1".into(),
+            conversation_id: "conv-1".into(),
+            turn_id: "turn-1".into(),
+            runtime: TurnRuntime::Rig,
+            user_text: Some("Remember that customers uses uuid string ids".into()),
+            assistant_text: Some("Understood.".into()),
+            executed_sql: vec![],
+            tool_calls: vec![],
+        };
+
+        record_turn_observations(&state, turn).await;
+
+        let obs = state
+            .memory_manager
+            .list_observations("conn-1", "open")
+            .await
+            .unwrap();
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].signal, "explicit_request");
+        assert_eq!(obs[0].origin, Origin::Owner);
+    }
+}
+
+#[cfg(test)]
+mod manual_memory_injection_tests {
+    use super::{save_memory_manual_impl, AppState, MemoryEmbedderTestGate};
+    use crate::ai::memory::{InjectionClass, ProfileSnapshot};
+    use std::sync::Arc;
+    use tauri::Manager;
+
+    /// Isolated in-memory memory DB + an embedder that reports unavailable, so
+    /// these tests never touch the real `memory.db` or load an ONNX model.
+    fn state() -> AppState {
+        let mut state = AppState::new();
+        state.memory_manager = Arc::new(crate::ai::memory::MemoryManager::open_in_memory().unwrap());
+        state.memory_embedder_test_gate = Some(Arc::new(MemoryEmbedderTestGate::unavailable()));
+        state
+    }
+
+    /// Finding A: a Preference saved through the manual path is the production
+    /// producer for the always-on profile plane. It must come back `Always`,
+    /// carry a preference key, and be picked up by `ProfileSnapshot::build`.
+    #[tokio::test]
+    async fn manual_preference_becomes_always_and_reaches_profile() {
+        let state = state();
+        let item = save_memory_manual_impl(
+            &state,
+            "conn-a".into(),
+            "preference".into(),
+            "sql_style".into(),
+            "Always use CTEs over correlated subqueries".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(item.injection, InjectionClass::Always);
+        assert_eq!(item.preference_key.as_deref(), Some("sql_style"));
+
+        let snapshot = ProfileSnapshot::build(&state.memory_manager, "conn-a", 250)
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot.memories.len(),
+            1,
+            "the manual preference must enter the always-on profile"
+        );
+        assert_eq!(snapshot.memories[0].id, item.id);
+    }
+
+    /// Finding A: every non-preference category keeps the retrieved-only
+    /// default and no preference key.
+    #[tokio::test]
+    async fn manual_non_preference_stays_retrieved() {
+        let state = state();
+        let item = save_memory_manual_impl(
+            &state,
+            "conn-a".into(),
+            "quirk".into(),
+            "orders_soft_delete".into(),
+            "orders uses deleted_at IS NULL".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(item.injection, InjectionClass::Retrieved);
+        assert_eq!(item.preference_key, None);
+    }
+
+    /// Finding F: the registered command returns the observation that
+    /// `MemoryManager` recorded. Driven through a real mock `App`/`State` so
+    /// the command signature itself is exercised.
+    #[tokio::test]
+    async fn list_observations_command_returns_recorded_observation() {
+        let state = state();
+        let obs = crate::ai::memory::Observation::new(
+            "conn-1".into(),
+            None,
+            None,
+            "request".into(),
+            crate::ai::memory::Origin::Owner,
+            "explicit_request".into(),
+            1.0,
+            "{}".into(),
+        );
+        state.memory_manager.record_observation(obs).await.unwrap();
+
+        let app = tauri::test::mock_app();
+        app.manage(state);
+        let state = app.state::<AppState>();
+
+        let listed = super::list_observations(state, "conn-1".into(), "open".into())
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].signal, "explicit_request");
+        assert_eq!(listed[0].origin, crate::ai::memory::Origin::Owner);
+    }
+
+    #[tokio::test]
+    async fn save_and_load_chat_message_commands_persist_full_turn_session() {
+        let state = state();
+        let app = tauri::test::mock_app();
+        app.manage(state);
+        let app_state = app.state::<AppState>();
+
+        // Seed conversation
+        app_state
+            .memory_manager
+            .save_conversation(crate::ai::memory::ChatConversation {
+                id: "conv-test".into(),
+                connection_id: "conn-test".into(),
+                title: "Test".into(),
+                archived: false,
+                created_at: 1000,
+                updated_at: 1000,
+            })
+            .await
+            .unwrap();
+
+        let session_json = serde_json::json!({
+            "segments": [
+                {
+                    "type": "thinking",
+                    "content": "Analyzing tables...",
+                    "streaming": false,
+                    "startedAt": 1000,
+                    "durationMs": 250
+                },
+                {
+                    "type": "tool_call",
+                    "call": {
+                        "id": "call-1",
+                        "name": "run_readonly_query",
+                        "args": {"sql": "SELECT 1"},
+                        "summary": "1 row",
+                        "status": "completed"
+                    }
+                }
+            ],
+            "startedAt": 1000,
+            "durationMs": 500,
+            "active": false
+        })
+        .to_string();
+
+        let msg = crate::ai::memory::ChatMessage {
+            id: "msg-asst-1".into(),
+            conversation_id: "conv-test".into(),
+            role: "assistant".into(),
+            content: "Here is the result: 1".into(),
+            session_json: Some(session_json),
+            created_at: 1000,
+        };
+
+        super::save_chat_message(app_state.clone(), msg)
+            .await
+            .unwrap();
+
+        let loaded = super::load_chat_conversation(app_state, "conv-test".into())
+            .await
+            .unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "msg-asst-1");
+        assert_eq!(loaded[0].role, "assistant");
+        assert_eq!(loaded[0].content, "Here is the result: 1");
+        assert!(loaded[0].session_json.is_some());
+
+        let session_val: serde_json::Value =
+            serde_json::from_str(loaded[0].session_json.as_ref().unwrap()).unwrap();
+        assert_eq!(session_val["segments"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn tauri_sink_accumulates_events_and_persists_full_turn_session() {
+        use crate::ai::agent::AgentSink;
+        use crate::ai::events::{AiEvent, TokenUsage, ToolCallInfo, ToolResultStatus};
+
+        let state = state();
+        let app = tauri::test::mock_app();
+        app.manage(state);
+        let app_state = app.state::<AppState>();
+
+        let channel = tauri::ipc::Channel::new(|_| Ok(()));
+        let conv_id = "conv-sink-test".to_string();
+        let assistant_msg_id = "asst-msg-123".to_string();
+
+        let sink = super::TauriSink {
+            channel,
+            app_handle: app.handle().clone(),
+            conversation_id: conv_id.clone(),
+            assistant_message_id: Some(assistant_msg_id.clone()),
+            turn_text: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            turn_segments: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            turn_start_ms: chrono::Utc::now().timestamp_millis(),
+        };
+
+        // 1. Thinking delta
+        sink.event(AiEvent::Thinking {
+            content: "Checking database schema...".into(),
+        });
+
+        // 2. Tool calls
+        sink.event(AiEvent::ToolCalls {
+            tools: vec![ToolCallInfo {
+                id: "call-query-1".into(),
+                name: "run_readonly_query".into(),
+                args: serde_json::json!({ "sql": "SELECT COUNT(*) FROM users" }),
+            }],
+        });
+
+        // 3. Tool result
+        sink.event(AiEvent::ToolResult {
+            id: "call-query-1".into(),
+            tool: "run_readonly_query".into(),
+            summary: "1 row".into(),
+            output: Some(serde_json::json!({
+                "type": "query_result",
+                "columns": [{"name": "count", "type": "int"}],
+                "rows": [["42"]],
+                "row_count": 1
+            })),
+            input: Some(serde_json::json!({ "sql": "SELECT COUNT(*) FROM users" })),
+            status: ToolResultStatus::Completed,
+        });
+
+        // 4. Streamed text
+        sink.event(AiEvent::Text {
+            content: "There are 42 users registered.".into(),
+        });
+
+        // 5. Done event
+        sink.event(AiEvent::Done {
+            conversation_id: "legacy-conn-key".into(), // Deliberately mismatching to verify TauriSink uses its own conversation_id
+            final_message: "".into(), // empty final_message falls back to accumulated streamed_text
+            usage: TokenUsage {
+                prompt_tokens: 150,
+                completion_tokens: 45,
+                cached_prompt_tokens: 20,
+            },
+            applied_memory_count: 2,
+            cancelled: false,
+        });
+
+        // Give the spawned task a moment to write to SQLite
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let loaded = super::load_chat_conversation(app_state.clone(), conv_id.clone())
+            .await
+            .unwrap();
+        assert_eq!(loaded.len(), 1, "Assistant message must be loaded");
+        assert_eq!(loaded[0].id, assistant_msg_id);
+        assert_eq!(loaded[0].conversation_id, conv_id);
+        assert_eq!(loaded[0].role, "assistant");
+        assert_eq!(loaded[0].content, "There are 42 users registered.");
+
+        assert!(loaded[0].session_json.is_some());
+        let session: serde_json::Value =
+            serde_json::from_str(loaded[0].session_json.as_ref().unwrap()).unwrap();
+        let segments = session["segments"].as_array().unwrap();
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0]["type"], "thinking");
+        assert_eq!(segments[0]["content"], "Checking database schema...");
+        assert_eq!(segments[0]["streaming"], false);
+
+        assert_eq!(segments[1]["type"], "tool_call");
+        assert_eq!(segments[1]["call"]["name"], "run_readonly_query");
+        assert_eq!(segments[1]["call"]["status"], "completed");
+        assert_eq!(segments[1]["call"]["summary"], "1 row");
+        assert_eq!(
+            segments[1]["call"]["output"]["rows"][0][0],
+            "42"
+        );
+
+        // Verify usage was keyed by conv_id
+        let usage = super::get_ai_usage(app_state, conv_id).await.unwrap();
+        assert_eq!(usage["prompt_tokens"], 150);
+        assert_eq!(usage["completion_tokens"], 45);
     }
 }

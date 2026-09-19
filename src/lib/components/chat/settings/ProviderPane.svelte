@@ -50,7 +50,7 @@
       description="The agent handles its own credentials."
     >
       {#snippet control()}
-        <code class="agent-id"
+        <code class="agent-id selectable"
           >{aiConfig.acp?.agentId ?? 'no agent selected'}</code
         >
       {/snippet}
@@ -135,7 +135,7 @@
         {#snippet control()}
           <input
             id="ai-endpoint"
-            class="endpoint"
+            class="endpoint selectable"
             type="url"
             bind:value={aiConfig.endpoint}
             placeholder={aiConfig.provider === 'ollama'

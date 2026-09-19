@@ -24,6 +24,10 @@ vi.mock('../../ipc/ai.ts', () => ({
     pruned_session_json_count: 0,
     drift_alerts: [],
   })),
+  // Profile / Journal tabs (Task 15). The backend commands do not ship yet, so
+  // these stubs stand in for the IPC boundary and keep the drawer pure.
+  listObservations: vi.fn(async () => []),
+  listAlwaysMemories: vi.fn(async () => []),
 }));
 
 // The drift store registers a Tauri event listener; stub the boundary and
@@ -36,6 +40,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 
 import MemoryDrawerHarness from './MemoryDrawerHarness.svelte';
+import MemoryDrawer from './MemoryDrawer.svelte';
 import {
   listMemories,
   listGoldenQueries,
@@ -502,7 +507,7 @@ describe('MemoryDrawer — accessible tabs (F-I3)', () => {
 
     const tablist = utils.getByRole('tablist');
     const tabs = utils.getAllByRole('tab');
-    expect(tabs).toHaveLength(4);
+    expect(tabs).toHaveLength(7);
     expect(tablist.contains(tabs[0])).toBe(true);
 
     const selected = tabs.filter(
@@ -525,6 +530,41 @@ describe('MemoryDrawer — accessible tabs (F-I3)', () => {
     );
     expect(tabs[1].getAttribute('tabindex')).toBe('0');
     expect(tabs[0].getAttribute('tabindex')).toBe('-1');
+  });
+
+  it('renders Profile and Journal tabs in MemoryDrawer', async () => {
+    const { getByRole } = render(MemoryDrawer, {
+      isOpen: true,
+      connectionId: 'conn-1',
+    });
+    expect(getByRole('tab', { name: /profile/i })).toBeTruthy();
+    expect(getByRole('tab', { name: /journal/i })).toBeTruthy();
+  });
+});
+
+describe('MemoryDrawer — single-line SQL snippets stay readable', () => {
+  const snippet =
+    'FROM bookings.tickets t JOIN bookings.segments s ON s.ticket_no = t.ticket_no LEFT JOIN bookings.boarding_passes b ON b.ticket_no = s.ticket_no AND b.flight_id = s.flight_id';
+
+  it('renders the whole single-line snippet, not just its beginning', async () => {
+    vi.mocked(listMemories).mockResolvedValue([
+      memory({ key_phrase: 'user_main_relation', sql_snippet: snippet }),
+    ]);
+    const utils = render(MemoryDrawerHarness);
+    await openDrawer(utils);
+
+    const code = await utils.findByText(snippet);
+    expect(code.tagName).toBe('CODE');
+    expect(code.closest('pre')?.classList.contains('sql-snippet')).toBe(true);
+  });
+
+  it('wraps long lines instead of hiding them behind a horizontal scrollbar', () => {
+    const styles =
+      memoryDrawerSource.match(/<style>([\s\S]*?)<\/style>/)?.[1] ?? '';
+    const rule = styles.match(/\.sql-snippet\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(rule).toMatch(/white-space:\s*pre-wrap/);
+    expect(rule).toMatch(/overflow-wrap:\s*anywhere/);
+    expect(rule).not.toMatch(/overflow-x:\s*auto/);
   });
 });
 

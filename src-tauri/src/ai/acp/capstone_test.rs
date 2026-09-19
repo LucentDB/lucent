@@ -326,11 +326,11 @@ async fn capstone_tool_roundtrip_and_dml_approval() {
             AiEvent::ToolResult {
                 output: Some(output),
                 ..
-            } => Some(output.clone()),
+            } if output["type"] == "query_result" => Some(output.clone()),
             _ => None,
         })
         .expect("ToolResult with structured output reached the sink");
-    assert_eq!(tool_result["type"], "query_result");
+    assert_eq!(tool_result["type"], "query_result", "{tool_result}");
     // `row_count` is the number of RETURNED rows (one for count(*)); the
     // count itself is the first cell of the first row.
     assert_eq!(tool_result["row_count"], 1, "one result row: {tool_result}");

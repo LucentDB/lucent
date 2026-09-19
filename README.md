@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="src-tauri/icons/128x128@2x.png" width="96" alt="Lucent logo" />
+<img src="src-tauri/icons/lucent.png" width="96" alt="Lucent logo" />
 
 # Lucent
 
@@ -130,25 +130,21 @@ Prettier, and `cargo clippy -D warnings` on every push.
 ### Releases
 
 Tagged releases are built by `.github/workflows/release.yml` (sign + notarize +
-GitHub Release). The ACP bridge binary (`lucent-db-tools-mcp`) ships inside the
-bundle as a Tauri sidecar. The committed `tauri.conf.json` deliberately has **no**
-`externalBin` (tauri-build's build script requires the sidecar file to exist for
-every cargo build, which would break fresh-checkout dev/test); the sidecar is
-scoped to the release invocation only via `src-tauri/release-sidecar.json`
-(merged with `--config`). To build a release bundle **with** the bridge locally,
-stage the sidecar first, then pass the release-only config:
+GitHub Release). The database driver workers (`lucent-driver-postgres`,
+`lucent-driver-duckdb`) and ACP bridge binary (`lucent-db-tools-mcp`) ship inside
+the bundle as Tauri sidecars.
+
+`npx tauri build` automatically builds and stages all required sidecars into
+`src-tauri/binaries/` via `beforeBuildCommand` before bundling. Fresh-checkout
+dev and test runs (`cargo test`, `cargo check`) automatically bypass the sidecar
+check if sidecars have not yet been staged, keeping development fast and clean.
+
+To build a release bundle locally:
 
 ```bash
-cargo build --release --bin lucent-db-tools-mcp
-mkdir -p src-tauri/binaries
-cp target/release/lucent-db-tools-mcp "src-tauri/binaries/lucent-db-tools-mcp-$(rustc -vV | sed -n 's/host: //p')"
-cd src-tauri && tauri build --config release-sidecar.json
+npx tauri build
+# or: npm run build:app
 ```
-
-`tauri build` **without** `--config release-sidecar.json` produces a bundle
-without the bridge — the app's runtime error when an agent tries to use Lucent's
-DB tools is loud and points at exactly this fix (`cargo build --bin
-lucent-db-tools-mcp`).
 
 ## Roadmap
 

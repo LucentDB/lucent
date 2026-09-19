@@ -160,6 +160,11 @@ impl AcpState {
         }
     }
 
+    /// Returns the last non-empty stderr snippet for an agent, if any.
+    pub fn agent_stderr_snippet(&self, agent_id: &str) -> Option<String> {
+        self.manager.agent_stderr_snippet(agent_id)
+    }
+
     /// Get-or-create the ACP session for a conversation. On first use it
     /// also spawns the DB-tools bridge listener (tempdir socket + 32-byte
     /// hex token, spec §4.6) and delivers the bridge config to the agent via
@@ -277,7 +282,21 @@ impl AcpState {
             let _ = std::fs::write(vscode_dir.join("mcp.json"), &mcp_json);
         }
 
-        // 5. Write executable lucent-tool helper script for terminal/bash-based agents (e.g. pi-acp)
+        // 5. Write opencode.json (used by OpenCode)
+        let opencode_config = serde_json::json!({
+            "$schema": "https://opencode.ai/config.json",
+            "mcp": {
+                "lucent-db-tools": {
+                    "type": "local",
+                    "command": [bridge_bin.clone(), "--socket", endpoint.clone(), "--token", token.clone()],
+                    "enabled": true
+                }
+            }
+        });
+        let opencode_json = serde_json::to_string_pretty(&opencode_config).unwrap_or_default();
+        let _ = std::fs::write(sandbox.join("opencode.json"), &opencode_json);
+
+        // 6. Write executable lucent-tool helper script for terminal/bash-based agents (e.g. pi-acp)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -691,6 +710,8 @@ mod tests {
         Arc::new(CollectorSink(std::sync::Mutex::new(Vec::new())))
     }
 
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// Points the agent sandbox at a tempdir so session creation never
     /// writes into the real ~/.lucent (kept alive for the test duration).
     fn hermetic_workspace() -> tempfile::TempDir {
@@ -704,6 +725,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_is_reused_within_a_conversation() {
+        let _env_lock = ENV_LOCK.lock().await;
         let _ws = hermetic_workspace();
         let acp = AcpState::new();
         let process = stub_process();
@@ -751,6 +773,7 @@ mod tests {
 
     #[tokio::test]
     async fn different_conversations_get_different_sessions() {
+        let _env_lock = ENV_LOCK.lock().await;
         let _ws = hermetic_workspace();
         let acp = AcpState::new();
         let process = stub_process();
@@ -773,6 +796,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_for_never_touches_a_global_pi_mcp_config() {
+        let _env_lock = ENV_LOCK.lock().await;
         let _ws = hermetic_workspace();
         // Plant a fake user ~/.pi/agent/mcp.json with a sentinel, then point
         // HOME at it — session_for must leave it byte-identical (spec D13).
@@ -800,6 +824,29 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn session_for_delivers_opencode_config() {
+        let _env_lock = ENV_LOCK.lock().await;
+        let _ws = hermetic_workspace();
+        let acp = AcpState::new();
+        let process = stub_process();
+        let sink = sink();
+        acp.session_for("conv-opencode", &process, &tool_ctx(), &sink)
+            .await
+            .expect("session/new round-trips");
+        
+        let workspace = crate::ai::acp::driver::workspace_dir("stub", "conv-opencode").unwrap();
+        let config_path = workspace.join("opencode.json");
+        let content = std::fs::read_to_string(&config_path).expect("opencode.json must be created");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("must be valid json");
+        assert_eq!(parsed["$schema"], "https://opencode.ai/config.json");
+        assert_eq!(parsed["mcp"]["lucent-db-tools"]["type"], "local");
+        assert_eq!(parsed["mcp"]["lucent-db-tools"]["enabled"], true);
+        let cmd = parsed["mcp"]["lucent-db-tools"]["command"].as_array().expect("command is an array");
+        assert_eq!(cmd.len(), 5);
+        assert_eq!(cmd[1], "--socket");
+        assert_eq!(cmd[3], "--token");
+    }
     struct EnvVarGuard<'a>(&'a str, Option<String>);
     impl Drop for EnvVarGuard<'_> {
         fn drop(&mut self) {

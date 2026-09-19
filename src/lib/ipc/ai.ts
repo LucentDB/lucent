@@ -11,6 +11,7 @@ import {
   updateToolResult,
   markStoppedToolCalls,
   finalizeSession,
+  persistConversationMessage,
   updateLast,
   clearRejectedDml,
   type TokenUsage,
@@ -171,6 +172,7 @@ export function handleAiEvent(conversationId: string, e: AiChannelEvent) {
         },
         rulesApplied: e.applied_memory_count ?? 0,
       });
+      void persistConversationMessage(conversationId, messageId);
       // One fetch per completed message — not continuous polling — to refresh
       // the header's conversation totals (the backend accumulates on Done).
       void refreshConversationUsage(conversationId);
@@ -210,7 +212,10 @@ async function refreshConversationUsage(conversationId: string): Promise<void> {
 function finalizeLastMessageSession(conversationId: string) {
   const conv = chat.conversations.find((c) => c.id === conversationId);
   const last = conv?.messages[conv.messages.length - 1];
-  if (last) finalizeSession(conversationId, last.id);
+  if (last) {
+    finalizeSession(conversationId, last.id);
+    void persistConversationMessage(conversationId, last.id);
+  }
 }
 
 export function createAiSession(conversationId: string) {
@@ -277,6 +282,8 @@ export async function sendMessage(
   conversationId: string,
   connectionId: string,
   profileId?: string | null,
+  userMessageId?: string | null,
+  assistantMessageId?: string | null,
 ) {
   chat.isStreaming = true;
   chat.error = null;
@@ -287,6 +294,8 @@ export async function sendMessage(
       conversationId,
       connectionId,
       profileId: profileId ?? null,
+      userMessageId: userMessageId ?? null,
+      assistantMessageId: assistantMessageId ?? null,
     });
   } catch (e) {
     chat.isStreaming = false;
@@ -437,7 +446,7 @@ export interface MemoryItem {
   connection_key: string;
   scope: 'global' | 'connection' | 'schema';
   scope_key?: string | null;
-  category: 'metric' | 'join' | 'quirk' | 'preference';
+  category: 'metric' | 'join' | 'quirk' | 'preference' | 'playbook';
   key_phrase: string;
   rule_text: string;
   sql_snippet?: string | null;
@@ -463,6 +472,38 @@ export interface MemoryItem {
   doc_hash: string;
   embedding_model: string;
   embedding_version: number;
+  created_at: number;
+  updated_at: number;
+  // Profile / playbook plane fields (Task 15). Optional so older fixtures and
+  // list responses that predate the migration still type-check; the backend
+  // always serializes them (Rust snake_case field names).
+  injection?: 'always' | 'retrieved';
+  preference_key?: string | null;
+  origin?: 'owner' | 'agent' | 'untrusted' | 'system';
+  steps_json?: string | null;
+  merge_group_id?: string | null;
+  confirmed?: boolean;
+  confirmation_conv_id?: string | null;
+}
+
+/**
+ * A row from `memory_observations` (Task 15). Backs the Learning Journal tab:
+ * the raw signals Lucent logged before they were distilled into memories.
+ */
+export interface Observation {
+  id: string;
+  connection_key: string;
+  conversation_id?: string | null;
+  turn_id?: string | null;
+  kind: string;
+  origin: 'owner' | 'agent' | 'untrusted' | 'system';
+  signal: string;
+  signal_strength: number;
+  occurrence_count: number;
+  dedup_key: string;
+  payload_json: string;
+  status: string;
+  derived_memory_id?: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -534,6 +575,12 @@ export async function loadChatConversation(
   return invoke('load_chat_conversation', { conversationId });
 }
 
+export async function saveChatMessage(
+  message: PersistedChatMessage,
+): Promise<void> {
+  return invoke('save_chat_message', { message });
+}
+
 export async function deleteChatConversation(
   conversationId: string,
 ): Promise<boolean> {
@@ -545,6 +592,26 @@ export async function listMemories(
   includeArchived = false,
 ): Promise<MemoryItem[]> {
   return invoke('list_memories', { connectionKey, includeArchived });
+}
+
+/**
+ * Always-on profile memories for a connection (Task 15, R23).
+ */
+export async function listAlwaysMemories(
+  connectionKey: string,
+): Promise<MemoryItem[]> {
+  return invoke('list_always_memories', { connectionKey });
+}
+
+/**
+ * Raw observations for a connection (Task 15, R23). Defaults to the open
+ * observation inbox; pass an explicit status to inspect another bucket.
+ */
+export async function listObservations(
+  connectionKey: string,
+  status = 'open',
+): Promise<Observation[]> {
+  return invoke('list_observations', { connectionKey, status });
 }
 
 export async function saveMemoryManual(

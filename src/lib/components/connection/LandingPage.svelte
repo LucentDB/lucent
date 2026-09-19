@@ -183,7 +183,7 @@
 
       <!-- Error banner -->
       {#if connectError || connections.errorMessage}
-        <div class="error-banner">
+        <div class="error-banner selectable">
           <span>{connections.errorMessage ?? connectError}</span>
           <button
             class="dismiss-btn"

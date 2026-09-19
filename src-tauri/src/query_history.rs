@@ -209,6 +209,20 @@ fn read_all_entries_unlocked() -> Vec<QueryHistoryEntry> {
     entries
 }
 
+/// The SQL of every entry that executed successfully, preserving input order.
+///
+/// Feeds the offline join-pattern miner
+/// ([`crate::ai::memory::miner::mine_join_patterns`]): only statements that
+/// actually ran can teach a recurring join shape, so failures are filtered here
+/// rather than at every call site.
+pub fn successful_sqls(entries: &[QueryHistoryEntry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|e| e.status == "success")
+        .map(|e| e.sql.clone())
+        .collect()
+}
+
 /// Search with optional filters.
 pub fn search_entries(
     search: Option<&str>,

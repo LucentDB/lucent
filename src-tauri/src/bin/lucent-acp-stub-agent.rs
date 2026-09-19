@@ -24,13 +24,16 @@
 //! ```json
 //! {
 //!   "stopReason": "end_turn",
+//!   "usage": { "totalTokens": 180, "inputTokens": 150, "outputTokens": 30 },
 //!   "steps": [
 //!     { "notify": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Hel" } } },
 //!     { "permission": { "title": "Read ~/.zshrc", "options": [ { "optionId": "allow_once", "name": "Allow once", "kind": "allow_once" } ] } }
 //!   ]
 //! }
 //! ```
-//! With no script the agent behaves minimally: no updates, `end_turn`.
+//! `usage` is optional and echoed into the prompt response verbatim (the
+//! `unstable_end_turn_token_usage` shape); with no script the agent behaves
+//! minimally: no updates, `end_turn`, no usage.
 //!
 //! Everything observable is logged to stderr as `STUB <event>: <json>`
 //! lines — the client's `with_debug` callback surfaces them through the
@@ -46,6 +49,10 @@ use std::time::Duration;
 struct Script {
     #[serde(rename = "stopReason", default = "default_stop_reason")]
     stop_reason: String,
+    /// End-of-turn `PromptResponse.usage` (ACP `unstable_end_turn_token_usage`),
+    /// echoed verbatim into the prompt response when present.
+    #[serde(default)]
+    usage: Option<Value>,
     #[serde(default)]
     steps: Vec<Step>,
 }
@@ -232,8 +239,12 @@ fn main() {
                                 .map(|s| s.stop_reason.clone())
                                 .unwrap_or_else(default_stop_reason)
                         };
+                        let mut result = json!({ "stopReason": stop_reason });
+                        if let Some(usage) = st.script.as_ref().and_then(|s| s.usage.clone()) {
+                            result["usage"] = usage;
+                        }
                         eprintln!("STUB prompt done stopReason={stop_reason}");
-                        respond(st.prompt_id, json!({ "stopReason": stop_reason }));
+                        respond(st.prompt_id, result);
                     }
                 }
             }

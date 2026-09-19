@@ -10,13 +10,26 @@
 
   let query = $state('');
   let activeIndex = $state(0);
+  // Cache lowercased strings per model so filtering does not re-allocate them
+  // on every keystroke.
+  let cachedModels = $derived(
+    models.map((m) => ({
+      item: m,
+      lowerId: m.id.toLowerCase(),
+      lowerName: m.displayName.toLowerCase(),
+    })),
+  );
   let queryLower = $derived(query.trim().toLowerCase());
   let matches = $derived(
-    models.filter(
-      (m) =>
-        m.id.toLowerCase().includes(queryLower) ||
-        m.displayName.toLowerCase().includes(queryLower),
-    ),
+    queryLower
+      ? cachedModels
+          .filter(
+            (m) =>
+              m.lowerId.includes(queryLower) ||
+              m.lowerName.includes(queryLower),
+          )
+          .map((m) => m.item)
+      : models,
   );
 
   function pick(id) {
@@ -121,7 +134,7 @@
       {/if}
     </div>
   {:else if status === 'error'}
-    <div class="error-banner">{errorMessage}</div>
+    <div class="error-banner selectable">{errorMessage}</div>
   {/if}
 
   {#if status !== 'success'}

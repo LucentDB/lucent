@@ -48,7 +48,7 @@
 <SettingsGroup title="Active agent">
   <SettingRow label="Selected agent">
     {#snippet control()}
-      <code class="agent-id">{acp.agentId}</code>
+      <code class="agent-id selectable">{acp.agentId}</code>
     {/snippet}
   </SettingRow>
   <SettingRow
@@ -100,7 +100,7 @@
           <input
             id="acp-command"
             type="text"
-            class="mono wide"
+            class="mono wide selectable"
             bind:value={acp.command}
             placeholder="npx @opencode/agent --headless"
             spellcheck="false"
@@ -114,7 +114,7 @@
               <div class="env-row">
                 <input
                   type="text"
-                  class="mono"
+                  class="mono selectable"
                   placeholder="KEY"
                   bind:value={row.key}
                   aria-label="Environment key"
@@ -123,7 +123,7 @@
                 />
                 <input
                   type="text"
-                  class="mono"
+                  class="mono selectable"
                   placeholder="value"
                   bind:value={row.value}
                   aria-label="Environment value"

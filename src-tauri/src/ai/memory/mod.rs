@@ -1,24 +1,43 @@
 pub mod consolidation;
+pub mod curation;
 pub mod decay;
 pub mod drift;
 pub mod entity_linker;
+pub mod gate;
+pub mod migrations;
+pub mod miner;
+pub mod observations;
+pub mod playbooks;
+pub mod profile;
+pub mod reflection;
 pub mod retrieval;
 pub mod rules_parser;
 pub mod security;
+pub mod telemetry;
+pub mod triggers;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub use consolidation::*;
+pub use curation::*;
 pub use decay::*;
 pub use drift::*;
 pub use entity_linker::*;
+pub use gate::*;
+pub use miner::*;
+pub use observations::*;
+pub use playbooks::*;
+pub use profile::*;
+pub use reflection::*;
 pub use retrieval::*;
 pub use rules_parser::*;
 pub use security::*;
+pub use telemetry::*;
+pub use triggers::*;
 
 pub const MEMORY_FORMAT_VERSION: u32 = 1;
 pub const MEMORY_MODEL_NAME: &str = "bge-small-en-v1.5";
@@ -96,6 +115,7 @@ pub enum MemoryCategory {
     Join,
     Quirk,
     Preference,
+    Playbook,
 }
 
 impl MemoryCategory {
@@ -105,6 +125,7 @@ impl MemoryCategory {
             MemoryCategory::Join => "join",
             MemoryCategory::Quirk => "quirk",
             MemoryCategory::Preference => "preference",
+            MemoryCategory::Playbook => "playbook",
         }
     }
 
@@ -116,6 +137,7 @@ impl MemoryCategory {
             "metric" => MemoryCategory::Metric,
             "join" => MemoryCategory::Join,
             "preference" | "formatting_preference" => MemoryCategory::Preference,
+            "playbook" => MemoryCategory::Playbook,
             _ => MemoryCategory::Quirk,
         }
     }
@@ -188,6 +210,13 @@ pub struct MemoryItem {
     pub embedding: Vec<f32>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub injection: InjectionClass,
+    pub preference_key: Option<String>,
+    pub origin: Origin,
+    pub steps_json: Option<String>,
+    pub merge_group_id: Option<String>,
+    pub confirmed: bool,
+    pub confirmation_conv_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -357,6 +386,7 @@ impl MemoryManager {
         .map_err(|e| format!("failed to initialize memory database: {e}"))?;
 
         Self::migrate_entity_links(conn)?;
+        migrations::ensure_v2_schema(conn)?;
 
         Ok(())
     }
@@ -436,10 +466,13 @@ impl MemoryManager {
                 sql_snippet, importance, stability_hours, last_accessed_at, access_count,
                 source_trust, source_conv_id, source_turn_id, source_tool_id, status,
                 supersedes_id, valid_from, valid_until, learned_at, tombstone, tombstoned_at,
-                doc_hash, embedding_model, embedding_version, embedding_blob, created_at, updated_at
+                doc_hash, embedding_model, embedding_version, embedding_blob, created_at, updated_at,
+                injection, preference_key, origin, steps_json, merge_group_id, confirmed,
+                confirmation_conv_id
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29
+                ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29,
+                ?30, ?31, ?32, ?33, ?34, ?35, ?36
             ) ON CONFLICT(id) DO UPDATE SET
                 rule_text = excluded.rule_text,
                 sql_snippet = excluded.sql_snippet,
@@ -449,7 +482,14 @@ impl MemoryManager {
                 status = excluded.status,
                 tombstone = excluded.tombstone,
                 updated_at = excluded.updated_at,
-                embedding_blob = excluded.embedding_blob",
+                embedding_blob = excluded.embedding_blob,
+                injection = excluded.injection,
+                preference_key = excluded.preference_key,
+                origin = excluded.origin,
+                steps_json = excluded.steps_json,
+                merge_group_id = excluded.merge_group_id,
+                confirmed = excluded.confirmed,
+                confirmation_conv_id = excluded.confirmation_conv_id",
             params![
                 item.id,
                 item.connection_key,
@@ -480,6 +520,13 @@ impl MemoryManager {
                 emb_blob,
                 item.created_at,
                 item.updated_at,
+                item.injection.as_str(),
+                item.preference_key,
+                item.origin.as_str(),
+                item.steps_json,
+                item.merge_group_id,
+                item.confirmed as i64,
+                item.confirmation_conv_id,
             ],
         )
         .map_err(|e| format!("failed to insert memory: {e}"))?;
@@ -526,6 +573,57 @@ impl MemoryManager {
         Ok(())
     }
 
+    /// Folds one or more `fold_ids` into a surviving `keep_id` memory.
+    ///
+    /// All participating rows share a freshly minted `merge_group_id`, and each
+    /// fold row is marked `SUPERSEDED` with `supersedes_id = keep_id` so the
+    /// merge is a traversable DAG edge rather than a destructive overwrite.
+    /// The keeper is never superseded even if it appears in `fold_ids`, and a
+    /// fold id with no matching row is skipped without error (defensive).
+    pub async fn merge_memories(
+        &self,
+        keep_id: &str,
+        fold_ids: &[String],
+    ) -> Result<(), String> {
+        let mut guard = self.conn.lock().await;
+        let now = chrono::Utc::now().timestamp();
+        let merge_group_id = uuid::Uuid::new_v4().to_string();
+
+        let tx = guard
+            .transaction()
+            .map_err(|e| format!("failed to begin merge_memories transaction: {e}"))?;
+
+        // Stamp the shared group on the keeper first. `WHERE id = ?` is a no-op
+        // for an unknown keeper; the caller owns the keeper's existence.
+        tx.execute(
+            "UPDATE memories SET merge_group_id = ?1, updated_at = ?2 WHERE id = ?3",
+            params![merge_group_id, now, keep_id],
+        )
+        .map_err(|e| format!("failed to stamp merge group on keeper: {e}"))?;
+
+        for fold_id in fold_ids {
+            // Never let a caller fold the keeper into itself: guard in addition
+            // to the UI/curation callers only ever passing distinct ids.
+            if fold_id == keep_id {
+                continue;
+            }
+            // An UPDATE matching zero rows is a silent no-op in SQLite, which is
+            // exactly the defensive "skip missing fold id" behavior we want.
+            tx.execute(
+                "UPDATE memories
+                 SET status = 'SUPERSEDED', supersedes_id = ?1, merge_group_id = ?2, updated_at = ?3
+                 WHERE id = ?4",
+                params![keep_id, merge_group_id, now, fold_id],
+            )
+            .map_err(|e| format!("failed to fold memory {fold_id}: {e}"))?;
+        }
+
+        tx.commit()
+            .map_err(|e| format!("failed to commit merge_memories transaction: {e}"))?;
+
+        Ok(())
+    }
+
     pub async fn list_memories(
         &self,
         connection_key: &str,
@@ -537,7 +635,9 @@ impl MemoryManager {
                     sql_snippet, importance, stability_hours, last_accessed_at, access_count,
                     source_trust, source_conv_id, source_turn_id, source_tool_id, status,
                     supersedes_id, valid_from, valid_until, learned_at, tombstone, tombstoned_at,
-                    doc_hash, embedding_model, embedding_version, embedding_blob, created_at, updated_at
+                    doc_hash, embedding_model, embedding_version, embedding_blob, created_at, updated_at,
+                    injection, preference_key, origin, steps_json, merge_group_id, confirmed,
+                    confirmation_conv_id
              FROM memories
              WHERE (connection_key = ?1 OR scope = 'global')",
         );
@@ -582,6 +682,13 @@ impl MemoryManager {
                     embedding: blob_to_embedding(&emb_bytes),
                     created_at: row.get(27)?,
                     updated_at: row.get(28)?,
+                    injection: InjectionClass::from_str(&row.get::<_, String>(29)?),
+                    preference_key: row.get(30)?,
+                    origin: Origin::from_str(&row.get::<_, String>(31)?),
+                    steps_json: row.get(32)?,
+                    merge_group_id: row.get(33)?,
+                    confirmed: row.get::<_, i64>(34)? != 0,
+                    confirmation_conv_id: row.get(35)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -730,6 +837,112 @@ impl MemoryManager {
         Ok(())
     }
 
+    // ── Observations ──────────────────────────────────────────────────────────
+    pub async fn record_observation(
+        &self,
+        obs: Observation,
+    ) -> Result<ObservationOutcome, String> {
+        let guard = self.conn.lock().await;
+        let now = chrono::Utc::now().timestamp();
+
+        let mut existing_stmt = guard
+            .prepare("SELECT id, occurrence_count FROM memory_observations WHERE dedup_key = ?1")
+            .map_err(|e| e.to_string())?;
+        let existing: Option<(String, i64)> = existing_stmt
+            .query_row(params![obs.dedup_key], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()
+            .map_err(|e| e.to_string())?;
+
+        if let Some((id, count)) = existing {
+            let new_count = count + 1;
+            guard
+                .execute(
+                    "UPDATE memory_observations
+                     SET occurrence_count = ?1, updated_at = ?2
+                     WHERE id = ?3",
+                    params![new_count, now, id],
+                )
+                .map_err(|e| format!("failed to rollup observation: {e}"))?;
+            return Ok(ObservationOutcome::RolledUp {
+                id,
+                occurrence_count: new_count,
+            });
+        }
+
+        guard
+            .execute(
+                "INSERT INTO memory_observations (
+                    id, connection_key, conversation_id, turn_id, kind, origin, signal,
+                    signal_strength, occurrence_count, dedup_key, payload_json, status,
+                    derived_memory_id, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    obs.id,
+                    obs.connection_key,
+                    obs.conversation_id,
+                    obs.turn_id,
+                    obs.kind,
+                    obs.origin.as_str(),
+                    obs.signal,
+                    obs.signal_strength,
+                    obs.occurrence_count,
+                    obs.dedup_key,
+                    obs.payload_json,
+                    obs.status,
+                    obs.derived_memory_id,
+                    obs.created_at,
+                    obs.updated_at,
+                ],
+            )
+            .map_err(|e| format!("failed to insert observation: {e}"))?;
+
+        Ok(ObservationOutcome::Inserted { id: obs.id })
+    }
+
+    pub async fn list_observations(
+        &self,
+        connection_key: &str,
+        status: &str,
+    ) -> Result<Vec<Observation>, String> {
+        let guard = self.conn.lock().await;
+        let mut stmt = guard
+            .prepare(
+                "SELECT id, connection_key, conversation_id, turn_id, kind, origin, signal,
+                        signal_strength, occurrence_count, dedup_key, payload_json, status,
+                        derived_memory_id, created_at, updated_at
+                 FROM memory_observations
+                 WHERE connection_key = ?1 AND status = ?2
+                 ORDER BY created_at DESC",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let rows = stmt
+            .query_map(params![connection_key, status], |row| {
+                Ok(Observation {
+                    id: row.get(0)?,
+                    connection_key: row.get(1)?,
+                    conversation_id: row.get(2)?,
+                    turn_id: row.get(3)?,
+                    kind: row.get(4)?,
+                    origin: Origin::from_str(&row.get::<_, String>(5)?),
+                    signal: row.get(6)?,
+                    signal_strength: row.get::<_, f64>(7)? as f32,
+                    occurrence_count: row.get(8)?,
+                    dedup_key: row.get(9)?,
+                    payload_json: row.get(10)?,
+                    status: row.get(11)?,
+                    derived_memory_id: row.get(12)?,
+                    created_at: row.get(13)?,
+                    updated_at: row.get(14)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(rows)
+    }
+
     pub async fn retrieve_hybrid_memories(
         &self,
         query: &str,
@@ -853,7 +1066,8 @@ impl MemoryManager {
             "INSERT INTO chat_conversations (id, connection_id, title, archived, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(id) DO UPDATE SET
-                title = excluded.title,
+                title = CASE WHEN title = '' OR title = 'New Conversation' THEN excluded.title ELSE title END,
+                connection_id = CASE WHEN excluded.connection_id != '' THEN excluded.connection_id ELSE connection_id END,
                 archived = excluded.archived,
                 updated_at = excluded.updated_at",
             params![conv.id, conv.connection_id, conv.title, conv.archived as i64, conv.created_at, conv.updated_at],
@@ -906,6 +1120,19 @@ impl MemoryManager {
 
     pub async fn save_message(&self, msg: ChatMessage) -> Result<(), String> {
         let guard = self.conn.lock().await;
+        // Ensure parent conversation row exists so foreign key constraints are satisfied
+        // even if message persistence races conversation creation.
+        guard.execute(
+            "INSERT OR IGNORE INTO chat_conversations (id, connection_id, title, archived, created_at, updated_at)
+             VALUES (?1, '', 'New Conversation', 0, ?2, ?2)",
+            params![msg.conversation_id, msg.created_at],
+        ).map_err(|e| format!("failed to ensure parent conversation: {e}"))?;
+
+        guard.execute(
+            "UPDATE chat_conversations SET updated_at = ?1 WHERE id = ?2",
+            params![msg.created_at, msg.conversation_id],
+        ).map_err(|e| format!("failed to update conversation updated_at: {e}"))?;
+
         guard.execute(
             "INSERT INTO chat_messages (id, conversation_id, role, content, session_json, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -924,7 +1151,7 @@ impl MemoryManager {
                 "SELECT id, conversation_id, role, content, session_json, created_at
              FROM chat_messages
              WHERE conversation_id = ?1
-             ORDER BY created_at ASC",
+             ORDER BY created_at ASC, rowid ASC",
             )
             .map_err(|e| e.to_string())?;
 
@@ -1011,6 +1238,13 @@ mod tests {
             embedding: vec![0.1; 384],
             created_at: 1000,
             updated_at: 1000,
+            injection: InjectionClass::Retrieved,
+            preference_key: None,
+            origin: Origin::Agent,
+            steps_json: None,
+            merge_group_id: None,
+            confirmed: false,
+            confirmation_conv_id: None,
         };
 
         mgr.save_memory(item, &[]).await.unwrap();
@@ -1062,6 +1296,13 @@ mod tests {
             embedding: vec![0.0; 384],
             created_at: 1000,
             updated_at: 1000,
+            injection: InjectionClass::Retrieved,
+            preference_key: None,
+            origin: Origin::Agent,
+            steps_json: None,
+            merge_group_id: None,
+            confirmed: false,
+            confirmation_conv_id: None,
         }
     }
 
@@ -1188,6 +1429,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_v2_schema_migration_adds_columns_and_observations_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        MemoryManager::init_tables(&conn).unwrap();
+
+        // Verify v2 columns on memories table
+        let mut stmt = conn.prepare("PRAGMA table_info(memories)").unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert!(cols.contains(&"injection".to_string()));
+        assert!(cols.contains(&"preference_key".to_string()));
+        assert!(cols.contains(&"origin".to_string()));
+        assert!(cols.contains(&"steps_json".to_string()));
+        assert!(cols.contains(&"merge_group_id".to_string()));
+        assert!(cols.contains(&"confirmed".to_string()));
+        assert!(cols.contains(&"confirmation_conv_id".to_string()));
+
+        // Verify memory_observations table exists
+        let mut obs_stmt = conn
+            .prepare("PRAGMA table_info(memory_observations)")
+            .unwrap();
+        let obs_cols: Vec<String> = obs_stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert!(obs_cols.contains(&"dedup_key".to_string()));
+        assert!(obs_cols.contains(&"signal_strength".to_string()));
+        assert!(obs_cols.contains(&"occurrence_count".to_string()));
+    }
+
     /// B-I8: an existing database has the old nullable `column_name` in the
     /// `memory_entity_links` primary key. `CREATE TABLE IF NOT EXISTS` will not
     /// alter it, so `init_tables` must detect and rebuild it in place,
@@ -1237,5 +1514,146 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_record_observation_rolls_up_on_duplicate() {
+        let mgr = MemoryManager::open_in_memory().unwrap();
+        let obs1 = Observation::new(
+            "conn-a".into(),
+            Some("c1".into()),
+            Some("t1".into()),
+            "diff".into(),
+            Origin::Agent,
+            "editor_diff".into(),
+            0.8,
+            r#"{"predicate":"deleted_at IS NULL"}"#.into(),
+        );
+        let obs2 = Observation::new(
+            "conn-a".into(),
+            Some("c2".into()),
+            Some("t2".into()),
+            "diff".into(),
+            Origin::Agent,
+            "editor_diff".into(),
+            0.8,
+            r#"{"predicate":"deleted_at IS NULL"}"#.into(),
+        );
+
+        let outcome1 = mgr.record_observation(obs1).await.unwrap();
+        match outcome1 {
+            ObservationOutcome::Inserted { .. } => {}
+            _ => panic!("first observation should be inserted"),
+        }
+
+        let outcome2 = mgr.record_observation(obs2).await.unwrap();
+        match outcome2 {
+            ObservationOutcome::RolledUp { occurrence_count, .. } => {
+                assert_eq!(occurrence_count, 2);
+            }
+            _ => panic!("second identical observation should roll up"),
+        }
+
+        let pending = mgr.list_observations("conn-a", "open").await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].occurrence_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_save_and_list_chat_messages_preserves_session_json_and_order() {
+        let mgr = MemoryManager::open_in_memory().unwrap();
+        mgr.save_conversation(ChatConversation {
+            id: "conv-1".into(),
+            connection_id: "conn-1".into(),
+            title: "Test Conv".into(),
+            archived: false,
+            created_at: 1000,
+            updated_at: 1000,
+        })
+        .await
+        .unwrap();
+
+        let user_msg = ChatMessage {
+            id: "msg-user-1".into(),
+            conversation_id: "conv-1".into(),
+            role: "user".into(),
+            content: "Show me all users".into(),
+            session_json: None,
+            created_at: 1000,
+        };
+        mgr.save_message(user_msg).await.unwrap();
+
+        let session_payload = serde_json::json!({
+            "segments": [
+                {
+                    "type": "thinking",
+                    "content": "Analyzing query and schemas...",
+                    "streaming": false,
+                    "startedAt": 1000,
+                    "durationMs": 450
+                },
+                {
+                    "type": "tool_call",
+                    "call": {
+                        "id": "tc-1",
+                        "name": "run_readonly_query",
+                        "args": { "sql": "SELECT * FROM users LIMIT 10" },
+                        "summary": "10 rows",
+                        "status": "completed",
+                        "output": {
+                            "type": "query_result",
+                            "columns": [{"name": "id", "type": "int"}, {"name": "name", "type": "text"}],
+                            "rows": [["1", "Alice"], ["2", "Bob"]],
+                            "row_count": 2
+                        }
+                    }
+                }
+            ],
+            "startedAt": 1000,
+            "durationMs": 1200,
+            "active": false
+        });
+
+        let assistant_msg = ChatMessage {
+            id: "msg-asst-1".into(),
+            conversation_id: "conv-1".into(),
+            role: "assistant".into(),
+            content: "Found 2 users in the database.".into(),
+            session_json: Some(session_payload.to_string()),
+            created_at: 1000, // Same timestamp to verify rowid tie-breaker
+        };
+        mgr.save_message(assistant_msg).await.unwrap();
+
+        let listed = mgr.list_messages("conv-1").await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].role, "user");
+        assert_eq!(listed[0].content, "Show me all users");
+        assert!(listed[0].session_json.is_none());
+
+        assert_eq!(listed[1].role, "assistant");
+        assert_eq!(listed[1].content, "Found 2 users in the database.");
+        assert!(listed[1].session_json.is_some());
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(listed[1].session_json.as_ref().unwrap()).unwrap();
+        assert_eq!(parsed["segments"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["segments"][0]["type"], "thinking");
+        assert_eq!(parsed["segments"][1]["type"], "tool_call");
+        assert_eq!(parsed["segments"][1]["call"]["status"], "completed");
+
+        // Test conflict update with same ID
+        let updated_asst = ChatMessage {
+            id: "msg-asst-1".into(),
+            conversation_id: "conv-1".into(),
+            role: "assistant".into(),
+            content: "Updated content.".into(),
+            session_json: listed[1].session_json.clone(),
+            created_at: 1000,
+        };
+        mgr.save_message(updated_asst).await.unwrap();
+
+        let listed_after = mgr.list_messages("conv-1").await.unwrap();
+        assert_eq!(listed_after.len(), 2, "conflict update must not duplicate row");
+        assert_eq!(listed_after[1].content, "Updated content.");
     }
 }

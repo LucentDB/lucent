@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import {
     aiConfig,
+    persistAiConfig,
     type AiProviderId,
   } from '../../stores/ai-config.svelte.ts';
   import {
@@ -167,6 +168,8 @@
         autoDenyPermissions: false,
       };
       aiConfig.acp.agentId = agentId;
+    } else if (id !== 'acp') {
+      aiConfig.acp = null;
     }
     if (id === 'ollama' && !aiConfig.endpoint) {
       aiConfig.endpoint = 'http://localhost:11434/v1';
@@ -202,11 +205,11 @@
     // ACP selection — read it defensively.
     aiConfig.acp?.agentId;
     if (aiConfig.provider !== 'acp') return;
-    const env = aiConfig.acp?.env ?? {};
+    const env = (aiConfig.acp?.env ?? {}) as Record<string, string>;
     envRows = Object.entries(env).map(([key, value], i) => ({
       id: i,
       key,
-      value,
+      value: String(value ?? ''),
     }));
   });
 
@@ -254,6 +257,7 @@
         aiConfig.acp,
       );
       apiKey = '';
+      persistAiConfig();
       onClose();
     } catch (e) {
       err = String(e);
@@ -311,7 +315,7 @@
 
     <div class="pane" role="region" aria-label={statusTitle} tabindex="-1">
       {#if err}
-        <p class="error" role="alert">{err}</p>
+        <p class="error selectable" role="alert">{err}</p>
       {/if}
 
       {#if active === 'provider'}

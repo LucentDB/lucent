@@ -37,12 +37,12 @@
 </script>
 
 <div class="qr-card">
-  <div class="qr-sql"><code>{qr.sql}</code></div>
+  <div class="qr-sql selectable"><code>{qr.sql}</code></div>
   <div class="qr-meta">
     <span class="qr-badge">{qr.rowCount} rows</span>
     <span class="qr-time">{qr.executionTimeMs}ms</span>
     {#if saveError}
-      <span class="qr-save-error" role="alert" title={saveError}
+      <span class="qr-save-error selectable" role="alert" title={saveError}
         >Save failed: {saveError}</span
       >
     {/if}

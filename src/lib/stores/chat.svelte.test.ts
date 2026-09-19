@@ -20,6 +20,15 @@ import {
   finalizeSession,
   setSessionExpanded,
   hydrateConversations,
+  openConversation,
+  deleteConversationHistory,
+  closeOtherTabs,
+  closeTabsToRight,
+  closeTabsToLeft,
+  closeAllTabs,
+  adaptPersistedMessage,
+  persistConversationMessage,
+  OPEN_TABS_STORAGE_KEY,
 } from './chat.svelte.ts';
 
 function seedMessage(messageId: string, content = '') {
@@ -347,6 +356,76 @@ describe('closeTab', () => {
   });
 });
 
+describe('tab batch close helpers (chat tab context menu)', () => {
+  beforeEach(() => {
+    chat.conversations = [];
+    chat.activeConversationId = null;
+    invokeMock.mockClear();
+  });
+
+  function seedThreeTabs() {
+    const a = createNewTab('conn_1');
+    const b = createNewTab('conn_1');
+    const c = createNewTab('conn_1');
+    return { a, b, c };
+  }
+
+  it('closeOtherTabs keeps only the target tab', () => {
+    const { b } = seedThreeTabs();
+    closeOtherTabs(b.id);
+    expect(chat.conversations.map((c) => c.id)).toEqual([b.id]);
+    expect(chat.activeConversationId).toBe(b.id);
+  });
+
+  it('closeOtherTabs moves the active tab when the active one is closed', () => {
+    const { a } = seedThreeTabs();
+    // Closing the others removes the active tab (c), so the survivor becomes
+    // active instead of leaving a dangling id.
+    closeOtherTabs(a.id);
+    expect(chat.conversations.map((c) => c.id)).toEqual([a.id]);
+    expect(chat.activeConversationId).toBe(a.id);
+  });
+
+  it('closeTabsToRight closes only the tabs after the target', () => {
+    const { a } = seedThreeTabs();
+    closeTabsToRight(a.id);
+    expect(chat.conversations.map((c) => c.id)).toEqual([a.id]);
+  });
+
+  it('closeTabsToLeft closes only the tabs before the target', () => {
+    const { c } = seedThreeTabs();
+    closeTabsToLeft(c.id);
+    expect(chat.conversations.map((cv) => cv.id)).toEqual([c.id]);
+  });
+
+  it('closeAllTabs empties the strip and clears the active tab', () => {
+    seedThreeTabs();
+    closeAllTabs();
+    expect(chat.conversations).toEqual([]);
+    expect(chat.activeConversationId).toBeNull();
+  });
+
+  it('evicts every closed batch tab on the backend exactly once', () => {
+    const { a, b, c } = seedThreeTabs();
+    closeTabsToRight(a.id);
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+    expect(invokeMock).toHaveBeenCalledWith('close_conversation', {
+      conversationId: b.id,
+    });
+    expect(invokeMock).toHaveBeenCalledWith('close_conversation', {
+      conversationId: c.id,
+    });
+  });
+
+  it('is a no-op for an unknown anchor id', () => {
+    seedThreeTabs();
+    closeTabsToRight('does-not-exist');
+    closeTabsToLeft('does-not-exist');
+    expect(chat.conversations).toHaveLength(3);
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('setSessionExpanded', () => {
   beforeEach(() => {
     chat.conversations = [];
@@ -427,6 +506,7 @@ describe('hydrateConversations', () => {
   };
 
   beforeEach(() => {
+    localStorage.clear();
     chat.conversations = [];
     chat.activeConversationId = null;
     invokeMock.mockReset();
@@ -530,4 +610,391 @@ describe('hydrateConversations', () => {
     expect(errorSpy).toHaveBeenCalled();
     errorSpy.mockRestore();
   });
+
+  it('restores ONLY conversations that were left open when closing', async () => {
+    localStorage.setItem(OPEN_TABS_STORAGE_KEY, JSON.stringify(['conv-b']));
+
+    await hydrateConversations();
+
+    expect(chat.conversations).toHaveLength(1);
+    expect(chat.conversations[0].id).toBe('conv-b');
+    expect(chat.activeConversationId).toBe('conv-b');
+    localStorage.removeItem(OPEN_TABS_STORAGE_KEY);
+  });
+
+  it('restores no chat tabs if all tabs were closed before exit', async () => {
+    localStorage.setItem(OPEN_TABS_STORAGE_KEY, JSON.stringify([]));
+
+    await hydrateConversations();
+
+    expect(chat.conversations).toHaveLength(0);
+    expect(chat.activeConversationId).toBeNull();
+    localStorage.removeItem(OPEN_TABS_STORAGE_KEY);
+  });
+
+  it('openConversation loads and adds a past conversation to open tabs', async () => {
+    chat.conversations = [];
+    chat.activeConversationId = null;
+
+    const conv = await openConversation('conv-a');
+
+    expect(conv).toBeDefined();
+    expect(conv!.id).toBe('conv-a');
+    expect(chat.conversations).toHaveLength(1);
+    expect(chat.activeConversationId).toBe('conv-a');
+    expect(getConv('conv-a').messages).toHaveLength(2);
+  });
+
+  it('deleteConversationHistory deletes conversation and closes open tab', async () => {
+    const conv = createConversation('conn-1');
+    chat.conversations = [conv];
+    chat.activeConversationId = conv.id;
+
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'delete_chat_conversation') return true;
+      return undefined;
+    });
+
+    const res = await deleteConversationHistory(conv.id);
+
+    expect(res).toBe(true);
+    expect(chat.conversations).toHaveLength(0);
+  });
+
+  it('openConversation reloads messages if conversation tab exists but has empty messages', async () => {
+    const conv = createConversation('conn-1');
+    conv.id = 'conv-empty';
+    conv.messages = [];
+    chat.conversations = [conv];
+    chat.activeConversationId = conv.id;
+
+    invokeMock.mockImplementation(async (cmd: string, args: any) => {
+      if (cmd === 'load_chat_conversation' && args?.conversationId === 'conv-empty') {
+        return [
+          {
+            id: 'm1',
+            conversation_id: 'conv-empty',
+            role: 'user',
+            content: 'Hello database',
+            session_json: null,
+            created_at: 1000,
+          },
+          {
+            id: 'm2',
+            conversation_id: 'conv-empty',
+            role: 'assistant',
+            content: 'Hello user',
+            session_json: null,
+            created_at: 1001,
+          },
+        ];
+      }
+      return undefined;
+    });
+
+    const res = await openConversation('conv-empty');
+
+    expect(res).toBeDefined();
+    expect(res!.messages).toHaveLength(2);
+    expect(res!.messages[0].content).toBe('Hello database');
+    expect(res!.messages[1].content).toBe('Hello user');
+  });
+
+  it('openConversation refreshes messages for an existing tab with stale messages', async () => {
+    const conv = createConversation('conn-1');
+    conv.id = 'conv-stale';
+    conv.messages = [
+      {
+        id: 'm1',
+        role: 'user',
+        content: 'Initial question',
+        createdAt: 1000,
+      },
+    ];
+    chat.conversations = [conv];
+    chat.activeConversationId = 'other-conv';
+
+    invokeMock.mockImplementation(async (cmd: string, args: any) => {
+      if (cmd === 'load_chat_conversation' && args?.conversationId === 'conv-stale') {
+        return [
+          {
+            id: 'm1',
+            conversation_id: 'conv-stale',
+            role: 'user',
+            content: 'Initial question',
+            session_json: null,
+            created_at: 1000,
+          },
+          {
+            id: 'm2',
+            conversation_id: 'conv-stale',
+            role: 'assistant',
+            content: 'Here is the detailed response',
+            session_json: JSON.stringify({
+              segments: [
+                {
+                  type: 'thinking',
+                  content: 'Reasoning about data',
+                  streaming: false,
+                  startedAt: 1000,
+                  durationMs: 400,
+                },
+              ],
+              startedAt: 1000,
+              durationMs: 400,
+              active: false,
+            }),
+            created_at: 1001,
+          },
+        ];
+      }
+      return undefined;
+    });
+
+    const res = await openConversation('conv-stale');
+
+    expect(res).toBeDefined();
+    expect(res!.messages).toHaveLength(2);
+    expect(res!.messages[0].content).toBe('Initial question');
+    expect(res!.messages[1].content).toBe('Here is the detailed response');
+    expect(res!.messages[1].session?.segments).toHaveLength(1);
+    expect(chat.activeConversationId).toBe('conv-stale');
+  });
 });
+
+describe('adaptPersistedMessage', () => {
+  it('converts seconds to milliseconds timestamp', () => {
+    const p: PersistedChatMessage = {
+      id: 'msg-1',
+      conversation_id: 'c-1',
+      role: 'user',
+      content: 'hi',
+      session_json: null,
+      created_at: 1700000000,
+    };
+    const adapted = adaptPersistedMessage(p);
+    expect(adapted.createdAt).toBe(1700000000000);
+    expect(adapted.role).toBe('user');
+    expect(adapted.content).toBe('hi');
+    expect(adapted.session).toBeUndefined();
+  });
+
+  it('preserves timestamps that are already in milliseconds', () => {
+    const p: PersistedChatMessage = {
+      id: 'msg-1',
+      conversation_id: 'c-1',
+      role: 'assistant',
+      content: 'hi',
+      session_json: null,
+      created_at: 1700000000123,
+    };
+    const adapted = adaptPersistedMessage(p);
+    expect(adapted.createdAt).toBe(1700000000123);
+  });
+
+  it('parses session_json and normalizes active/streaming/tool status', () => {
+    const sessionPayload = {
+      segments: [
+        {
+          type: 'thinking',
+          content: 'thinking deltas...',
+          streaming: true,
+          startedAt: 100,
+        },
+        {
+          type: 'tool_call',
+          call: {
+            id: 'call_1',
+            name: 'run_readonly_query',
+            args: { sql: 'SELECT 1' },
+            summary: '1 row',
+            // status omitted
+          },
+        },
+        {
+          type: 'tool_call',
+          call: {
+            id: 'call_2',
+            name: 'run_readonly_query',
+            args: { sql: 'SELECT error' },
+            summary: 'error: syntax error',
+            // status omitted
+          },
+        },
+      ],
+      startedAt: 100,
+      durationMs: 500,
+      active: true,
+    };
+
+    const p: PersistedChatMessage = {
+      id: 'msg-2',
+      conversation_id: 'c-1',
+      role: 'assistant',
+      content: 'Here is what I found',
+      session_json: JSON.stringify(sessionPayload),
+      created_at: 1700000000,
+    };
+
+    const adapted = adaptPersistedMessage(p);
+    expect(adapted.session).toBeDefined();
+    expect(adapted.session!.active).toBe(false);
+    expect(adapted.session!.segments).toHaveLength(3);
+
+    const thinking = adapted.session!.segments[0] as any;
+    expect(thinking.type).toBe('thinking');
+    expect(thinking.streaming).toBe(false);
+
+    const tool1 = adapted.session!.segments[1] as any;
+    expect(tool1.call.status).toBe('completed');
+
+    const tool2 = adapted.session!.segments[2] as any;
+    expect(tool2.call.status).toBe('failed');
+  });
+
+  it('normalizes running tool call status to completed or stopped', () => {
+    const sessionPayload = {
+      segments: [
+        {
+          type: 'tool_call',
+          call: {
+            id: 'call_1',
+            name: 'run_readonly_query',
+            args: { sql: 'SELECT 1' },
+            summary: '1 row',
+            status: 'running',
+          },
+        },
+        {
+          type: 'tool_call',
+          call: {
+            id: 'call_2',
+            name: 'run_readonly_query',
+            args: { sql: 'SELECT 2' },
+            summary: null,
+            status: 'running',
+          },
+        },
+      ],
+      startedAt: 100,
+      durationMs: 500,
+      active: true,
+    };
+
+    const p: PersistedChatMessage = {
+      id: 'msg-running',
+      conversation_id: 'c-1',
+      role: 'assistant',
+      content: 'Here is what I found',
+      session_json: JSON.stringify(sessionPayload),
+      created_at: 1700000000,
+    };
+
+    const adapted = adaptPersistedMessage(p);
+    const seg1 = adapted.session!.segments[0] as any;
+    expect(seg1.call.status).toBe('completed');
+    const seg2 = adapted.session!.segments[1] as any;
+    expect(seg2.call.status).toBe('stopped');
+  });
+
+  it('auto-expands session when assistant response content is empty', () => {
+    const sessionPayload = {
+      segments: [
+        {
+          type: 'tool_call',
+          call: {
+            id: 'call_1',
+            name: 'search_schema',
+            args: { pattern: 'users' },
+            summary: '3 matches',
+            status: 'completed',
+          },
+        },
+      ],
+      startedAt: 100,
+      durationMs: 300,
+      active: false,
+    };
+
+    const p: PersistedChatMessage = {
+      id: 'msg-tool-only',
+      conversation_id: 'c-1',
+      role: 'assistant',
+      content: '',
+      session_json: JSON.stringify(sessionPayload),
+      created_at: 1700000000,
+    };
+
+    const adapted = adaptPersistedMessage(p);
+    expect(adapted.session!.expanded).toBe(true);
+  });
+
+  it('handles invalid session_json without throwing', () => {
+    const p: PersistedChatMessage = {
+      id: 'msg-corrupt',
+      conversation_id: 'c-1',
+      role: 'assistant',
+      content: 'test',
+      session_json: '{invalid json...',
+      created_at: 1700000000,
+    };
+
+    const adapted = adaptPersistedMessage(p);
+    expect(adapted.content).toBe('test');
+    expect(adapted.session).toBeUndefined();
+  });
+});
+
+describe('persistConversationMessage', () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    chat.conversations = [];
+  });
+
+  it('serializes message with session and calls save_chat_message', async () => {
+    invokeMock.mockResolvedValue(undefined);
+    const conv = createConversation('conn-1');
+    conv.id = 'conv-persist';
+    const msg = {
+      id: 'msg-persisted',
+      role: 'assistant' as const,
+      content: 'Final response',
+      createdAt: 1700000005000,
+      session: {
+        segments: [
+          {
+            type: 'thinking' as const,
+            content: 'thought',
+            streaming: false,
+            startedAt: 1700000005000,
+          },
+        ],
+        startedAt: 1700000005000,
+        durationMs: 1200,
+        active: false,
+      },
+    };
+    conv.messages = [msg];
+    chat.conversations = [conv];
+
+    await persistConversationMessage('conv-persist', 'msg-persisted');
+
+    expect(invokeMock).toHaveBeenCalledWith('save_chat_message', {
+      message: {
+        id: 'msg-persisted',
+        conversation_id: 'conv-persist',
+        role: 'assistant',
+        content: 'Final response',
+        session_json: JSON.stringify(msg.session),
+        created_at: 1700000005,
+      },
+    });
+  });
+
+  it('is a safe no-op if message cannot be found', async () => {
+    await persistConversationMessage('unknown-conv', 'unknown-msg');
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+});
+
+

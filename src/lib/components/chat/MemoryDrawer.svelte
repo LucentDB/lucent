@@ -2,6 +2,8 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import {
     listMemories,
+    listAlwaysMemories,
+    listObservations,
     saveMemoryManual,
     deleteMemory,
     toggleMemoryStatus,
@@ -12,6 +14,7 @@
     deleteGoldenQuery,
     runConsolidation,
     type MemoryItem,
+    type Observation,
     type GoldenQuery,
     type DriftAlert,
   } from '../../ipc/ai.ts';
@@ -19,6 +22,7 @@
     driftAlertsFor,
     removeDriftAlert,
   } from '../../stores/memoryDrift.svelte.ts';
+  import LearningJournal from '../memory/LearningJournal.svelte';
 
   let {
     isOpen = $bindable(false),
@@ -38,7 +42,15 @@
     triggerEl?: HTMLElement | null;
   } = $props();
 
-  let activeTab = $state<'active' | 'archived' | 'drift' | 'golden'>('active');
+  let activeTab = $state<
+    | 'active'
+    | 'profile'
+    | 'playbooks'
+    | 'journal'
+    | 'drift'
+    | 'golden'
+    | 'archived'
+  >('active');
   let searchQuery = $state('');
   let loading = $state(false);
   let statusMessage = $state<string | null>(null);
@@ -49,6 +61,12 @@
 
   let activeMemories = $state<MemoryItem[]>([]);
   let archivedMemories = $state<MemoryItem[]>([]);
+  // Always-on profile plane (Task 15). Sourced from the dedicated
+  // `listAlwaysMemories` command when available, else filtered locally (R23).
+  let profileMemories = $state<MemoryItem[]>([]);
+  let playbookMemories = $state<MemoryItem[]>([]);
+  let observations = $state<Observation[]>([]);
+  let observationsLoading = $state(false);
   let driftAlerts = $state<DriftAlert[]>([]);
   let goldenQueries = $state<GoldenQuery[]>([]);
 
@@ -143,11 +161,38 @@
       driftAlerts =
         genuineDriftAlerts.length > 0 ? genuineDriftAlerts : synthesizedAlerts;
 
+      // Playbooks are just a category on the same connection-scoped list.
+      playbookMemories = all.filter(
+        (m) => m.category === 'playbook' && !m.tombstone,
+      );
+
+      // Profile plane. Prefer the dedicated command; the backend command is not
+      // shipped in this plan (R23), so fall back to the `injection` field on the
+      // list already in hand rather than failing the whole drawer.
+      try {
+        profileMemories = await listAlwaysMemories(key);
+      } catch {
+        profileMemories = all.filter(
+          (m) => m.injection === 'always' && !m.tombstone,
+        );
+      }
+
       goldenQueries = await listGoldenQueries(key);
     } catch (e) {
       statusMessage = `Failed to load memories: ${String(e)}`;
     } finally {
       loading = false;
+    }
+
+    // The journal is independent of the memory list: a missing
+    // `list_observations` command must not blank the other tabs (R23).
+    observationsLoading = true;
+    try {
+      observations = await listObservations(key);
+    } catch {
+      observations = [];
+    } finally {
+      observationsLoading = false;
     }
   }
 
@@ -404,16 +449,30 @@
     }
   }
 
-  const MEMORY_TABS = ['active', 'archived', 'drift', 'golden'] as const;
+  const MEMORY_TABS = [
+    'active',
+    'profile',
+    'playbooks',
+    'journal',
+    'drift',
+    'golden',
+    'archived',
+  ] as const;
 
   const memoryTabs = $derived([
     { id: 'active' as const, label: `Active (${activeMemories.length})` },
-    { id: 'archived' as const, label: `Archived (${archivedMemories.length})` },
+    { id: 'profile' as const, label: `Profile (${profileMemories.length})` },
+    {
+      id: 'playbooks' as const,
+      label: `Playbooks (${playbookMemories.length})`,
+    },
+    { id: 'journal' as const, label: `Journal (${observations.length})` },
     { id: 'drift' as const, label: `Drift Alerts (${driftAlerts.length})` },
     {
       id: 'golden' as const,
       label: `Golden Queries (${goldenQueries.length})`,
     },
+    { id: 'archived' as const, label: `Archived (${archivedMemories.length})` },
   ]);
 
   function selectTab(tab: (typeof MEMORY_TABS)[number]) {
@@ -444,13 +503,27 @@
     tick().then(() => document.getElementById(`memory-tab-${tab}`)?.focus());
   }
 
+  // Uses a parallel cache pattern to avoid repeated string allocations (toLowerCase)
+  // inside the filter loop on every keystroke.
+  const searchQueryLower = $derived(searchQuery.trim().toLowerCase());
+  const activeMemoriesCache = $derived(
+    activeMemories.map((m) => ({
+      item: m,
+      lowerKey: m.key_phrase.toLowerCase(),
+      lowerRule: m.rule_text.toLowerCase(),
+    })),
+  );
+
   const filteredActive = $derived(
-    activeMemories.filter((m) =>
-      searchQuery
-        ? m.key_phrase.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          m.rule_text.toLowerCase().includes(searchQuery.toLowerCase())
-        : true,
-    ),
+    searchQueryLower
+      ? activeMemoriesCache
+          .filter(
+            (c) =>
+              c.lowerKey.includes(searchQueryLower) ||
+              c.lowerRule.includes(searchQueryLower),
+          )
+          .map((c) => c.item)
+      : activeMemories,
   );
 </script>
 
@@ -504,7 +577,7 @@
           </div>
 
           {#if statusMessage}
-            <div class="status-banner">{statusMessage}</div>
+            <div class="status-banner selectable">{statusMessage}</div>
           {/if}
 
           <div class="drawer-nav" role="tablist" aria-label="Memory views">
@@ -586,9 +659,10 @@
                         >{m.source_trust}</span
                       >
                     </div>
-                    <div class="rule-text">{m.rule_text}</div>
+                    <div class="rule-text selectable">{m.rule_text}</div>
                     {#if m.sql_snippet}
-                      <pre class="sql-snippet"><code>{m.sql_snippet}</code
+                      <pre class="sql-snippet selectable"><code
+                          >{m.sql_snippet}</code
                         ></pre>
                     {/if}
                     <div class="card-footer">
@@ -615,6 +689,64 @@
                 {/each}
               </div>
             {/if}
+          {:else if activeTab === 'profile'}
+            {#if profileMemories.length === 0}
+              <div class="empty-state">
+                No profile memories yet. Always-on facts and preferences you
+                teach Lucent are injected on every turn and shown here.
+              </div>
+            {:else}
+              <div class="card-list">
+                {#each profileMemories as m (m.id)}
+                  <div class="memory-card">
+                    <div class="card-header">
+                      <span class="category-badge {m.category}"
+                        >{m.category}</span
+                      >
+                      <span class="key-phrase">{m.key_phrase}</span>
+                      {#if m.origin}
+                        <span class="origin-pill">{m.origin}</span>
+                      {/if}
+                    </div>
+                    <div class="rule-text selectable">{m.rule_text}</div>
+                    {#if m.sql_snippet}
+                      <pre class="sql-snippet selectable"><code
+                          >{m.sql_snippet}</code
+                        ></pre>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          {:else if activeTab === 'playbooks'}
+            {#if playbookMemories.length === 0}
+              <div class="empty-state">
+                No playbooks learned yet. Multi-step procedures Lucent distills
+                from your sessions will be collected here.
+              </div>
+            {:else}
+              <div class="card-list">
+                {#each playbookMemories as m (m.id)}
+                  <div class="memory-card">
+                    <div class="card-header">
+                      <span class="category-badge playbook">{m.category}</span>
+                      <span class="key-phrase">{m.key_phrase}</span>
+                      {#if m.confirmed}
+                        <span class="verified-tag">CONFIRMED</span>
+                      {/if}
+                    </div>
+                    <div class="rule-text selectable">{m.rule_text}</div>
+                    {#if m.steps_json}
+                      <pre class="sql-snippet selectable"><code
+                          >{m.steps_json}</code
+                        ></pre>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          {:else if activeTab === 'journal'}
+            <LearningJournal {observations} loading={observationsLoading} />
           {:else if activeTab === 'archived'}
             {#if archivedMemories.length === 0}
               <div class="empty-state">
@@ -631,7 +763,7 @@
                       <span class="key-phrase">{m.key_phrase}</span>
                       <span class="archived-tag">ARCHIVED</span>
                     </div>
-                    <div class="rule-text">{m.rule_text}</div>
+                    <div class="rule-text selectable">{m.rule_text}</div>
                     <div class="card-footer">
                       <span class="meta"
                         >Last accessed: {new Date(
@@ -670,8 +802,8 @@
                       <span class="drift-badge">SCHEMA DRIFT</span>
                       <span class="key-phrase">{alert.table_name}</span>
                     </div>
-                    <div class="drift-reason">{alert.reason}</div>
-                    <div class="rule-text">{alert.rule_text}</div>
+                    <div class="drift-reason selectable">{alert.reason}</div>
+                    <div class="rule-text selectable">{alert.rule_text}</div>
                     <div class="card-footer">
                       <div class="card-actions">
                         <button
@@ -711,11 +843,12 @@
                         <span class="verified-tag">VERIFIED</span>
                       {/if}
                     </div>
-                    <div class="prompt-text">
+                    <div class="prompt-text selectable">
                       <strong>Prompt:</strong>
                       {q.natural_prompt}
                     </div>
-                    <pre class="sql-snippet"><code>{q.sql_text}</code></pre>
+                    <pre class="sql-snippet selectable"><code>{q.sql_text}</code
+                      ></pre>
                     <div class="card-footer">
                       <span class="meta"
                         >Runs: {q.run_count} · Tables: {q.tables_used.join(
@@ -755,7 +888,7 @@
       >
         <h3>Add Learned Rule</h3>
         {#if addError}
-          <div class="error-banner">{addError}</div>
+          <div class="error-banner selectable">{addError}</div>
         {/if}
         <div class="form-group">
           <label for="newCategory">Category</label>
@@ -823,7 +956,7 @@
       >
         <h3>Import Markdown Rules (LUCENT.md)</h3>
         {#if importError}
-          <div class="error-banner">{importError}</div>
+          <div class="error-banner selectable">{importError}</div>
         {/if}
         <div class="form-group">
           <label for="importMarkdown">Paste Markdown Content</label>
@@ -1049,6 +1182,17 @@
   .category-badge.preference {
     color: #10b981;
   }
+  .category-badge.playbook {
+    color: #c084fc;
+  }
+  .origin-pill {
+    margin-left: auto;
+    font-size: 11px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-muted);
+  }
   .key-phrase {
     font-weight: 600;
     font-size: var(--text-xs, 12px);
@@ -1113,7 +1257,13 @@
     border-radius: 4px;
     font-family: var(--font-mono);
     font-size: 11px;
-    overflow-x: auto;
+    /* A single-line snippet used to hide behind a horizontal scrollbar: the
+       reader saw the first clause and a scroll track, never the SQL. Wrap the
+       line instead, breaking long identifiers only when there is no other
+       break point, so the whole statement is visible at a glance. */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    tab-size: 2;
     color: var(--accent);
     margin: 0;
   }

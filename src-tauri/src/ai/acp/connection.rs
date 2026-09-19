@@ -13,7 +13,7 @@ use crate::ai::acp::permissions::{PermissionPending, PermissionRegistry};
 use agent_client_protocol::schema::v1::{
     CancelNotification, ContentBlock, InitializeRequest, McpServer, NewSessionRequest,
     PermissionOptionKind, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SessionNotification, StopReason, TextContent,
+    RequestPermissionResponse, SessionNotification, StopReason, TextContent, Usage,
 };
 use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo, LineDirection};
 use std::path::PathBuf;
@@ -54,11 +54,14 @@ pub enum AgentCommand {
 }
 
 /// What a prompt turn produced. `text` is filled by the driver from the
-/// event stream; the connection task only carries the stop reason.
+/// event stream; the connection task carries the stop reason and the
+/// agent's end-of-turn token `usage` (ACP `unstable_end_turn_token_usage` —
+/// `None` for agents that don't report it).
 #[derive(Debug)]
 pub struct PromptOutcome {
     pub stop_reason: StopReason,
     pub text: String,
+    pub usage: Option<Usage>,
 }
 
 /// Events the connection task emits for consumers (the driver, the
@@ -247,6 +250,7 @@ pub async fn run_connection(
                                     let _ = reply.send(Ok(PromptOutcome {
                                         stop_reason: resp.stop_reason,
                                         text: String::new(),
+                                        usage: resp.usage,
                                     }));
                                 }
                                 Err(e) => {
@@ -465,6 +469,83 @@ mod tests {
             .expect("connection task finishes")
             .expect("task did not panic");
         assert!(result.is_ok(), "clean shutdown: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn prompt_round_trips_end_turn_token_usage() {
+        // The agent's `PromptResponse.usage` is behind the crate's
+        // `unstable_end_turn_token_usage` feature: without it the numbers
+        // deserialize into nothing and the UI shows 0 output tokens forever.
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("script.json"),
+            r#"{"stopReason":"end_turn","usage":{"totalTokens":190,"inputTokens":150,"outputTokens":30,"thoughtTokens":10,"cachedReadTokens":40},"steps":[]}"#,
+        )
+        .unwrap();
+        let proc = stub_process_with(script_env(&dir));
+        let (cmds, _ev, handle) = wire(proc.clone());
+
+        let tmp = tempdir().unwrap();
+        let session_id = new_session(&cmds, tmp.path().to_path_buf())
+            .await
+            .expect("session/new ok");
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        cmds.send(AgentCommand::Prompt {
+            session_id,
+            text: "hi".into(),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let outcome = reply_rx
+            .await
+            .expect("prompt reply arrives")
+            .expect("prompt succeeds");
+        let usage = outcome.usage.expect("scripted end_turn usage is parsed");
+        assert_eq!(usage.input_tokens, 150);
+        assert_eq!(usage.output_tokens, 30);
+        assert_eq!(usage.thought_tokens, Some(10));
+        assert_eq!(usage.cached_read_tokens, Some(40));
+
+        shutdown(&cmds).await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect("connection task finishes")
+            .expect("task did not panic");
+        assert!(result.is_ok(), "clean shutdown: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn prompt_without_end_turn_usage_carries_none() {
+        let proc = stub_process();
+        let (cmds, _ev, handle) = wire(proc.clone());
+
+        let tmp = tempdir().unwrap();
+        let session_id = new_session(&cmds, tmp.path().to_path_buf())
+            .await
+            .expect("session/new ok");
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        cmds.send(AgentCommand::Prompt {
+            session_id,
+            text: "hi".into(),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let outcome = reply_rx
+            .await
+            .expect("prompt reply arrives")
+            .expect("prompt succeeds");
+        assert!(
+            outcome.usage.is_none(),
+            "an agent that reports no usage leaves the fallback in place: {:?}",
+            outcome.usage
+        );
+
+        shutdown(&cmds).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), handle).await;
     }
 
     #[tokio::test]
