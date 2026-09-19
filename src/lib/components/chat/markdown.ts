@@ -14,7 +14,7 @@ marked.setOptions({
 // Force all links rendered from markdown to open in a new tab/window securely,
 // preventing reverse tabnabbing (window.opener hijacking) in webview environments.
 DOMPurify.addHook('afterSanitizeAttributes', (node) => {
-  if (node.tagName === 'A') {
+  if (node.tagName === 'A' && node.hasAttribute('href')) {
     node.setAttribute('target', '_blank');
     node.setAttribute('rel', 'noopener noreferrer');
   }

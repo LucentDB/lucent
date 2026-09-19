@@ -10,9 +10,17 @@ test('strips script and event-handler payloads', () => {
   expect(out.toLowerCase()).not.toContain('<script');
 });
 
-test('strips javascript: URLs in links', () => {
-  const out = renderMarkdown('[click](javascript:alert(1))');
-  expect(out.toLowerCase()).not.toContain('javascript:');
+test('strips unsafe URI schemes (javascript:, data:, vbscript:) in links', () => {
+  const jsOut = renderMarkdown('[click](javascript:alert(1))');
+  expect(jsOut.toLowerCase()).not.toContain('javascript:');
+
+  const dataOut = renderMarkdown(
+    '[click](data:text/html,<script>alert(1)</script>)',
+  );
+  expect(dataOut.toLowerCase()).not.toContain('data:');
+
+  const vbOut = renderMarkdown('[click](vbscript:msgbox(1))');
+  expect(vbOut.toLowerCase()).not.toContain('vbscript:');
 });
 
 test('adds target="_blank" and rel="noopener noreferrer" to links', () => {
