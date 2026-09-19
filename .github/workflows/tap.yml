@@ -11,7 +11,17 @@
 # that does not exist.
 #
 # Required repository secret:
-#   HOMEBREW_TAP_TOKEN  a PAT with `contents: write` on LucentDB/homebrew-lucent.
+#   HOMEBREW_TAP_TOKEN  write access to LucentDB/homebrew-lucent, and nothing
+#                       else. Preferred: a *fine-grained* PAT with resource
+#                       owner LucentDB, repository access limited to
+#                       LucentDB/homebrew-lucent, and the single permission
+#                       "Contents: Read and write". A classic PAT needs the
+#                       `repo` scope (or the narrower `public_repo`), which
+#                       grants every repository you can reach.
+#
+#                       There is no need for the `workflows` permission: this
+#                       job pushes Casks/lucent.rb and README.md only, never a
+#                       file under .github/workflows/.
 #                       GITHUB_TOKEN cannot write to a different repository.
 #
 # One-time setup, in the order it must happen:
