@@ -36,8 +36,15 @@ const targetReleaseDir = explicitTarget ? join(rootDir, 'target', triple, 'relea
 console.log(`[stage-sidecars] Building release worker binaries for target: ${triple}`);
 
 // Build the release binaries
+// Every binary is named with its own `--bin`. Do not "simplify" this back to
+// `-p lucent-driver-postgres -p lucent-driver-duckdb -p lucent --bin
+// lucent-db-tools-mcp`: specifying `--bin` selects *only* that binary, so the
+// `-p` flags name packages whose binaries are then never built, and the check
+// below fails a clean checkout. A stale local `target/` directory hides it —
+// the drivers are already there from an earlier build — which is why this only
+// surfaced the first time it ran against a fresh target triple.
 execSync(
-  `cargo build --release${targetFlag} -p lucent-driver-postgres -p lucent-driver-duckdb -p lucent --bin lucent-db-tools-mcp`,
+  `cargo build --release${targetFlag} --bin lucent-driver-postgres --bin lucent-driver-duckdb --bin lucent-db-tools-mcp`,
   {
     cwd: rootDir,
     stdio: 'inherit',
