@@ -35,6 +35,10 @@ on:
   release:
     types: [released]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to render the cask for (e.g. v0.1.0)'
+        required: true
 
 permissions:
   contents: read
@@ -44,14 +48,21 @@ jobs:
     # Homebrew casks are macOS-only, and `brew audit --cask` refuses to run
     # anywhere else, so the gate below has to be on a macOS runner.
     runs-on: macos-latest
+    # Resolved once. On a release event this is the release's tag; on a manual
+    # run `github.ref_name` would be the *branch*, which would render a cask
+    # pointing at /download/main/… and 404 on both DMGs.
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Render the cask from the published assets
-        env:
-          TAG: ${{ github.event.release.tag_name || github.ref_name }}
         run: |
           set -euo pipefail
+          if [ -z "${TAG:-}" ]; then
+            echo "::error::no release tag — pass one, or trigger this from a published release"
+            exit 1
+          fi
           VERSION="${TAG#v}"
           base="https://github.com/LucentDB/lucent/releases/download/${TAG}"
 
@@ -93,7 +104,6 @@ jobs:
       - name: Push it to the tap
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          TAG: ${{ github.event.release.tag_name || github.ref_name }}
         run: |
           set -euo pipefail
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/LucentDB/homebrew-lucent.git" tap
