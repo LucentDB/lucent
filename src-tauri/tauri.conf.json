@@ -47,7 +47,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUyNzYzMkEyMDQwNzQ1QjQKUldTMFJRY0VvakoyVW9ab1JNNy80bEluVEhNckVoYXNwNkRodFFXaExsOEI3anNJOVR5eDcxWXEK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZGMDFFRkFCQ0M1MjY0MDAKUldRQVpGTE1xKzhCLzlJZHFJa09FQkJ3RU8zTytpbUloM1FTN3BtUW1udmdZN2F5ejhPSnZ0eWoK",
       "endpoints": [
         "https://github.com/LucentDB/lucent/releases/latest/download/latest.json"
       ]
