@@ -444,14 +444,24 @@
     tick().then(() => document.getElementById(`memory-tab-${tab}`)?.focus());
   }
 
-  const filteredActive = $derived(
-    activeMemories.filter((m) =>
-      searchQuery
-        ? m.key_phrase.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          m.rule_text.toLowerCase().includes(searchQuery.toLowerCase())
-        : true,
-    ),
+  // Cache lowercased search strings per active memory outside the filter loop.
+  // Uses a parallel cache pattern to avoid repeated string allocations (toLowerCase)
+  // on every keystroke while preserving Svelte object identity.
+  const searchableActiveMemories = $derived(
+    activeMemories.map((m) => ({
+      memory: m,
+      searchStr: `${m.key_phrase}\0${m.rule_text}`.toLowerCase(),
+    })),
   );
+
+  const searchQueryLower = $derived(searchQuery.trim().toLowerCase());
+
+  const filteredActive = $derived.by(() => {
+    if (!searchQueryLower) return activeMemories;
+    return searchableActiveMemories
+      .filter((sm) => sm.searchStr.includes(searchQueryLower))
+      .map((sm) => sm.memory);
+  });
 </script>
 
 <div class="memory-drawer-portal" data-memory-drawer-portal use:portal>
