@@ -1,11 +1,14 @@
 # Rewrites the Homebrew cask when a release is PUBLISHED.
 #
-# Publication (not the build) is the trigger, so the cask can never point at
-# artifacts nobody reviewed — the same gate that protects the updater.
+# `released` — not `published` — is the trigger: GitHub fires `released` only
+# for a full release, so a prerelease can never repoint the tap. Publication
+# (not the build) is the trigger, so the cask can never point at artifacts
+# nobody reviewed — the same gate that protects the updater.
 #
-# The rendered cask is audited before it is pushed. A cask that fails
-# `brew audit` is never delivered to users, and a failed audit fails the job
-# loudly instead of leaving the tap pointing at a version that does not exist.
+# The rendered cask must pass `brew style` and `brew audit --cask --strict
+# --online` before it is pushed. A cask that fails is never delivered to users,
+# and the job fails loudly instead of leaving the tap pointing at a version
+# that does not exist.
 #
 # Required repository secret:
 #   HOMEBREW_TAP_TOKEN  a PAT with `contents: write` on LucentDB/homebrew-lucent.
@@ -20,7 +23,7 @@ name: Update Homebrew tap
 
 on:
   release:
-    types: [published]
+    types: [released]
   workflow_dispatch:
 
 permissions:
@@ -34,15 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # `published` also fires for prereleases, which are deliberately not
-      # offered to `brew install`.
-      - name: Skip prereleases
-        id: gate
-        if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
-        run: echo "ok=true" >> "$GITHUB_OUTPUT"
-
       - name: Render the cask from the published assets
-        if: steps.gate.outputs.ok == 'true'
         env:
           TAG: ${{ github.event.release.tag_name || github.ref_name }}
         run: |
@@ -69,13 +64,12 @@ jobs:
       # macOS-only, so the cask is checked through a scratch tap on this runner.
       #
       # Both gates are required and they are not interchangeable: `brew audit`
-      # passes a redundant `depends_on macos:` floor that `brew style` rejects,
+      # accepts a redundant `depends_on macos:` floor that `brew style` rejects,
       # and `brew style` does not resolve the download URL or check that the
       # DMG really contains Lucent.app. `--new` is deliberately absent — on an
       # ad-hoc-signed app it downloads the artifact and fails the Gatekeeper
       # check.
       - name: Audit the rendered cask
-        if: steps.gate.outputs.ok == 'true'
         env:
           HOMEBREW_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -87,7 +81,6 @@ jobs:
           brew audit --cask --strict --online lucentdb/lucent/lucent
 
       - name: Push it to the tap
-        if: steps.gate.outputs.ok == 'true'
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           TAG: ${{ github.event.release.tag_name || github.ref_name }}

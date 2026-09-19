@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+PackageIdentifier: LucentDB.Lucent
+PackageVersion: __VERSION__
+# Tauri's Windows installer is built by NSIS. Declaring the generic `exe` type
+# instead is a documented cause of Validation-Unattended-Failed.
+InstallerType: nullsoft
+# Tauri's NSIS install mode defaults to currentUser: no elevation, and the app
+# lands in %LOCALAPPDATA%\Lucent.
+Scope: user
+InstallModes:
+  - silent
+  - silentWithProgress
+InstallerSwitches:
+  Silent: /S
+  SilentWithProgress: /S
+UpgradeBehavior: install
+# The currentUser installer resolves %LOCALAPPDATA% against whoever runs it, so
+# an elevated launch would install into the administrator's profile. Refusing
+# elevation is the correct declaration, not a restriction we invent.
+ElevationRequirement: elevationProhibited
+ReleaseDate: __RELEASE_DATE__
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/LucentDB/lucent/releases/download/__TAG__/Lucent___VERSION___x64-setup.exe
+    InstallerSha256: __SHA256__
+    # These mirror what Tauri writes to the uninstall registry key. `winget
+    # upgrade` correlates on them, and `bundle.publisher` in tauri.conf.json
+    # produces the Publisher value below.
+    AppsAndFeaturesEntries:
+      - DisplayName: Lucent
+        Publisher: LucentDB
+        DisplayVersion: __VERSION__
+        InstallerType: nullsoft
+ManifestType: installer
+ManifestVersion: 1.12.0

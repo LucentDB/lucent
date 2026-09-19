@@ -7,7 +7,7 @@
 **A fast, native desktop database GUI for PostgreSQL with an AI copilot that answers questions about your data — safely.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/banu-teja/lucent/actions/workflows/ci.yml/badge.svg)](https://github.com/banu-teja/lucent/actions/workflows/ci.yml)
+[![CI](https://github.com/LucentDB/lucent/actions/workflows/ci.yml/badge.svg)](https://github.com/LucentDB/lucent/actions/workflows/ci.yml)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%E2%80%A2%20Windows%20%E2%80%A2%20Linux-lightgrey.svg)
 
 </div>
@@ -69,16 +69,44 @@ documentation, incident writeups, and reproducible analysis.
 **macOS** (Apple Silicon or Intel):
 
 ```bash
-brew tap LucentDB/lucent
-brew install --cask lucent
+brew install --cask lucentdb/lucent/lucent
 ```
 
-**Windows** and **Linux**: download the installer from the
-[latest release](https://github.com/LucentDB/lucent/releases/latest) —
-`.exe` for Windows, `.AppImage` or `.deb` for Linux.
+Use the fully qualified name. Homebrew 6 and later refuse to load a cask from a
+tap they have not been told to trust, and naming the cask explicitly is what
+grants that trust — `brew tap lucentdb/lucent && brew install --cask lucent`
+fails with `Refusing to load cask ... from untrusted tap` unless you run
+`brew trust lucentdb/lucent` first.
 
-Lucent updates itself: new versions are downloaded and applied in place, so
-you only go through the steps below once.
+Prefer a disk image? Download `Lucent_<version>_aarch64.dmg` (Apple Silicon) or
+`Lucent_<version>_x64.dmg` (Intel) from the
+[latest release](https://github.com/LucentDB/lucent/releases/latest).
+
+**Windows**: download `Lucent_<version>_x64-setup.exe` from the
+[latest release](https://github.com/LucentDB/lucent/releases/latest). A winget
+manifest exists in `packaging/winget/` but is not published to the community
+repository yet, so `winget install` is not available.
+
+**Linux** (x86_64): download from the
+[latest release](https://github.com/LucentDB/lucent/releases/latest) and pick
+one.
+
+```bash
+# .deb — Debian 12+, Ubuntu 22.04+. Use `apt install ./file.deb`, not `dpkg -i`:
+# only apt resolves the dependencies from your own distro.
+sudo apt install ./Lucent_<version>_amd64.deb
+
+# AppImage — anything with WebKitGTK 4.1 available
+chmod +x Lucent_<version>_amd64.AppImage && ./Lucent_<version>_amd64.AppImage
+```
+
+The Linux binaries are built on Ubuntu 22.04 for the widest glibc floor, which
+means they need WebKitGTK 4.1: Ubuntu 22.04+/Debian 12+. Ubuntu 20.04 and
+Debian 11 have no WebKitGTK 4.1 package and cannot run them.
+
+Lucent checks for new versions when it starts. macOS and Windows installs, and
+the AppImage, can update themselves in place; `.deb` users upgrade through their
+package manager.
 
 #### First launch
 
@@ -182,15 +210,38 @@ npm run build:app                              # host target
 npx tauri build --target x86_64-apple-darwin   # cross-target, same staging flow
 ```
 
+Building an updater-enabled target (`app`, `nsis`, `appimage`) also requires
+`TAURI_SIGNING_PRIVATE_KEY` — the minisign key the app verifies updates against.
+**That key is the release identity: lose it and no existing install can ever
+auto-update again.** `--bundles dmg` alone needs no key, because a DMG is not
+updater-enabled.
+
+Publishing a release also updates the install channels, each on the `released`
+trigger (a full release — never a prerelease):
+
+| Workflow | Channel | One-time setup |
+| --- | --- | --- |
+| `tap.yml` | Homebrew cask in `LucentDB/homebrew-lucent` | create that repository, add a `HOMEBREW_TAP_TOKEN` PAT |
+| `winget.yml` | manifest PR to `microsoft/winget-pkgs` | fork it under `LucentDB`, add `WINGET_TOKEN`, sign Microsoft's CLA, set the variable `WINGET_ENABLED=true` |
+| `apt.yml` | signed apt repository on GitHub Pages | add the `APT_GPG_*` secrets, enable Pages, set the variable `APT_ENABLED=true` |
+
+`tap.yml` is unconditional and fails loudly when its token is missing; the other
+two are opt-in through their repository variable, so a channel that has not been
+set up yet cannot turn a release red. Chocolatey is deliberately not included:
+`choco install` runs elevated, which would install Tauri's per-user NSIS package
+into the administrator's profile rather than the user who asked for it.
+
 ## Roadmap
 
 - [x] Core SQL workspace + AI copilot
 - [x] SQL notebooks
-- [x] macOS installer + Homebrew cask
-- [x] Windows and Linux installers
-- [x] In-app auto-update
+- [x] Release pipeline: draft releases for macOS, Windows and Linux, plus in-app updates
+- [x] Homebrew cask, tap layout and audit-gated tap workflow
+- [ ] Publish the first tagged release, and create `LucentDB/homebrew-lucent`
+- [ ] winget manifest in the community repository
+- [ ] Scoop bucket (needs a portable `.zip` artifact)
+- [ ] Signed apt repository on GitHub Pages
 - [ ] Notarized macOS build (needs a paid Apple Developer ID)
-- [ ] winget / Scoop manifests
 
 ## Contributing
 

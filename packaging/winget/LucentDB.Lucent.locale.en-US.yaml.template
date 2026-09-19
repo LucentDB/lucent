@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+PackageIdentifier: LucentDB.Lucent
+PackageVersion: __VERSION__
+PackageLocale: en-US
+Publisher: LucentDB
+PublisherUrl: https://github.com/LucentDB/lucent
+PublisherSupportUrl: https://github.com/LucentDB/lucent/issues
+PackageName: Lucent
+PackageUrl: https://github.com/LucentDB/lucent
+Author: LucentDB
+License: MIT
+LicenseUrl: https://github.com/LucentDB/lucent/blob/main/LICENSE
+Copyright: Copyright (c) LucentDB
+CopyrightUrl: https://github.com/LucentDB/lucent/blob/main/LICENSE
+ShortDescription: Fast native PostgreSQL GUI with a safety-gated AI copilot
+Description: |-
+  Lucent is a native desktop client for PostgreSQL built with Rust, Tauri 2 and
+  Svelte 5. It has connection profiles with keychain-backed credentials and SSH
+  tunnelling, a schema browser, a SQL editor, a paged results grid with in-grid
+  filtering and sorting, SQL notebooks, and CSV/JSON/INSERT export.
+
+  Its AI copilot answers plain-English questions about your data. It is
+  read-only by default: every INSERT/UPDATE/DELETE is gated behind an explicit
+  approval flow, and queries run under a per-query timeout with blast-radius
+  checks. Use your own OpenAI or Anthropic key, a local Ollama model, or an
+  installed ACP coding agent. The schema index is built locally.
+Moniker: lucent
+Tags:
+  - postgres
+  - postgresql
+  - database
+  - sql
+  - gui
+  - developer-tools
+ReleaseNotesUrl: https://github.com/LucentDB/lucent/releases/tag/__TAG__
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0

@@ -1,0 +1,160 @@
+# Publishes a signed apt repository to GitHub Pages, so Linux users can run
+#
+#   sudo apt install lucent
+#
+# and get upgrades through ordinary `apt upgrade`.
+#
+# Trigger is `released` — a full (non-prerelease) release — the same human gate
+# the updater, the Homebrew tap and winget wait behind.
+#
+# Required repository secrets:
+#   APT_GPG_PRIVATE_KEY  ASCII-armored secret key block (`gpg --armor --export-secret-keys <ID>`)
+#   APT_GPG_PASSPHRASE   its passphrase ("" if the key has none)
+#   APT_GPG_KEY_ID       the key's long id or fingerprint
+#
+# One-time setup, in the order it must happen:
+#   1. Generate the signing key once, offline, and keep the private half backed
+#      up: `gpg --full-generate-key` (RSA-4096 or ed25519, and a lifetime that
+#      outlives the project, or plan a rollover).
+#   2. Settings -> Pages -> Source = "GitHub Actions". This cannot be automated
+#      with GITHUB_TOKEN; actions/configure-pages needs an admin-scoped token to
+#      enable Pages itself.
+#   3. Add the three secrets, then set the repository variable
+#      APT_ENABLED=true. Until that variable is set this job is skipped rather
+#      than failing on every release.
+#
+# The pool is rebuilt from every published release on each run, so the workflow
+# keeps no state between runs and the repository is always complete.
+#
+# NOT YET EXERCISED: the repository-generation commands below follow the
+# documented dpkg-scanpackages / apt-ftparchive / gpg usage, but they have not
+# been run end to end — the machine this was written on has no Docker, and
+# macOS ships neither tool. Watch the first run. The job is opt-in, so a
+# failure here cannot affect the release, the updater, Homebrew or winget.
+
+name: Update apt repository
+
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two runs deploy Pages concurrently, but do not cancel one mid-flight:
+# a cancelled deploy can leave the site with no index.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  apt-repo:
+    if: vars.APT_ENABLED == 'true'
+    runs-on: ubuntu-22.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # apt-ftparchive ships in apt-utils and is not on the runner image;
+      # dpkg-dev (dpkg-scanpackages) and gnupg2 already are.
+      - name: Install repo tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apt-utils
+
+      - name: Collect every .deb from all published releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p public/apt/pool/main/l/lucent /tmp/debs
+          gh release list --repo "$GITHUB_REPOSITORY" \
+              --exclude-drafts --exclude-pre-releases --limit 100 \
+              --json tagName --jq '.[].tagName' | while read -r tag; do
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+              --pattern '*.deb' --dir /tmp/debs --clobber || true
+          done
+          find /tmp/debs -name '*.deb' -exec cp -n {} public/apt/pool/main/l/lucent/ \;
+          ls -la public/apt/pool/main/l/lucent/
+
+      - name: Build the Packages index
+        working-directory: public/apt
+        run: |
+          set -euo pipefail
+          mkdir -p dists/stable/main/binary-amd64
+          # Run from the repo root so each `Filename:` is relative to it (pool/...).
+          dpkg-scanpackages --multiversion pool/ /dev/null \
+            > dists/stable/main/binary-amd64/Packages
+          gzip -9 -k -f dists/stable/main/binary-amd64/Packages
+
+      - name: Build the Release file
+        working-directory: public/apt
+        run: |
+          set -euo pipefail
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin=Lucent \
+            -o APT::FTPArchive::Release::Label=Lucent \
+            -o APT::FTPArchive::Release::Suite=stable \
+            -o APT::FTPArchive::Release::Codename=stable \
+            -o APT::FTPArchive::Release::Architectures=amd64 \
+            -o APT::FTPArchive::Release::Components=main \
+            -o APT::FTPArchive::Release::Description='Lucent apt repository' \
+            release dists/stable > dists/stable/Release
+          cat dists/stable/Release
+
+      - name: Sign the repository
+        working-directory: public/apt
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+          GPG_KEY_ID: ${{ secrets.APT_GPG_KEY_ID }}
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$(mktemp -d)"
+          chmod 700 "$GNUPGHOME"
+          printf '%s' "$GPG_PRIVATE_KEY" \
+            | gpg --batch --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --import
+
+          # InRelease is the clearsigned file apt fetches first; Release.gpg is
+          # the detached signature older clients look for.
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" \
+              --local-user "$GPG_KEY_ID" --clearsign -o dists/stable/InRelease dists/stable/Release
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" \
+              --local-user "$GPG_KEY_ID" --armor --detach-sign -o dists/stable/Release.gpg dists/stable/Release
+
+          # The published trust anchor must be a BINARY export: apt refuses an
+          # ASCII-armored keyring, and /etc/apt/trusted.gpg.d is not the place
+          # for a third-party repo key.
+          gpg --batch --export "$GPG_KEY_ID" > lucent-archive-keyring.pgp
+
+      - name: Explain the repository to anyone who opens the URL
+        run: |
+          set -euo pipefail
+          cat > public/apt/index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>Lucent apt repository</title>
+          <h1>Lucent apt repository</h1>
+          <p>This host serves an apt repository, not a web page.</p>
+          <pre>
+          sudo install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL https://lucentdb.github.io/lucent/apt/lucent-archive-keyring.pgp \
+            | sudo tee /etc/apt/keyrings/lucent-archive-keyring.pgp &gt;/dev/null
+          echo 'deb [signed-by=/etc/apt/keyrings/lucent-archive-keyring.pgp] https://lucentdb.github.io/lucent/apt stable main' \
+            | sudo tee /etc/apt/sources.list.d/lucent.list
+          sudo apt update
+          sudo apt install lucent
+          </pre>
+          HTML
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public/apt
+      - id: deploy
+        uses: actions/deploy-pages@v4

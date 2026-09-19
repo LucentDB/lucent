@@ -1,0 +1,128 @@
+# Submits the published Windows installer to the winget community repository.
+#
+#   release: released  — fires when a draft release is PUBLISHED (and never for
+#                        a prerelease), which is the same human gate the updater
+#                        and the Homebrew tap wait behind.
+#
+# Required repository secret:
+#   WINGET_TOKEN  a *classic* PAT with the `public_repo` scope. Fine-grained
+#                 tokens do not work here: the submission writes to a fork and
+#                 opens a pull request against microsoft/winget-pkgs.
+#
+# One-time setup, in the order it must happen:
+#   1. Fork microsoft/winget-pkgs under the LucentDB organization. The action
+#      below checks the manifests out of `LucentDB/winget-pkgs`; set
+#      `WINGET_FORK` in the workflow env if the fork lives elsewhere.
+#   2. Add the PAT as WINGET_TOKEN in LucentDB/lucent.
+#   3. Sign Microsoft's CLA once (https://cla.opensource.microsoft.com). Every
+#      first-time contributor to winget-pkgs must, and the PR stays blocked
+#      until it is done.
+#   4. Set the repository variable WINGET_ENABLED=true — until then this job is
+#      skipped rather than failing on every release.
+#
+# Why the manifests are rendered here instead of committed: `InstallerSha256`
+# and `ReleaseDate` change with every release, and a stale hash is a guaranteed
+# `Error-Hash-Mismatch` rejection from winget's validation pipeline. The
+# committed artifacts are templates under packaging/winget/.
+
+name: Publish to winget
+
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to submit (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  winget:
+    if: vars.WINGET_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      WINGET_FORK: LucentDB
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag is present
+        run: |
+          set -euo pipefail
+          if [ -z "${TAG:-}" ]; then
+            echo "::error::no release tag — pass one, or trigger this from a published release"
+            exit 1
+          fi
+
+      # The hash is computed from the bytes users will actually download, for
+      # the same reason the cask hashes the DMGs it fetched: a wrong hash is a
+      # rejected submission days later, not a local error.
+      - name: Fetch the installer and hash it
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "Lucent_${VERSION}_x64-setup.exe" --dir dl
+          SHA256=$(sha256sum dl/*.exe | awk '{print $1}')
+          test -n "$SHA256"
+          {
+            echo "VERSION=$VERSION"
+            echo "SHA256=$SHA256"
+            echo "RELEASE_DATE=$(date -u +%F)"
+          } >> "$GITHUB_ENV"
+          echo "LucentDB.Lucent ${VERSION} sha256 ${SHA256}"
+
+      - name: Render the manifests
+        run: |
+          set -euo pipefail
+          node scripts/render-winget.mjs "$VERSION" "$SHA256" "$RELEASE_DATE" out
+          cat out/*.yaml
+
+      - name: Open the pull request
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          set -euo pipefail
+          branch="lucent-${VERSION}"
+          dir="manifests/l/LucentDB/Lucent/${VERSION}"
+
+          git clone --depth=1 "https://x-access-token:${WINGET_TOKEN}@github.com/${WINGET_FORK}/winget-pkgs.git" pkgs
+          cd pkgs
+          # Branch off upstream, not off whatever the fork's master happens to
+          # be — winget-pkgs requires exactly one package version per PR and
+          # rejects manifests that conflict with upstream.
+          git fetch --depth=1 https://github.com/microsoft/winget-pkgs.git master
+          git checkout -B "$branch" FETCH_HEAD
+
+          mkdir -p "$dir"
+          cp ../out/*.yaml "$dir/"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$dir"
+          git commit -m "New version: LucentDB.Lucent version ${VERSION}"
+          git push --force "https://x-access-token:${WINGET_TOKEN}@github.com/${WINGET_FORK}/winget-pkgs.git" "$branch"
+
+          export GH_TOKEN="$WINGET_TOKEN"
+          existing=$(gh pr list --repo microsoft/winget-pkgs --head "${WINGET_FORK}:${branch}" --json url --jq '.[0].url')
+          if [ -n "$existing" ]; then
+            echo "already submitted: $existing"
+            exit 0
+          fi
+
+          printf '%s\n' \
+            "Automated submission of the Windows installer published in" \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}." \
+            "" \
+            "The installer is an unsigned NSIS package and the SHA256 above is computed" \
+            "from the published release asset." \
+            > /tmp/body.md
+          gh pr create --repo microsoft/winget-pkgs --base master \
+            --head "${WINGET_FORK}:${branch}" \
+            --title "New version: LucentDB.Lucent version ${VERSION}" \
+            --body-file /tmp/body.md
