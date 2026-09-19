@@ -7,26 +7,45 @@ cask "lucent" do
 
   url "https://github.com/LucentDB/lucent/releases/download/v#{version}/Lucent_#{version}_#{arch}.dmg"
   name "Lucent"
-  desc "Native Postgres GUI with an AI copilot"
+  desc "Native PostgreSQL GUI with a safety-gated AI copilot"
   homepage "https://github.com/LucentDB/lucent"
 
-  depends_on macos: ">= :big_sur"
+  livecheck do
+    url :homepage
+    strategy :github_latest
+  end
+
+  # Homebrew itself does not run below Big Sur, so any explicit floor is
+  # redundant and `brew style` (cop Homebrew/OSDependsOn) rejects one. The
+  # app's own floor travels in the bundle's LSMinimumSystemVersion.
+  depends_on :macos
 
   app "Lucent.app"
-
-  caveats <<~EOS
-    Lucent is not notarized by Apple, so macOS will refuse to open it the
-    first time. This is expected for an independent app without a paid
-    Developer ID, not a sign of anything wrong.
-
-    To allow it once:
-      System Settings -> Privacy & Security -> scroll down -> "Open Anyway"
-
-    Every later launch, and every `brew upgrade`, works normally.
-  EOS
 
   zap trash: [
     "~/.lucent",
     "~/Library/Application Support/lucent",
+    "~/Library/Caches/com.lucent.app",
+    "~/Library/Caches/lucent",
+    "~/Library/HTTPStorages/com.lucent.app",
+    "~/Library/Preferences/com.lucent.app.plist",
+    "~/Library/Saved Application State/com.lucent.app.savedState",
+    "~/Library/WebKit/com.lucent.app",
   ]
+
+  caveats <<~EOS
+    Lucent ships without an Apple Developer ID, so macOS blocks the first
+    launch. This is expected for an independent app, not a sign of anything
+    wrong.
+
+    To allow it once, try to open Lucent, then go to:
+      System Settings -> Privacy & Security -> "Open Anyway"
+
+    Later launches — and every `brew upgrade` — need no further action.
+
+    Uninstalling with `brew uninstall --zap --cask lucent` removes Lucent's
+    files. Passwords you saved for database connections live in your login
+    Keychain (services "lucent-connection" and "lucent-ssh") and are left
+    behind; remove them with Keychain Access if you want them gone.
+  EOS
 end

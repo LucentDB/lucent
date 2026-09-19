@@ -28,6 +28,7 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "publisher": "LucentDB",
     "macOS": {
       "signingIdentity": "-"
     },

@@ -1,9 +1,0 @@
-{
-  "bundle": {
-    "externalBin": [
-      "binaries/lucent-driver-postgres",
-      "binaries/lucent-driver-duckdb",
-      "binaries/lucent-db-tools-mcp"
-    ]
-  }
-}

@@ -1,31 +1,58 @@
 # Rewrites the Homebrew cask when a release is PUBLISHED.
 #
 # Publication (not the build) is the trigger, so the cask can never point at
-# artifacts nobody reviewed - the same gate that protects the updater.
+# artifacts nobody reviewed — the same gate that protects the updater.
+#
+# The rendered cask is audited before it is pushed. A cask that fails
+# `brew audit` is never delivered to users, and a failed audit fails the job
+# loudly instead of leaving the tap pointing at a version that does not exist.
+#
+# Required repository secret:
+#   HOMEBREW_TAP_TOKEN  a PAT with `contents: write` on LucentDB/homebrew-lucent.
+#                       GITHUB_TOKEN cannot write to a different repository.
+#
+# One-time setup, in the order it must happen:
+#   1. Create the repository `LucentDB/homebrew-lucent` (public, empty).
+#   2. Create the PAT and add it as HOMEBREW_TAP_TOKEN in LucentDB/lucent.
+#   3. Publish the first release. This workflow then writes Casks/lucent.rb.
 
 name: Update Homebrew tap
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   cask:
-    runs-on: ubuntu-latest
+    # Homebrew casks are macOS-only, and `brew audit --cask` refuses to run
+    # anywhere else, so the gate below has to be on a macOS runner.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
+      # `published` also fires for prereleases, which are deliberately not
+      # offered to `brew install`.
+      - name: Skip prereleases
+        id: gate
+        if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
+        run: echo "ok=true" >> "$GITHUB_OUTPUT"
+
       - name: Render the cask from the published assets
+        if: steps.gate.outputs.ok == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.release.tag_name || github.ref_name }}
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
           base="https://github.com/LucentDB/lucent/releases/download/${TAG}"
 
           # Hash what users will actually download, rather than trusting a
-          # value computed elsewhere in the pipeline.
+          # value computed elsewhere in the pipeline. `-f` makes a renamed or
+          # missing artifact fail here instead of shipping a broken cask.
           curl -fsSL -o arm.dmg   "${base}/Lucent_${VERSION}_aarch64.dmg"
           curl -fsSL -o intel.dmg "${base}/Lucent_${VERSION}_x64.dmg"
           SHA_ARM=$(shasum -a 256 arm.dmg   | cut -d' ' -f1)
@@ -38,18 +65,42 @@ jobs:
               .github/tap/lucent.rb.template > out/lucent.rb
           cat out/lucent.rb
 
+      # `brew audit` refuses to run on a bare path (Homebrew 7), and casks are
+      # macOS-only, so the cask is checked through a scratch tap on this runner.
+      #
+      # Both gates are required and they are not interchangeable: `brew audit`
+      # passes a redundant `depends_on macos:` floor that `brew style` rejects,
+      # and `brew style` does not resolve the download URL or check that the
+      # DMG really contains Lucent.app. `--new` is deliberately absent — on an
+      # ad-hoc-signed app it downloads the artifact and fails the Gatekeeper
+      # check.
+      - name: Audit the rendered cask
+        if: steps.gate.outputs.ok == 'true'
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tap_dir="$(brew --repository)/Library/Taps/lucentdb/homebrew-lucent"
+          mkdir -p "$tap_dir/Casks"
+          cp out/lucent.rb "$tap_dir/Casks/lucent.rb"
+          brew style "$tap_dir/Casks/lucent.rb"
+          brew audit --cask --strict --online lucentdb/lucent/lucent
+
       - name: Push it to the tap
+        if: steps.gate.outputs.ok == 'true'
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.release.tag_name || github.ref_name }}
         run: |
           set -euo pipefail
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/LucentDB/homebrew-lucent.git" tap
           mkdir -p tap/Casks
           cp out/lucent.rb tap/Casks/lucent.rb
+          # Kept in sync from the app repo so the tap explains itself.
+          cp .github/tap/README.md tap/README.md
           cd tap
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Casks/lucent.rb
-          git commit -m "lucent ${TAG#v}" || { echo "no change"; exit 0; }
+          git add Casks/lucent.rb README.md
+          git commit -m "lucent ${TAG#v}" || { echo "nothing changed"; exit 0; }
           git push
