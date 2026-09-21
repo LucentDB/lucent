@@ -40,11 +40,15 @@ fn finalize_active_thinking(segs: &mut [serde_json::Value]) {
     let now_ms = chrono::Utc::now().timestamp_millis();
     if let Some(last) = segs.last_mut() {
         if last.get("type").and_then(|v| v.as_str()) == Some("thinking")
-            && last.get("streaming").and_then(|v| v.as_bool()).unwrap_or(false)
+            && last
+                .get("streaming")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
         {
             last["streaming"] = serde_json::Value::Bool(false);
             if let Some(started) = last.get("startedAt").and_then(|v| v.as_i64()) {
-                last["durationMs"] = serde_json::Value::Number(serde_json::Number::from((now_ms - started).max(0)));
+                last["durationMs"] =
+                    serde_json::Value::Number(serde_json::Number::from((now_ms - started).max(0)));
             }
         }
     }
@@ -58,7 +62,10 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
                 let now_ms = chrono::Utc::now().timestamp_millis();
                 if let Some(last) = segs.last_mut() {
                     if last.get("type").and_then(|v| v.as_str()) == Some("thinking")
-                        && last.get("streaming").and_then(|v| v.as_bool()).unwrap_or(false)
+                        && last
+                            .get("streaming")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
                     {
                         if let Some(c) = last.get_mut("content") {
                             if let Some(s) = c.as_str() {
@@ -112,7 +119,14 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
                     }));
                 }
             }
-            crate::ai::events::AiEvent::ToolResult { id, summary, output, input, status, .. } => {
+            crate::ai::events::AiEvent::ToolResult {
+                id,
+                summary,
+                output,
+                input,
+                status,
+                ..
+            } => {
                 let mut segs = self.turn_segments.lock().unwrap();
                 for seg in segs.iter_mut() {
                     if seg.get("type").and_then(|v| v.as_str()) == Some("tool_call") {
@@ -126,7 +140,9 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
                                     call["args"] = inp.clone();
                                 }
                                 call["status"] = serde_json::Value::String(match status {
-                                    crate::ai::events::ToolResultStatus::Completed => "completed".into(),
+                                    crate::ai::events::ToolResultStatus::Completed => {
+                                        "completed".into()
+                                    }
                                     crate::ai::events::ToolResultStatus::Failed => "failed".into(),
                                 });
                             }
@@ -155,7 +171,10 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
                 }
 
                 let state = self.app_handle.state::<AppState>();
-                let mut entry = state.llm_usage.entry(self.conversation_id.clone()).or_default();
+                let mut entry = state
+                    .llm_usage
+                    .entry(self.conversation_id.clone())
+                    .or_default();
                 let accumulated = accumulate_usage(&entry, usage);
                 *entry = accumulated;
 
@@ -168,12 +187,15 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
 
                 let session_json = if !segs.is_empty() {
                     let now_ms = chrono::Utc::now().timestamp_millis();
-                    Some(serde_json::json!({
-                        "segments": *segs,
-                        "startedAt": self.turn_start_ms,
-                        "durationMs": (now_ms - self.turn_start_ms).max(0),
-                        "active": false,
-                    }).to_string())
+                    Some(
+                        serde_json::json!({
+                            "segments": *segs,
+                            "startedAt": self.turn_start_ms,
+                            "durationMs": (now_ms - self.turn_start_ms).max(0),
+                            "active": false,
+                        })
+                        .to_string(),
+                    )
                 } else {
                     None
                 };
@@ -181,7 +203,9 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
                 if !content.is_empty() || session_json.is_some() {
                     let mem_mgr = state.memory_manager.clone();
                     let conv_id = self.conversation_id.clone();
-                    let msg_id = self.assistant_message_id.clone()
+                    let msg_id = self
+                        .assistant_message_id
+                        .clone()
                         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                     let now = chrono::Utc::now().timestamp();
                     tauri::async_runtime::spawn(async move {
@@ -2933,7 +2957,10 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
                 "ai:error",
                 AiErrorPayload {
                     conversation_id: conversation_id.clone(),
-                    message: format!("Agent timed out after 300 seconds. Try simplifying the question.{}", stderr_note)
+                    message: format!(
+                        "Agent timed out after 300 seconds. Try simplifying the question.{}",
+                        stderr_note
+                    ),
                 },
             );
             let mut s = conv_err.lock().await;
@@ -2944,6 +2971,7 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn ai_chat(
     state: State<'_, AppState>,
@@ -2977,6 +3005,7 @@ pub async fn ai_chat(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ai_chat_impl(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
@@ -3767,20 +3796,23 @@ async fn save_memory_manual_impl(
     sql_snippet: Option<String>,
     scope: Option<String>,
 ) -> Result<crate::ai::memory::MemoryItem, String> {
-    use crate::ai::memory::security::{sanitize_rule_text, sanitize_sql_snippet, SourceTrust};
+    use crate::ai::memory::security::{
+        sanitize_key_phrase, sanitize_rule_text, sanitize_sql_snippet, SourceTrust,
+    };
     use crate::ai::memory::{
         compute_memory_doc_hash, InjectionClass, MemoryCategory, MemoryItem, MemoryScope,
         MemoryStatus, Origin, MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME,
         USER_EXPLICIT_STABILITY_HOURS,
     };
 
+    let sanitized_key_phrase = sanitize_key_phrase(&key_phrase)?;
     let sanitized_rule = sanitize_rule_text(&rule_text)?;
     let sanitized_sql = sanitize_sql_snippet(sql_snippet.as_deref())?;
 
     let cat = MemoryCategory::from_str(&category);
     let is_preference = cat == MemoryCategory::Preference;
     let preference_key = if is_preference {
-        Some(key_phrase.clone())
+        Some(sanitized_key_phrase.clone())
     } else {
         None
     };
@@ -3793,7 +3825,7 @@ async fn save_memory_manual_impl(
 
     let doc_text = format!(
         "Context: {} {} | Rule: {}",
-        category, key_phrase, sanitized_rule
+        category, sanitized_key_phrase, sanitized_rule
     );
     let doc_hash = compute_memory_doc_hash(&doc_text);
 
@@ -3829,7 +3861,7 @@ async fn save_memory_manual_impl(
         scope: sc,
         scope_key: connection_key,
         category: cat,
-        key_phrase,
+        key_phrase: sanitized_key_phrase,
         rule_text: sanitized_rule,
         sql_snippet: sanitized_sql,
         importance: 0.9,
@@ -3947,6 +3979,11 @@ pub async fn import_memories_markdown(
         // delimiters or blacklisted payloads straight into memory. Route it
         // through the same guard as every other write path; skip malformed
         // rules rather than aborting the whole import.
+        let sanitized_key_phrase =
+            match crate::ai::memory::security::sanitize_key_phrase(&rule.key_phrase) {
+                Ok(kp) => kp,
+                Err(_) => continue,
+            };
         let sanitized_rule = match crate::ai::memory::security::sanitize_rule_text(&rule.rule_text)
         {
             Ok(text) => text,
@@ -3965,22 +4002,22 @@ pub async fn import_memories_markdown(
         // imported categories stay retrieved-only.
         let is_preference = rule.category == crate::ai::memory::MemoryCategory::Preference;
         let preference_key = if is_preference {
-            Some(rule.key_phrase.clone())
+            Some(sanitized_key_phrase.clone())
         } else {
             None
         };
         let doc_hash = crate::ai::memory::compute_memory_doc_hash(&format!(
             "{} {}",
-            rule.key_phrase, sanitized_rule
+            sanitized_key_phrase, sanitized_rule
         ));
         let embedding = if let Some(emb) = state.get_or_init_memory_embedder().await {
-            emb.embed_query(&format!("{}: {}", rule.key_phrase, sanitized_rule))
+            emb.embed_query(&format!("{}: {}", sanitized_key_phrase, sanitized_rule))
                 .await
                 .unwrap_or_default()
         } else {
             let emb_guard = state.embedder.lock().await;
             if let Some(emb) = emb_guard.as_ref() {
-                emb.embed_query(&format!("{}: {}", rule.key_phrase, sanitized_rule))
+                emb.embed_query(&format!("{}: {}", sanitized_key_phrase, sanitized_rule))
                     .await
                     .unwrap_or_default()
             } else {
@@ -4002,7 +4039,7 @@ pub async fn import_memories_markdown(
             scope: crate::ai::memory::MemoryScope::Connection,
             scope_key: connection_key.clone(),
             category: rule.category,
-            key_phrase: rule.key_phrase,
+            key_phrase: sanitized_key_phrase,
             rule_text: sanitized_rule,
             sql_snippet: sanitized_sql,
             importance: rule.importance,
@@ -5101,7 +5138,8 @@ mod manual_memory_injection_tests {
     /// these tests never touch the real `memory.db` or load an ONNX model.
     fn state() -> AppState {
         let mut state = AppState::new();
-        state.memory_manager = Arc::new(crate::ai::memory::MemoryManager::open_in_memory().unwrap());
+        state.memory_manager =
+            Arc::new(crate::ai::memory::MemoryManager::open_in_memory().unwrap());
         state.memory_embedder_test_gate = Some(Arc::new(MemoryEmbedderTestGate::unavailable()));
         state
     }
@@ -5359,10 +5397,7 @@ mod manual_memory_injection_tests {
         assert_eq!(segments[1]["call"]["name"], "run_readonly_query");
         assert_eq!(segments[1]["call"]["status"], "completed");
         assert_eq!(segments[1]["call"]["summary"], "1 row");
-        assert_eq!(
-            segments[1]["call"]["output"]["rows"][0][0],
-            "42"
-        );
+        assert_eq!(segments[1]["call"]["output"]["rows"][0][0], "42");
 
         // Verify usage was keyed by conv_id
         let usage = super::get_ai_usage(app_state, conv_id).await.unwrap();

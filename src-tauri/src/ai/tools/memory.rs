@@ -3,9 +3,9 @@ use uuid::Uuid;
 
 use super::{AiToolContext, ToolError, ToolOutput};
 use crate::ai::memory::{
-    compute_memory_doc_hash, extract_and_link_entities, sanitize_rule_text, sanitize_sql_snippet,
-    InjectionClass, MemoryCategory, MemoryItem, MemoryScope, MemoryStatus, Origin, SourceTrust,
-    MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME, TOOL_RULE_STABILITY_HOURS,
+    compute_memory_doc_hash, extract_and_link_entities, sanitize_key_phrase, sanitize_rule_text,
+    sanitize_sql_snippet, InjectionClass, MemoryCategory, MemoryItem, MemoryScope, MemoryStatus,
+    Origin, SourceTrust, MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME, TOOL_RULE_STABILITY_HOURS,
 };
 use crate::query_history;
 
@@ -74,16 +74,16 @@ impl SaveMemory {
         let category_str = args["category"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'category'".into()))?;
-        let key_phrase = args["key_phrase"]
+        let raw_key_phrase = args["key_phrase"]
             .as_str()
-            .ok_or_else(|| ToolError::InvalidArgs("missing 'key_phrase'".into()))?
-            .trim()
-            .to_string();
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'key_phrase'".into()))?;
         let raw_rule_text = args["rule_text"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'rule_text'".into()))?;
         let raw_sql_snippet = args["sql_snippet"].as_str();
 
+        let key_phrase = sanitize_key_phrase(raw_key_phrase)
+            .map_err(|e| ToolError::InvalidArgs(format!("invalid key_phrase: {e}")))?;
         let rule_text = sanitize_rule_text(raw_rule_text)
             .map_err(|e| ToolError::InvalidArgs(format!("invalid rule_text: {e}")))?;
         let sql_snippet = sanitize_sql_snippet(raw_sql_snippet)
