@@ -237,12 +237,22 @@
         <div class="unified-tabs" bind:this={tabsEl}>
           <!-- DB tabs (query / table / source) -->
           {#each tabs as tab (tab.id)}
-            <button
+            <div
               class="tab"
               class:active={isActive(tab.id)}
+              role="button"
+              tabindex="0"
               onclick={() => {
                 onSwitchTab?.(tab.id);
                 closeContextMenu();
+              }}
+              onkeydown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  if (e.target === e.currentTarget) {
+                    onSwitchTab?.(tab.id);
+                    closeContextMenu();
+                  }
+                }
               }}
               oncontextmenu={(e) => handleContextMenu(e, tab.id, tab.kind)}
               title={tabLabel(tab)}
@@ -258,23 +268,16 @@
                   aria-label="Unsaved changes"
                 ></span>
               {/if}
-              <span
+              <button
+                type="button"
                 class="tab-close"
                 onclick={(e) => {
                   e.stopPropagation();
                   onCloseTab?.(tab.id);
                 }}
-                onkeydown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.stopPropagation();
-                    onCloseTab?.(tab.id);
-                  }
-                }}
-                role="button"
-                tabindex="-1"
-                aria-label="Close tab">×</span
+                aria-label="Close tab">×</button
               >
-            </button>
+            </div>
           {/each}
         </div>
 
@@ -638,6 +641,9 @@
     justify-content: center;
     width: 14px;
     height: 14px;
+    padding: 0;
+    border: none;
+    background: transparent;
     font-size: 12px;
     line-height: 1;
     color: var(--text-muted);
