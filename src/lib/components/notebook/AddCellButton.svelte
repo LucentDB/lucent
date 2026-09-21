@@ -56,6 +56,7 @@
     <div
       class="add-popup"
       role="menu"
+      tabindex="-1"
       style={popupStyle}
       onkeydown={handleKeydown}
     >
