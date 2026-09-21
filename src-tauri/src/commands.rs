@@ -3767,20 +3767,23 @@ async fn save_memory_manual_impl(
     sql_snippet: Option<String>,
     scope: Option<String>,
 ) -> Result<crate::ai::memory::MemoryItem, String> {
-    use crate::ai::memory::security::{sanitize_rule_text, sanitize_sql_snippet, SourceTrust};
+    use crate::ai::memory::security::{
+        sanitize_key_phrase, sanitize_rule_text, sanitize_sql_snippet, SourceTrust,
+    };
     use crate::ai::memory::{
         compute_memory_doc_hash, InjectionClass, MemoryCategory, MemoryItem, MemoryScope,
         MemoryStatus, Origin, MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME,
         USER_EXPLICIT_STABILITY_HOURS,
     };
 
+    let sanitized_key_phrase = sanitize_key_phrase(&key_phrase)?;
     let sanitized_rule = sanitize_rule_text(&rule_text)?;
     let sanitized_sql = sanitize_sql_snippet(sql_snippet.as_deref())?;
 
     let cat = MemoryCategory::from_str(&category);
     let is_preference = cat == MemoryCategory::Preference;
     let preference_key = if is_preference {
-        Some(key_phrase.clone())
+        Some(sanitized_key_phrase.clone())
     } else {
         None
     };
@@ -3793,7 +3796,7 @@ async fn save_memory_manual_impl(
 
     let doc_text = format!(
         "Context: {} {} | Rule: {}",
-        category, key_phrase, sanitized_rule
+        category, sanitized_key_phrase, sanitized_rule
     );
     let doc_hash = compute_memory_doc_hash(&doc_text);
 
@@ -3829,7 +3832,7 @@ async fn save_memory_manual_impl(
         scope: sc,
         scope_key: connection_key,
         category: cat,
-        key_phrase,
+        key_phrase: sanitized_key_phrase,
         rule_text: sanitized_rule,
         sql_snippet: sanitized_sql,
         importance: 0.9,
@@ -3947,6 +3950,11 @@ pub async fn import_memories_markdown(
         // delimiters or blacklisted payloads straight into memory. Route it
         // through the same guard as every other write path; skip malformed
         // rules rather than aborting the whole import.
+        let sanitized_key_phrase =
+            match crate::ai::memory::security::sanitize_key_phrase(&rule.key_phrase) {
+                Ok(kp) => kp,
+                Err(_) => continue,
+            };
         let sanitized_rule = match crate::ai::memory::security::sanitize_rule_text(&rule.rule_text)
         {
             Ok(text) => text,
@@ -3965,22 +3973,22 @@ pub async fn import_memories_markdown(
         // imported categories stay retrieved-only.
         let is_preference = rule.category == crate::ai::memory::MemoryCategory::Preference;
         let preference_key = if is_preference {
-            Some(rule.key_phrase.clone())
+            Some(sanitized_key_phrase.clone())
         } else {
             None
         };
         let doc_hash = crate::ai::memory::compute_memory_doc_hash(&format!(
             "{} {}",
-            rule.key_phrase, sanitized_rule
+            sanitized_key_phrase, sanitized_rule
         ));
         let embedding = if let Some(emb) = state.get_or_init_memory_embedder().await {
-            emb.embed_query(&format!("{}: {}", rule.key_phrase, sanitized_rule))
+            emb.embed_query(&format!("{}: {}", sanitized_key_phrase, sanitized_rule))
                 .await
                 .unwrap_or_default()
         } else {
             let emb_guard = state.embedder.lock().await;
             if let Some(emb) = emb_guard.as_ref() {
-                emb.embed_query(&format!("{}: {}", rule.key_phrase, sanitized_rule))
+                emb.embed_query(&format!("{}: {}", sanitized_key_phrase, sanitized_rule))
                     .await
                     .unwrap_or_default()
             } else {
@@ -4002,7 +4010,7 @@ pub async fn import_memories_markdown(
             scope: crate::ai::memory::MemoryScope::Connection,
             scope_key: connection_key.clone(),
             category: rule.category,
-            key_phrase: rule.key_phrase,
+            key_phrase: sanitized_key_phrase,
             rule_text: sanitized_rule,
             sql_snippet: sanitized_sql,
             importance: rule.importance,
