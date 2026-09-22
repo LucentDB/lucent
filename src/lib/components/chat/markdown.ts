@@ -27,7 +27,7 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
 // in rendered markdown within the webview environment.
 DOMPurify.addHook('uponSanitizeElement', (node, data) => {
   if (data.tagName === 'input' && node instanceof Element) {
-    const type = node.getAttribute('type');
+    const type = node.getAttribute('type')?.toLowerCase().trim();
     if (type !== 'checkbox') {
       node.parentNode?.removeChild(node);
     }
