@@ -19,6 +19,13 @@
     { id: 'sql-insert', label: 'INSERTs', ext: '.sql' },
   ] as const;
 
+  function handleKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape' && open) {
+      e.stopPropagation();
+      open = false;
+    }
+  }
+
   async function handleExport(formatId: string) {
     open = false;
     if (columns.length === 0 || rows.length === 0) return;
@@ -61,12 +68,15 @@
   }
 </script>
 
-<div class="export-dropdown">
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="export-dropdown" onkeydown={handleKeydown}>
   <button
     class="export-btn"
     {disabled}
     onclick={() => (open = !open)}
     title="Export results"
+    aria-label="Export results"
+    aria-expanded={open}
   >
     <svg
       width="16"

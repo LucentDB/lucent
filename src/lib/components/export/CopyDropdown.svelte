@@ -19,6 +19,13 @@
     { id: 'sql-insert', label: 'INSERTs' },
   ] as const;
 
+  function handleKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape' && open) {
+      e.stopPropagation();
+      open = false;
+    }
+  }
+
   async function handleCopy(formatId: string) {
     open = false;
     if (columns.length === 0 || rows.length === 0) return;
@@ -49,7 +56,8 @@
   }
 </script>
 
-<div class="copy-dropdown">
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="copy-dropdown" onkeydown={handleKeydown}>
   <button
     class="copy-btn"
     {disabled}
