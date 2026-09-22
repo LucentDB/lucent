@@ -86,3 +86,18 @@ test('preserves GFM task list checkboxes', () => {
   expect(out).toContain('Todo item');
   expect(out).toContain('Done item');
 });
+
+test('handles case-insensitive checkbox input types while stripping uppercase non-checkbox inputs', () => {
+  const uppercaseCheckbox = renderMarkdown('<input type="CHECKBOX" checked />');
+  expect(uppercaseCheckbox.toLowerCase()).toContain('type="checkbox"');
+
+  const paddedCheckbox = renderMarkdown('<input type=" checkbox " />');
+  expect(paddedCheckbox.toLowerCase()).toContain('type="checkbox"');
+
+  const uppercaseText = renderMarkdown('<input type="TEXT" value="phish" />');
+  expect(uppercaseText.toLowerCase()).not.toContain('type="text"');
+  expect(uppercaseText).not.toContain('phish');
+
+  const uppercasePassword = renderMarkdown('<input type="PASSWORD" />');
+  expect(uppercasePassword.toLowerCase()).not.toContain('type="password"');
+});
