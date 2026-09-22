@@ -53,12 +53,19 @@
     })),
   ]);
 
-  let groups = $derived(
-    [...new Set(allOptions.map((p) => p.group))].map((group) => ({
-      group,
-      options: allOptions.filter((p) => p.group === group),
-    })),
-  );
+  // Group options in a single O(N) pass to avoid repeated array iterations and allocations.
+  let groups = $derived.by(() => {
+    const map = new Map<string, ProviderOption[]>();
+    for (const p of allOptions) {
+      let list = map.get(p.group);
+      if (!list) {
+        list = [];
+        map.set(p.group, list);
+      }
+      list.push(p);
+    }
+    return Array.from(map, ([group, options]) => ({ group, options }));
+  });
 
   let cards = $state<Record<string, HTMLButtonElement>>({});
 
