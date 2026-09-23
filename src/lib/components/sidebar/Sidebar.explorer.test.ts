@@ -58,4 +58,17 @@ describe('Sidebar explorer', () => {
       invoke.mock.calls.filter(([c]) => c === 'get_schema_objects'),
     ).toHaveLength(0);
   });
+
+  it('provides ARIA attributes on search input and expandable tree nodes', async () => {
+    const { getByLabelText, getByRole } = render(SidebarHarness, {
+      props: { onObjectClick: () => {} },
+    });
+
+    expect(getByLabelText('Search objects')).toBeTruthy();
+
+    await waitFor(() => {
+      const dbButton = getByRole('button', { name: /app/i });
+      expect(dbButton.getAttribute('aria-expanded')).toBe('true');
+    });
+  });
 });

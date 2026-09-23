@@ -160,6 +160,9 @@
       <button
         class="switcher-btn"
         onclick={() => (switcherOpen = !switcherOpen)}
+        aria-label="Switch connection"
+        aria-expanded={switcherOpen}
+        aria-haspopup="true"
       >
         <!-- Database icon -->
         <span class="switcher-db-icon">
@@ -223,6 +226,7 @@
     <input
       type="text"
       placeholder="Search objects..."
+      aria-label="Search objects"
       bind:value={searchQuery}
     />
     {#if searchQuery}
@@ -230,6 +234,7 @@
         class="clear-btn"
         onclick={() => (searchQuery = '')}
         title="Clear"
+        aria-label="Clear search"
       >
         <svg
           width="12"
@@ -269,7 +274,11 @@
       {#each databases.filter( (d) => dbMatches(d.name, schemasByDb[d.name], loadedObjects, searchQueryLower) ) as db}
         <div class="tree-node">
           <div class="db-row-wrap">
-            <button class="node-row db-row" onclick={() => toggleDb(db.name)}>
+            <button
+              class="node-row db-row"
+              onclick={() => toggleDb(db.name)}
+              aria-expanded={expandedDbs.has(db.name)}
+            >
               <svg
                 class="chevron"
                 class:open={expandedDbs.has(db.name)}
@@ -331,6 +340,8 @@
                     <button
                       class="node-row schema-row"
                       onclick={() => toggleSchema(schema)}
+                      aria-expanded={expandedSchemas.has(schema.name) ||
+                        !!searchQuery}
                     >
                       <svg
                         class="chevron"
@@ -388,6 +399,9 @@
                                   ) || !!searchQuery}
                                   onclick={() =>
                                     toggleGroup(schema.name, group.kind)}
+                                  aria-expanded={expandedGroups.has(
+                                    `${schema.name}|${group.kind}`,
+                                  ) || !!searchQuery}
                                 >
                                   <svg
                                     class="chevron"
