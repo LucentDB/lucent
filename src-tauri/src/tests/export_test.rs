@@ -354,3 +354,31 @@ fn csv_export_quotes_a_decimal_that_contains_the_delimiter() {
     let csv = format_csv(&columns, &rows, &ExportOptions::default());
     assert!(csv.contains("\"1,234.56\""), "got: {csv}");
 }
+
+#[test]
+fn csv_does_not_neutralize_negative_numbers() {
+    // Negative numbers (serde_json::Value::Number) start with '-' but are numeric,
+    // not spreadsheet formula triggers. They must export cleanly without a leading '\''.
+    let columns = vec![
+        ColumnMeta {
+            name: "id".into(),
+            type_name: "int4".into(),
+        },
+        ColumnMeta {
+            name: "balance".into(),
+            type_name: "float8".into(),
+        },
+        ColumnMeta {
+            name: "payload".into(),
+            type_name: "text".into(),
+        },
+    ];
+    let rows = vec![vec![
+        serde_json::json!(-42),
+        serde_json::json!(-100.5),
+        serde_json::json!("-cmd"),
+    ]];
+    let csv = format_csv(&columns, &rows, &ExportOptions::default());
+    let lines: Vec<&str> = csv.lines().collect();
+    assert_eq!(lines[1], "-42,-100.5,'-cmd", "got: {csv}");
+}
