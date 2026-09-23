@@ -68,6 +68,7 @@ fn csv_format_value(v: &serde_json::Value, null_str: &str, delimiter: char) -> S
     match v {
         serde_json::Value::Null => null_str.to_string(),
         serde_json::Value::String(s) => csv_quote(s, delimiter),
+        serde_json::Value::Number(n) => csv_quote_raw(&n.to_string(), delimiter),
         other => csv_quote(&other.to_string(), delimiter),
     }
 }
@@ -88,13 +89,17 @@ fn neutralize_formula(s: &str) -> Cow<'_, str> {
     }
 }
 
-fn csv_quote(s: &str, delimiter: char) -> String {
-    let s = neutralize_formula(s);
+fn csv_quote_raw(s: &str, delimiter: char) -> String {
     if s.contains(delimiter) || s.contains('"') || s.contains('\n') || s.contains('\r') {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
     }
+}
+
+fn csv_quote(s: &str, delimiter: char) -> String {
+    let s = neutralize_formula(s);
+    csv_quote_raw(&s, delimiter)
 }
 
 // ─── JSON Formatting ────────────────────────────────────────────────────────
