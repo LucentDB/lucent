@@ -67,6 +67,9 @@
     {disabled}
     onclick={() => (open = !open)}
     title="Export results"
+    aria-label="Export results"
+    aria-expanded={open}
+    aria-haspopup="true"
   >
     <svg
       width="16"
