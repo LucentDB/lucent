@@ -57,6 +57,7 @@
     title="Copy results"
     aria-label="Copy results"
     aria-expanded={open}
+    aria-haspopup="true"
   >
     <svg
       width="16"
