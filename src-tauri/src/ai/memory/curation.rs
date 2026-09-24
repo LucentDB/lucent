@@ -126,10 +126,7 @@ pub async fn consolidate_or_merge_item(
 ) -> Result<MergeOutcome, String> {
     let existing = mgr.list_memories(&item.connection_key, false).await?;
     for ex in existing {
-        if ex.category == item.category
-            && ex.status == MemoryStatus::Active
-            && !ex.tombstone
-        {
+        if ex.category == item.category && ex.status == MemoryStatus::Active && !ex.tombstone {
             let sim = cosine_similarity(&item.embedding, &ex.embedding);
             if sim >= threshold {
                 // Persist the candidate before folding so its evidence survives
