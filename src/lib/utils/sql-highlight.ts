@@ -59,12 +59,14 @@ function escapeHtml(text: string): string {
  * so SQL containing markup remains text rather than becoming DOM content.
  */
 export function highlightSqlHtml(code: string): string {
-  return tokenizeSql(code)
-    .map(({ text, cls }) => {
-      const escapedText = escapeHtml(text);
-      return cls
-        ? `<span class="${escapeHtml(cls)}">${escapedText}</span>`
-        : escapedText;
-    })
-    .join('');
+  const tokens = tokenizeSql(code);
+  let html = '';
+  // Avoid intermediate array allocations (.map().join()) and redundant escapeHtml
+  // calls on trusted Lezer CSS class names (cls is static grammar tokens e.g. tok-keyword).
+  for (let i = 0; i < tokens.length; i++) {
+    const { text, cls } = tokens[i];
+    const escapedText = escapeHtml(text);
+    html += cls ? `<span class="${cls}">${escapedText}</span>` : escapedText;
+  }
+  return html;
 }
