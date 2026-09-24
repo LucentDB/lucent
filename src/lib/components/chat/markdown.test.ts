@@ -86,3 +86,10 @@ test('preserves GFM task list checkboxes', () => {
   expect(out).toContain('Todo item');
   expect(out).toContain('Done item');
 });
+
+test('strips autofocus attributes from elements to prevent focus hijacking', () => {
+  const out = renderMarkdown(
+    '<input type="checkbox" autofocus /><a href="https://example.com" autofocus>link</a>',
+  );
+  expect(out.toLowerCase()).not.toContain('autofocus');
+});
