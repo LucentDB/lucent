@@ -156,6 +156,9 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
         other => panic!("expected Done, got {other:?}"),
     }
 
+    // Give the background task spawned by TauriSink time to write to SQLite
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
     // Verify that TauriSink persisted the assistant response and thinking to memory_manager
     // with the real conversation_id
     let persisted_msgs = state.memory_manager.list_messages(&conv_id).await.unwrap();
