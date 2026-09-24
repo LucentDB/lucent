@@ -556,7 +556,9 @@ impl DatabaseAgent {
     ) -> Result<(), String> {
         let conversation_id = {
             let s = conv_state.lock().await;
-            s.conversation_id.clone().unwrap_or_else(|| s.connection_id.clone())
+            s.conversation_id
+                .clone()
+                .unwrap_or_else(|| s.connection_id.clone())
         };
 
         let agent = self
