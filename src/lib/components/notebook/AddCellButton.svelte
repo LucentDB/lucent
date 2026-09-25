@@ -8,7 +8,8 @@
   } = $props();
 
   let open = $state(false);
-  let btnEl: HTMLButtonElement;
+  let btnEl: HTMLButtonElement | null = $state(null);
+  let popupEl: HTMLDivElement | null = $state(null);
   let popupStyle = $state('');
 
   function toggle() {
@@ -26,13 +27,52 @@
     open = !open;
   }
 
+  $effect(() => {
+    if (open && popupEl) {
+      popupEl.focus();
+    }
+  });
+
   function add(kind: CellKind) {
     open = false;
     onAdd?.(kind);
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape') open = false;
+    if (e.key === 'Escape') {
+      open = false;
+      btnEl?.focus();
+      return;
+    }
+    if (!popupEl) return;
+    const options = Array.from(
+      popupEl.querySelectorAll<HTMLButtonElement>('.add-option'),
+    );
+    if (options.length === 0) return;
+
+    const currentIndex = options.indexOf(
+      document.activeElement as HTMLButtonElement,
+    );
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      const nextIndex =
+        currentIndex < 0 || currentIndex === options.length - 1
+          ? 0
+          : currentIndex + 1;
+      options[nextIndex]?.focus();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const prevIndex =
+        currentIndex <= 0 ? options.length - 1 : currentIndex - 1;
+      options[prevIndex]?.focus();
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      options[0]?.focus();
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      options[options.length - 1]?.focus();
+    }
   }
 </script>
 
@@ -54,8 +94,10 @@
       tabindex="-1"
     ></button>
     <div
+      bind:this={popupEl}
       class="add-popup"
       role="menu"
+      tabindex="0"
       style={popupStyle}
       onkeydown={handleKeydown}
     >
@@ -150,6 +192,9 @@
     min-width: 160px;
     padding: 5px;
   }
+  .add-popup:focus {
+    outline: none;
+  }
   .add-option {
     display: flex;
     align-items: center;
@@ -163,8 +208,10 @@
     cursor: pointer;
     border-radius: var(--radius-md);
   }
-  .add-option:hover {
+  .add-option:hover,
+  .add-option:focus {
     background: var(--bg-hover);
+    outline: none;
   }
   .option-icon {
     width: 20px;
