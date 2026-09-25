@@ -783,7 +783,13 @@ mod tests {
         }
     }
 
-    struct EnvVarGuard<'a>(&'a str, Option<String>);
+    pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(crate) struct EnvVarGuard<'a>(
+        &'a str,
+        Option<String>,
+        Option<std::sync::MutexGuard<'static, ()>>,
+    );
     impl Drop for EnvVarGuard<'_> {
         fn drop(&mut self) {
             match &self.1 {
@@ -792,9 +798,10 @@ mod tests {
             }
         }
     }
-    fn env_var_guard(name: &'static str) -> EnvVarGuard<'static> {
+    pub(crate) fn env_var_guard(name: &'static str) -> EnvVarGuard<'static> {
+        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var(name).ok();
-        EnvVarGuard(name, prior)
+        EnvVarGuard(name, prior, Some(lock))
     }
 
     fn hermetic_workspace() -> tempfile::TempDir {

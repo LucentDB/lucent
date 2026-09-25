@@ -539,19 +539,7 @@ async fn agent_spawning_mcp_binary_marks_bridge_connected() {
     acp.drop_session("conv-connect").await;
 }
 
-struct EnvVarGuard<'a>(&'a str, Option<String>);
-impl Drop for EnvVarGuard<'_> {
-    fn drop(&mut self) {
-        match &self.1 {
-            Some(v) => std::env::set_var(self.0, v),
-            None => std::env::remove_var(self.0),
-        }
-    }
-}
-fn env_var_guard(name: &'static str) -> EnvVarGuard<'static> {
-    let prior = std::env::var(name).ok();
-    EnvVarGuard(name, prior)
-}
+use crate::ai::acp::driver::tests::env_var_guard;
 
 #[tokio::test]
 async fn tools_gate_claims_tools_when_the_bridge_connects() {
