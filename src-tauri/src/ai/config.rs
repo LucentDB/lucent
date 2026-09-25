@@ -170,6 +170,11 @@ pub fn save_config_to_disk(config: &AiConfig) -> Result<(), String> {
     let json =
         serde_json::to_string_pretty(config).map_err(|e| format!("serialize config: {e}"))?;
     std::fs::write(&path, json).map_err(|e| format!("write config: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
     log::info!("AI config saved to {path:?}");
     Ok(())
 }
