@@ -5,3 +5,7 @@
 ## 2025-02-12 - Prevent Repeated String Allocation in UI Filters
 **Learning:** In Svelte components with reactive list filters driven by keystrokes, running `toLowerCase()` on multiple properties of every list item during the filter phase causes massive unnecessary string allocations per keystroke. The parallel cache pattern (`item`, `lowerName`, etc.) effectively eliminates these allocations while preserving object identity.
 **Action:** When implementing search filters over arrays of objects in Svelte, use a `$derived` parallel cache to store lowercased strings derived from the data, then filter against the cache and map back to `item`.
+
+## 2025-02-12 - Prevent Repeated Table Row Model Lookups in Grid Body Loops
+**Learning:** In Svelte 5 data grids wrapping TanStack Table, calling `table.getRowModel()` inside an `{#each}` iteration loop invokes the table row model accessor $N$ times per render ($N$ = page size). Extracting `const allTableRows = $derived(table.getRowModel().rows)` at component scope reduces row model getter invocations from $O(N)$ per render pass to $O(1)$.
+**Action:** When rendering table rows from a TanStack Table instance in Svelte 5, derive `$derived(table.getRowModel().rows)` at top-level component scope instead of calling `table.getRowModel()` inside the row loop.
