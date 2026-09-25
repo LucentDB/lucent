@@ -157,8 +157,15 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
     }
 
     // Verify that TauriSink persisted the assistant response and thinking to memory_manager
-    // with the real conversation_id
-    let persisted_msgs = state.memory_manager.list_messages(&conv_id).await.unwrap();
+    // with the real conversation_id (poll retry loop for async task completion)
+    let mut persisted_msgs = Vec::new();
+    for _ in 0..20 {
+        persisted_msgs = state.memory_manager.list_messages(&conv_id).await.unwrap();
+        if !persisted_msgs.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(
         persisted_msgs.len(),
         1,
