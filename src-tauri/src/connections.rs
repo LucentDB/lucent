@@ -276,6 +276,11 @@ fn write_all_at(
     };
     let content = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
     std::fs::write(&tmp, &content).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
     Ok(())
 }
