@@ -194,12 +194,16 @@ describe('ChatMessage — work sessions (thoughts and tool calls)', () => {
       }),
     });
 
-    const thoughtButtons = screen.getAllByRole('button', { name: /Thought for 3s/i });
+    const thoughtButtons = screen.getAllByRole('button', {
+      name: /Thought for 3s/i,
+    });
     expect(thoughtButtons.length).toBe(2);
 
     // Clicking the ThinkingCard header expands its thoughts
     await fireEvent.click(thoughtButtons[1]);
-    expect(screen.getByText(/Considering database schema and foreign keys.../i)).toBeTruthy();
+    expect(
+      screen.getByText(/Considering database schema and foreign keys.../i),
+    ).toBeTruthy();
     expect(screen.getByText('Answer after thinking')).toBeTruthy();
   });
 
@@ -263,4 +267,3 @@ describe('ChatMessage — work sessions (thoughts and tool calls)', () => {
     expect(await screen.findByText('Secret thoughts...')).toBeTruthy();
   });
 });
-
