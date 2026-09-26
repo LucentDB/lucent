@@ -669,7 +669,10 @@ describe('hydrateConversations', () => {
     chat.activeConversationId = conv.id;
 
     invokeMock.mockImplementation(async (cmd: string, args: any) => {
-      if (cmd === 'load_chat_conversation' && args?.conversationId === 'conv-empty') {
+      if (
+        cmd === 'load_chat_conversation' &&
+        args?.conversationId === 'conv-empty'
+      ) {
         return [
           {
             id: 'm1',
@@ -715,7 +718,10 @@ describe('hydrateConversations', () => {
     chat.activeConversationId = 'other-conv';
 
     invokeMock.mockImplementation(async (cmd: string, args: any) => {
-      if (cmd === 'load_chat_conversation' && args?.conversationId === 'conv-stale') {
+      if (
+        cmd === 'load_chat_conversation' &&
+        args?.conversationId === 'conv-stale'
+      ) {
         return [
           {
             id: 'm1',
