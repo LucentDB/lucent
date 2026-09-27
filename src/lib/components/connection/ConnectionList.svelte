@@ -111,6 +111,7 @@
         type="text"
         class="search-input"
         placeholder="Search connections...  (/)"
+        aria-label="Search connections"
         bind:value={searchQuery}
       />
     </div>
@@ -119,6 +120,7 @@
         class="view-toggle"
         onclick={() => (viewMode = viewMode === 'list' ? 'grid' : 'list')}
         title="Toggle view"
+        aria-label="Toggle view mode"
       >
         {#if viewMode === 'list'}
           <svg
