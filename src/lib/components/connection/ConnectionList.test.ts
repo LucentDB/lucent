@@ -25,11 +25,13 @@ describe('ConnectionList accessible elements', () => {
 
   it('renders search input and view toggle button with accessible ARIA labels', () => {
     render(ConnectionList, {
-      profiles: [sampleProfile],
-      groupedProfiles: [{ name: 'Default', profiles: [sampleProfile] }],
-      loading: false,
-      activeProfileId: null,
-      testingIds: new Set(),
+      props: {
+        profiles: [sampleProfile],
+        groupedProfiles: [{ name: 'Default', profiles: [sampleProfile] }],
+        loading: false,
+        activeProfileId: null,
+        testingIds: new Set<string>(),
+      },
     });
 
     expect(
