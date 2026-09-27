@@ -358,8 +358,11 @@ mod tests {
         assert!(got.is_ok(), "matching hash must verify: {got:?}");
     }
 
+    static HOME_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[tokio::test]
     async fn npx_install_round_trips_installed_json() {
+        let _guard = HOME_MUTEX.lock().unwrap();
         // The npx path never executes anything — install() only resolves the
         // launch spec and writes installed.json. No network is touched.
         let manifest: AgentManifest = serde_json::from_str(
@@ -410,6 +413,7 @@ mod tests {
 
     #[test]
     fn list_installed_lists_every_agent_with_installed_json() {
+        let _guard = HOME_MUTEX.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let agents = tmp.path().join(".lucent").join("agents");
         for (id, version, cmd) in [
