@@ -91,6 +91,40 @@ pub(crate) fn validate_agent_id(id: &str) -> Result<(), String> {
     }
 }
 
+/// Safely unpacks a tar archive stream into `dest`, ensuring entry paths do not escape `dest`.
+fn unpack_tar<R: std::io::Read>(reader: R, dest: &Path) -> Result<(), String> {
+    let mut tar = tar::Archive::new(reader);
+    let canonical_dest = dest
+        .canonicalize()
+        .or_else(|_| {
+            std::fs::create_dir_all(dest)?;
+            dest.canonicalize()
+        })
+        .map_err(|e| format!("resolve destination path: {e}"))?;
+
+    for entry in tar.entries().map_err(|e| format!("read tar entries: {e}"))? {
+        let mut entry = entry.map_err(|e| format!("read tar entry: {e}"))?;
+        let path = entry.path().map_err(|e| format!("read entry path: {e}"))?;
+
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(format!("path traversal detected in tar archive: {path:?}"));
+        }
+
+        let target = canonical_dest.join(&path);
+        if let Ok(canonical_target) = target.canonicalize() {
+            if !canonical_target.starts_with(&canonical_dest) {
+                return Err(format!("tar entry escapes destination directory: {path:?}"));
+            }
+        }
+        entry.unpack_in(&canonical_dest).map_err(|e| format!("unpack tar entry: {e}"))?;
+    }
+    Ok(())
+}
+
 /// Extracts an archive into `dest`. Supports `.zip`, `.tar.gz`/`.tgz`, and
 /// `.tar.bz2`/`.tbz2`; recognized-but-unhandled compressed suffixes are a hard
 /// error (a silently copied archive is a broken install with no diagnostic);
@@ -105,14 +139,10 @@ fn extract_archive(archive: &Path, dest: &Path) -> Result<(), String> {
         zip.extract(dest).map_err(|e| format!("extract zip: {e}"))?;
     } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
         let gz = flate2::read::GzDecoder::new(f);
-        let mut tar = tar::Archive::new(gz);
-        tar.unpack(dest)
-            .map_err(|e| format!("extract tar.gz: {e}"))?;
+        unpack_tar(gz, dest).map_err(|e| format!("extract tar.gz: {e}"))?;
     } else if name.ends_with(".tar.bz2") || name.ends_with(".tbz2") {
         let bz = bzip2::read::BzDecoder::new(f);
-        let mut tar = tar::Archive::new(bz);
-        tar.unpack(dest)
-            .map_err(|e| format!("extract tar.bz2: {e}"))?;
+        unpack_tar(bz, dest).map_err(|e| format!("extract tar.bz2: {e}"))?;
     } else if is_unhandled_compressed(name) {
         return Err(format!(
             "unsupported archive type {} — install it manually or choose another agent",
@@ -121,7 +151,18 @@ fn extract_archive(archive: &Path, dest: &Path) -> Result<(), String> {
     } else {
         // Plain binary archive (no compression suffix): copy as-is.
         std::fs::create_dir_all(dest).map_err(|e| format!("create dest dir: {e}"))?;
-        let out = dest.join(name);
+        let file_name = archive
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| "invalid archive file name".to_string())?;
+        let p = Path::new(file_name);
+        if p.is_absolute()
+            || p.components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(format!("unsafe binary target path: {file_name}"));
+        }
+        let out = dest.join(p);
         std::fs::copy(archive, &out).map_err(|e| format!("copy binary: {e}"))?;
     }
     Ok(())
@@ -596,6 +637,20 @@ mod tests {
         let dest = tmp.path().join("out");
         let err = extract_archive(&zip_path, &dest).expect_err("zip-slip entry must be rejected");
         assert!(err.contains("extract zip"), "unexpected error: {err}");
+        assert!(
+            !tmp.path().join("evil.txt").exists(),
+            "no file may escape the dest dir"
+        );
+    }
+
+    #[test]
+    fn tar_slip_entries_are_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tgz_path = tmp.path().join("evil.tar.gz");
+        write_tar_gz(&tgz_path, &[("../evil.txt", b"pwned")]);
+        let dest = tmp.path().join("out");
+        let err = extract_archive(&tgz_path, &dest).expect_err("tar-slip entry must be rejected");
+        assert!(err.contains("path traversal detected in tar archive"), "unexpected error: {err}");
         assert!(
             !tmp.path().join("evil.txt").exists(),
             "no file may escape the dest dir"
