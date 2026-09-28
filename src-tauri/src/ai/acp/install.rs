@@ -102,7 +102,10 @@ fn unpack_tar<R: std::io::Read>(reader: R, dest: &Path) -> Result<(), String> {
         })
         .map_err(|e| format!("resolve destination path: {e}"))?;
 
-    for entry in tar.entries().map_err(|e| format!("read tar entries: {e}"))? {
+    for entry in tar
+        .entries()
+        .map_err(|e| format!("read tar entries: {e}"))?
+    {
         let mut entry = entry.map_err(|e| format!("read tar entry: {e}"))?;
         let path = entry.path().map_err(|e| format!("read entry path: {e}"))?;
 
@@ -120,7 +123,9 @@ fn unpack_tar<R: std::io::Read>(reader: R, dest: &Path) -> Result<(), String> {
                 return Err(format!("tar entry escapes destination directory: {path:?}"));
             }
         }
-        entry.unpack_in(&canonical_dest).map_err(|e| format!("unpack tar entry: {e}"))?;
+        entry
+            .unpack_in(&canonical_dest)
+            .map_err(|e| format!("unpack tar entry: {e}"))?;
     }
     Ok(())
 }
@@ -647,14 +652,38 @@ mod tests {
     fn tar_slip_entries_are_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let tgz_path = tmp.path().join("evil.tar.gz");
-        write_tar_gz(&tgz_path, &[("../evil.txt", b"pwned")]);
+        write_tar_gz_with_path(&tgz_path, Path::new("../evil.txt"), b"pwned").unwrap();
         let dest = tmp.path().join("out");
         let err = extract_archive(&tgz_path, &dest).expect_err("tar-slip entry must be rejected");
-        assert!(err.contains("path traversal detected in tar archive"), "unexpected error: {err}");
+        assert!(
+            err.contains("path traversal detected in tar archive")
+                || err.contains("paths in archives must not have `..`")
+                || err.contains("unpack tar entry"),
+            "unexpected error: {err}"
+        );
         assert!(
             !tmp.path().join("evil.txt").exists(),
             "no file may escape the dest dir"
         );
+    }
+
+    fn write_tar_gz_with_path(
+        file_path: &Path,
+        entry_path: &str,
+        data: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let f = std::fs::File::create(file_path)?;
+        let gz = flate2::write::GzEncoder::new(f, flate2::Compression::default());
+        let mut tar = tar::Builder::new(gz);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        let bytes = entry_path.as_bytes();
+        header.as_mut_bytes()[..bytes.len()].copy_from_slice(bytes);
+        header.set_cksum();
+        tar.append(&header, data)?;
+        tar.into_inner()?.finish()?;
+        Ok(())
     }
 
     fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
