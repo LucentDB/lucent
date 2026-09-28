@@ -652,7 +652,7 @@ mod tests {
     fn tar_slip_entries_are_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let tgz_path = tmp.path().join("evil.tar.gz");
-        write_tar_gz_with_path(&tgz_path, Path::new("../evil.txt"), b"pwned").unwrap();
+        write_tar_gz_with_path(&tgz_path, "../evil.txt", b"pwned").unwrap();
         let dest = tmp.path().join("out");
         let err = extract_archive(&tgz_path, &dest).expect_err("tar-slip entry must be rejected");
         assert!(
