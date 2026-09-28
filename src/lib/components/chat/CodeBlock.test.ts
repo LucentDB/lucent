@@ -8,7 +8,9 @@ afterEach(cleanup);
 describe('CodeBlock', () => {
   it('renders copy button with type="button" and accessible aria-label', () => {
     render(CodeBlock, { code: 'SELECT 1;' });
-    const btn = screen.getByRole('button', { name: 'Copy code block to clipboard' });
+    const btn = screen.getByRole('button', {
+      name: 'Copy code block to clipboard',
+    });
     expect(btn).toBeTruthy();
     expect(btn.getAttribute('type')).toBe('button');
   });
