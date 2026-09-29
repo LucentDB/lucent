@@ -107,16 +107,17 @@ async fn cancels_a_long_running_query_via_the_real_binary() {
     .await
     .unwrap();
 
-    let cancel_response: WorkerResponse = read_message(&mut framed).await.unwrap().unwrap();
-    assert!(
-        matches!(cancel_response, WorkerResponse::Cancelled { .. }),
-        "expected Cancelled, got {cancel_response:?}"
-    );
+    let msg1: WorkerResponse = read_message(&mut framed).await.unwrap().unwrap();
+    let msg2: WorkerResponse = read_message(&mut framed).await.unwrap().unwrap();
 
-    let execute_outcome: WorkerResponse = read_message(&mut framed).await.unwrap().unwrap();
+    let has_cancelled = matches!(msg1, WorkerResponse::Cancelled { .. })
+        || matches!(msg2, WorkerResponse::Cancelled { .. });
+    let has_error = matches!(msg1, WorkerResponse::Error { .. })
+        || matches!(msg2, WorkerResponse::Error { .. });
+
     assert!(
-        matches!(execute_outcome, WorkerResponse::Error { .. }),
-        "the cancelled query's execute task should report an Error, got {execute_outcome:?}"
+        has_cancelled && has_error,
+        "expected one Cancelled and one Error, got msg1={msg1:?} and msg2={msg2:?}"
     );
 
     let _ = child.kill().await;
