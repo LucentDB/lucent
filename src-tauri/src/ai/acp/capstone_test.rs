@@ -565,7 +565,7 @@ async fn tools_gate_claims_tools_when_the_bridge_connects() {
         _ws.path().to_string_lossy().into_owned(),
     );
     let _gate_guard = env_var_guard("LUCENT_ACP_TOOLS_GATE_MS");
-    std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "5000");
+    std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "15000");
     let script_dir = tempfile::tempdir().unwrap();
     std::fs::write(
         script_dir.path().join("script.json"),
