@@ -76,9 +76,9 @@ export function renderMarkdown(text: string): string {
     const html = typeof result === 'string' ? result : String(result);
     return DOMPurify.sanitize(html, {
       FORBID_TAGS: FORBIDDEN_MARKDOWN_TAGS,
-      // Only safe link protocols, so `data:`/`javascript:` URLs are dropped.
+      // Only safe link protocols and relative paths, so `data:`, `javascript:`, `blob:`, etc. are dropped.
       ALLOWED_URI_REGEXP:
-        /^(?:(?:(?:f|ht)tps?|mailto|tel):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i,
+        /^(?:(?:(?:f|ht)tps?|mailto|tel):|(?:(?!\/\/)[^:]*?(?:[/?#]|$)))/i,
     });
   } catch {
     return String(text ?? '')

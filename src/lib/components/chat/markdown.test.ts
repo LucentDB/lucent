@@ -33,6 +33,22 @@ test('strips data: URLs in links', () => {
   expect(out.toLowerCase()).not.toContain('data:text/html');
 });
 
+test('strips blob: URLs in links and images', () => {
+  const linkOut = renderMarkdown('[click](blob:https://example.com/uuid)');
+  expect(linkOut.toLowerCase()).not.toContain('blob:');
+
+  const imgOut = renderMarkdown('![img](blob:https://example.com/uuid)');
+  expect(imgOut.toLowerCase()).not.toContain('blob:');
+});
+
+test('allows relative URLs and standard safe schemes', () => {
+  const relOut = renderMarkdown('[relative](/path/to/page)');
+  expect(relOut).toContain('href="/path/to/page"');
+
+  const mailOut = renderMarkdown('[email](mailto:test@example.com)');
+  expect(mailOut).toContain('href="mailto:test@example.com"');
+});
+
 test('adds target="_blank" and rel="noopener noreferrer" to links', () => {
   const out = renderMarkdown('[example](https://example.com)');
   expect(out).toContain('target="_blank"');
