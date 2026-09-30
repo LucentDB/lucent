@@ -134,8 +134,8 @@ impl SaveMemory {
             stability_hours: TOOL_RULE_STABILITY_HOURS,
             last_accessed_at: now,
             access_count: 1,
-            // Tagged as error_resolution / untrusted_tool_result from tool call. Never UserExplicit.
-            source_trust: SourceTrust::ErrorResolution,
+            // Tagged as untrusted_tool_result from tool call. Never UserExplicit or ErrorResolution.
+            source_trust: SourceTrust::UntrustedToolResult,
             source_conv_id: None,
             source_turn_id: None,
             source_tool_id: Some("save_memory".into()),
@@ -353,6 +353,7 @@ mod tests {
             "the tool must write through ctx.memory_manager, not open_default()"
         );
         assert_eq!(stored[0].key_phrase, "active_subscribers");
+        assert_eq!(stored[0].source_trust, SourceTrust::UntrustedToolResult);
     }
 
     /// B-C2 for the read path: a golden query seeded in `ctx.memory_manager`
