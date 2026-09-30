@@ -72,12 +72,20 @@
   </button>
 
   {#if open}
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="dropdown-backdrop" onclick={() => (open = false)}></div>
-    <div class="dropdown-menu">
+    <button
+      type="button"
+      class="dropdown-backdrop"
+      onclick={() => (open = false)}
+      aria-label="Close copy options"
+      tabindex="-1"
+    ></button>
+    <div class="dropdown-menu" role="menu">
       {#each copyFormats as fmt}
-        <button class="menu-item" onclick={() => handleCopy(fmt.id)}>
+        <button
+          class="menu-item"
+          role="menuitem"
+          onclick={() => handleCopy(fmt.id)}
+        >
           Copy as {fmt.label}
         </button>
       {/each}
@@ -113,6 +121,8 @@
     position: fixed;
     inset: 0;
     z-index: 99;
+    border: none;
+    background: transparent;
   }
   .dropdown-menu {
     position: absolute;

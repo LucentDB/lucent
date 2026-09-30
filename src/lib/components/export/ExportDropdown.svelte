@@ -67,6 +67,8 @@
     {disabled}
     onclick={() => (open = !open)}
     title="Export results"
+    aria-label="Export results"
+    aria-expanded={open}
   >
     <svg
       width="16"
@@ -83,12 +85,20 @@
   </button>
 
   {#if open}
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="dropdown-backdrop" onclick={() => (open = false)}></div>
-    <div class="dropdown-menu">
+    <button
+      type="button"
+      class="dropdown-backdrop"
+      onclick={() => (open = false)}
+      aria-label="Close export options"
+      tabindex="-1"
+    ></button>
+    <div class="dropdown-menu" role="menu">
       {#each exportFormats as fmt}
-        <button class="menu-item" onclick={() => handleExport(fmt.id)}>
+        <button
+          class="menu-item"
+          role="menuitem"
+          onclick={() => handleExport(fmt.id)}
+        >
           <span class="menu-label">Export as {fmt.label}</span>
           <span class="menu-ext">{fmt.ext}</span>
         </button>
@@ -125,6 +135,8 @@
     position: fixed;
     inset: 0;
     z-index: 99;
+    border: none;
+    background: transparent;
   }
   .dropdown-menu {
     position: absolute;
