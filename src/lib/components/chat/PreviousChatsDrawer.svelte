@@ -148,9 +148,7 @@
   const filteredConversations = $derived.by(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return conversations;
-    return conversations.filter((c) =>
-      (c.title || '').toLowerCase().includes(q),
-    );
+    return conversations.filter((c) => (c.title || '').toLowerCase().includes(q));
   });
 </script>
 
@@ -158,7 +156,11 @@
 
 <div class="previous-chats-portal" data-previous-chats-portal use:portal>
   {#if isOpen}
-    <div class="drawer-overlay" onclick={close} role="presentation">
+    <div
+      class="drawer-overlay"
+      onclick={close}
+      role="presentation"
+    >
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <div
         class="drawer"
@@ -230,9 +232,7 @@
           {:else}
             <div class="conv-list">
               {#each filteredConversations as conv (conv.id)}
-                {@const isOpenTab = chat.conversations.some(
-                  (c) => c.id === conv.id,
-                )}
+                {@const isOpenTab = chat.conversations.some((c) => c.id === conv.id)}
                 {@const isActive = chat.activeConversationId === conv.id}
                 <div
                   class="conv-card"
@@ -249,9 +249,7 @@
                   }}
                 >
                   <div class="conv-card-top">
-                    <span class="conv-title"
-                      >{conv.title || 'Conversation'}</span
-                    >
+                    <span class="conv-title">{conv.title || 'Conversation'}</span>
                     <div class="conv-badges">
                       {#if isOpenTab}
                         <span class="badge open">Open</span>
@@ -259,9 +257,7 @@
                       <button
                         class="delete-btn"
                         class:armed={confirmDeleteId === conv.id}
-                        title={confirmDeleteId === conv.id
-                          ? 'Click again to confirm delete'
-                          : 'Delete chat'}
+                        title={confirmDeleteId === conv.id ? 'Click again to confirm delete' : 'Delete chat'}
                         onclick={(e) => handleDelete(conv.id, e)}
                         onkeydown={(e) => {
                           e.stopPropagation();
@@ -270,9 +266,7 @@
                             handleDelete(conv.id, e as unknown as MouseEvent);
                           }
                         }}
-                        aria-label={confirmDeleteId === conv.id
-                          ? 'Confirm delete chat'
-                          : 'Delete chat'}
+                        aria-label={confirmDeleteId === conv.id ? 'Confirm delete chat' : 'Delete chat'}
                       >
                         {#if confirmDeleteId === conv.id}
                           Confirm?
@@ -288,18 +282,14 @@
                             stroke-linejoin="round"
                           >
                             <polyline points="3 6 5 6 21 6" />
-                            <path
-                              d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"
-                            />
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
                           </svg>
                         {/if}
                       </button>
                     </div>
                   </div>
                   <div class="conv-card-bottom">
-                    <span class="conv-date"
-                      >{formatDate(conv.updated_at || conv.created_at)}</span
-                    >
+                    <span class="conv-date">{formatDate(conv.updated_at || conv.created_at)}</span>
                   </div>
                 </div>
               {/each}
