@@ -45,6 +45,9 @@ const FORBIDDEN_MARKDOWN_TAGS = [
   'select',
   'textarea',
   'button',
+  'base',
+  'meta',
+  'link',
 ];
 
 const SQL_LANGUAGES = new Set([

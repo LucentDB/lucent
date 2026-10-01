@@ -86,3 +86,15 @@ test('preserves GFM task list checkboxes', () => {
   expect(out).toContain('Todo item');
   expect(out).toContain('Done item');
 });
+
+test('strips forbidden base, meta, and link tags from rendered markdown', () => {
+  const payload = `
+<base href="https://attacker.com/" />
+<meta http-equiv="refresh" content="0;url=https://attacker.com" />
+<link rel="stylesheet" href="https://attacker.com/evil.css" />
+`;
+  const out = renderMarkdown(payload);
+  expect(out.toLowerCase()).not.toContain('<base');
+  expect(out.toLowerCase()).not.toContain('<meta');
+  expect(out.toLowerCase()).not.toContain('<link');
+});
