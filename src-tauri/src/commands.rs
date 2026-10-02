@@ -467,10 +467,10 @@ impl AppState {
 
         let external_endpoint_manager = Arc::new(tokio::sync::Mutex::new(None));
 
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        {
             let ctx = external_endpoint_context.clone();
             let mgr = external_endpoint_manager.clone();
-            handle.spawn(async move {
+            let start_endpoint = async move {
                 match crate::ai::external_endpoint::server::ExternalEndpointManager::start(ctx, None).await {
                     Ok(started) => {
                         log::info!("External MCP endpoint started at {}", started.socket_path.display());
@@ -480,7 +480,19 @@ impl AppState {
                         log::warn!("Failed to start external MCP endpoint: {e}");
                     }
                 }
-            });
+            };
+            // In the app, `AppState` is built inside Tauri's synchronous `setup` closure, which is outside any
+            // Tokio runtime context: `Handle::try_current()` fails there, and the endpoint used to never start
+            // (no socket, no descriptor, no log line). Inside a runtime (tests) keep spawning on that runtime;
+            // otherwise spawn on Tauri's own.
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    handle.spawn(start_endpoint);
+                }
+                Err(_) => {
+                    tauri::async_runtime::spawn(start_endpoint);
+                }
+            }
         }
 
         Self {
