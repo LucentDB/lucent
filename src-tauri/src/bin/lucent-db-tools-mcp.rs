@@ -64,7 +64,7 @@ fn parse_tool_arguments(tool: &str, raw_args: Option<&str>) -> serde_json::Value
         "preview_dml" => serde_json::json!({ "sql": trimmed, "description": "" }),
         "get_objects_info" => serde_json::json!({ "objects": [{ "name": trimmed }] }),
         "search_query_history" => serde_json::json!({ "query": trimmed }),
-        "get_preflight_context" => serde_json::json!({}),
+        "get_preflight_context" => serde_json::json!({ "prompt": trimmed }),
         "save_memory" => {
             serde_json::json!({ "category": "quirk", "key_phrase": "rule", "rule_text": trimmed })
         }
@@ -339,6 +339,10 @@ mod tests {
         assert_eq!(
             parse_tool_arguments("preview_dml", Some("UPDATE t SET x = 1")),
             serde_json::json!({"sql": "UPDATE t SET x = 1", "description": ""})
+        );
+        assert_eq!(
+            parse_tool_arguments("get_preflight_context", Some("Alice orders")),
+            serde_json::json!({"prompt": "Alice orders"})
         );
     }
 

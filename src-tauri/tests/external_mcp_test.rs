@@ -84,6 +84,10 @@ async fn setup_test_endpoint_with_file(
         .await
         .expect("connect external AI session");
 
+    ExternalEndpointManager::run_connector_canary(&client, ext_ai_cid)
+        .await
+        .expect("canary check on initial ext_ai_cid");
+
     let path_str = db_path.to_string_lossy().to_string();
     let mut params = std::collections::BTreeMap::new();
     params.insert("path".into(), path_str);

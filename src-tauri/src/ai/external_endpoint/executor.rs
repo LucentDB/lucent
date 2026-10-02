@@ -123,7 +123,15 @@ impl ToolExecutor for DynamicContextToolExecutor {
                             // Run connector-level canary probe
                             let canary_res = run_connector_canary(client, new_id).await;
                             if let Err(e) = canary_res {
-                                log::error!("Connector canary verification failed on reopen: {e}");
+                                log::error!("Connector canary verification failed on reopen: {e}; refusing to serve");
+                                let _ = client.disconnect_id(new_id).await;
+                                *conn_guard = None;
+                                if let Some(ref mut p) = *self.context.active_profile.lock().await {
+                                    p.enable_external_agents = false;
+                                }
+                                return Err(ToolError::Execution(format!(
+                                    "Connector canary verification failed on reopen: {e}. External agent access disabled."
+                                )));
                             }
 
                             // Refresh schema graph

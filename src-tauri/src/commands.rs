@@ -1214,17 +1214,20 @@ async fn connect_impl(
     *state.client.lock().await = Some(client.clone());
 
     // Profile sync for external endpoint
-    let profile = if let Some(pid) = profile_id {
+    let mut profile = if let Some(pid) = profile_id {
         state.repo.get_profile(pid).await
     } else {
         None
     };
 
-    if let Some(ref p) = profile {
+    if let Some(ref mut p) = profile {
         if p.enable_external_agents && p.driver == "duckdb" {
             if let Some(ext_conn) = *state.external_ai_connection_id.lock().await {
                 if let Err(canary_err) = crate::ai::external_endpoint::server::ExternalEndpointManager::run_connector_canary(&client, ext_conn).await {
-                    log::error!("Connector canary verification failed for external agents: {canary_err}");
+                    log::error!("Connector canary verification failed for external agents: {canary_err}; refusing to serve external endpoint");
+                    p.enable_external_agents = false;
+                    let _ = client.disconnect_id(ext_conn).await;
+                    *state.external_ai_connection_id.lock().await = None;
                 } else {
                     log::info!("Connector canary verified external access disabled on DuckDB handle");
                 }

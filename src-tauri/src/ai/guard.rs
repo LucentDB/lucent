@@ -73,7 +73,45 @@ fn check_query_readonly(q: &Query) -> Result<(), GuardError> {
             check_query_readonly(&cte.query)?;
         }
     }
-    check_setexpr_readonly(&q.body)
+    check_setexpr_readonly(&q.body)?;
+
+    if let Some(order_by) = &q.order_by {
+        if let sqlparser::ast::OrderByKind::Expressions(exprs) = &order_by.kind {
+            for expr in exprs {
+                check_expr(&expr.expr)?;
+            }
+        }
+    }
+    if let Some(limit_clause) = q.limit_clause.as_ref() {
+        match limit_clause {
+            sqlparser::ast::LimitClause::LimitOffset {
+                limit,
+                offset,
+                limit_by,
+            } => {
+                if let Some(l) = limit {
+                    check_expr(l)?;
+                }
+                if let Some(off) = offset {
+                    check_expr(&off.value)?;
+                }
+                for expr in limit_by {
+                    check_expr(expr)?;
+                }
+            }
+            sqlparser::ast::LimitClause::OffsetCommaLimit { offset, limit } => {
+                check_expr(offset)?;
+                check_expr(limit)?;
+            }
+        }
+    }
+    if let Some(fetch) = &q.fetch {
+        if let Some(quantity) = &fetch.quantity {
+            check_expr(quantity)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn explain_options_contain_analyze(options: &Option<Vec<UtilityOption>>) -> bool {
@@ -100,6 +138,7 @@ const FORBIDDEN_FUNCTIONS: &[&str] = &[
     "delta_scan",
     "write_csv",
     "copy_to",
+    "getenv",
     "pg_read_file",
     "pg_read_binary_file",
     "pg_ls_dir",
@@ -192,6 +231,9 @@ fn check_expr(expr: &Expr) -> Result<(), GuardError> {
                 }
                 _ => {}
             }
+            if let Some(filter) = &func.filter {
+                check_expr(filter)?;
+            }
             Ok(())
         }
         Expr::Subquery(subquery) => check_query_readonly(subquery),
@@ -268,6 +310,91 @@ fn check_expr(expr: &Expr) -> Result<(), GuardError> {
             check_expr(expr)?;
             check_expr(pattern)
         }
+        Expr::CompoundFieldAccess { root, access_chain } => {
+            check_expr(root)?;
+            for access in access_chain {
+                match access {
+                    sqlparser::ast::AccessExpr::Dot(expr) => check_expr(expr)?,
+                    sqlparser::ast::AccessExpr::Subscript(sub) => match sub {
+                        sqlparser::ast::Subscript::Index { index } => check_expr(index)?,
+                        sqlparser::ast::Subscript::Slice {
+                            lower_bound,
+                            upper_bound,
+                            stride,
+                        } => {
+                            if let Some(e) = lower_bound {
+                                check_expr(e)?;
+                            }
+                            if let Some(e) = upper_bound {
+                                check_expr(e)?;
+                            }
+                            if let Some(e) = stride {
+                                check_expr(e)?;
+                            }
+                        }
+                    },
+                }
+            }
+            Ok(())
+        }
+        Expr::JsonAccess { value, .. } => check_expr(value),
+        Expr::Substring {
+            expr,
+            substring_from,
+            substring_for,
+            ..
+        } => {
+            check_expr(expr)?;
+            if let Some(f) = substring_from {
+                check_expr(f)?;
+            }
+            if let Some(f) = substring_for {
+                check_expr(f)?;
+            }
+            Ok(())
+        }
+        Expr::Trim {
+            expr, trim_what, ..
+        } => {
+            check_expr(expr)?;
+            if let Some(w) = trim_what {
+                check_expr(w)?;
+            }
+            Ok(())
+        }
+        Expr::Collate { expr, .. }
+        | Expr::Floor { expr, .. }
+        | Expr::Ceil { expr, .. }
+        | Expr::Extract { expr, .. }
+        | Expr::Named { expr, .. } => check_expr(expr),
+        Expr::InUnnest {
+            expr, array_expr, ..
+        } => {
+            check_expr(expr)?;
+            check_expr(array_expr)
+        }
+        Expr::Map(map) => {
+            for entry in &map.entries {
+                check_expr(&entry.key)?;
+                check_expr(&entry.value)?;
+            }
+            Ok(())
+        }
+        Expr::Struct { values, .. } => {
+            for v in values {
+                check_expr(v)?;
+            }
+            Ok(())
+        }
+        Expr::GroupingSets(sets) | Expr::Cube(sets) | Expr::Rollup(sets) => {
+            for set in sets {
+                for e in set {
+                    check_expr(e)?;
+                }
+            }
+            Ok(())
+        }
+        Expr::Interval(interval) => check_expr(&interval.value),
         _ => Ok(()),
     }
 }
@@ -352,12 +479,40 @@ fn check_setexpr_readonly(body: &SetExpr) -> Result<(), GuardError> {
             if let Some(selection) = &sel.selection {
                 check_expr(selection)?;
             }
+            match &sel.group_by {
+                sqlparser::ast::GroupByExpr::Expressions(exprs, _) => {
+                    for e in exprs {
+                        check_expr(e)?;
+                    }
+                }
+                _ => {}
+            }
             if let Some(having) = &sel.having {
                 check_expr(having)?;
             }
+            if let Some(qualify) = &sel.qualify {
+                check_expr(qualify)?;
+            }
+            for e in &sel.sort_by {
+                check_expr(&e.expr)?;
+            }
+            for e in &sel.cluster_by {
+                check_expr(e)?;
+            }
+            for e in &sel.distribute_by {
+                check_expr(e)?;
+            }
             Ok(())
         }
-        SetExpr::Values(_) | SetExpr::Table(_) => Ok(()),
+        SetExpr::Values(values) => {
+            for row in &values.rows {
+                for expr in &row.content {
+                    check_expr(expr)?;
+                }
+            }
+            Ok(())
+        }
+        SetExpr::Table(_) => Ok(()),
         SetExpr::Query(q) => check_query_readonly(q),
         SetExpr::SetOperation { left, right, .. } => {
             check_setexpr_readonly(left)?;
@@ -628,6 +783,13 @@ mod tests {
             "SELECT count(*) FROM glob('/*')",
             "SELECT * FROM pg_read_file('config.json')",
             "SELECT * FROM pg_ls_dir('/tmp')",
+            "SELECT 1 ORDER BY read_text('/etc/passwd')",
+            "SELECT count(*) FROM users GROUP BY read_text('/etc/passwd')",
+            "SELECT (read_json('/etc/passwd'))[0]",
+            "SELECT getenv('SECRET')",
+            "VALUES (read_text('/etc/passwd'))",
+            "SELECT 1 LIMIT (SELECT count(*) FROM read_csv('secret.csv'))",
+            "SELECT 1 FROM users QUALIFY read_text('/etc/passwd') IS NOT NULL",
         ];
 
         for q in forbidden_queries {
