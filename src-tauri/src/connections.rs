@@ -48,6 +48,10 @@ pub struct ConnectionProfile {
     pub last_used: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub enable_external_agents: bool,
+    #[serde(default)]
+    pub allow_query_history: bool,
 }
 
 fn default_driver() -> String {
@@ -72,6 +76,8 @@ impl ConnectionProfile {
             last_used: None,
             created_at: now.clone(),
             updated_at: now,
+            enable_external_agents: false,
+            allow_query_history: false,
         }
     }
 }
@@ -166,6 +172,14 @@ pub fn migrate_v1_profile(value: &serde_json::Value) -> Option<ConnectionProfile
             .map(str::to_string),
         created_at: s("createdAt", &now),
         updated_at: s("updatedAt", &now),
+        enable_external_agents: value
+            .get("enableExternalAgents")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        allow_query_history: value
+            .get("allowQueryHistory")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         name,
     })
 }

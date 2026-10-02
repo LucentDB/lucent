@@ -333,6 +333,8 @@ pub struct AppState {
     /// ROLLBACK and statement_timeout on the AI path can never touch the
     /// editor's session (the same worker socket, a different ConnectionId).
     pub ai_connection_id: Mutex<Option<ConnectionId>>,
+    /// Dedicated external AI session on the same worker socket for external MCP agents.
+    pub external_ai_connection_id: Mutex<Option<ConnectionId>>,
     /// The in-flight editor query (if any) — used by cancel_query. Set before
     /// execute().await, cleared after; holds the newest in-flight editor query;
     /// older completions must not clear a newer registration.
@@ -439,6 +441,7 @@ impl AppState {
             client: Arc::new(Mutex::new(None)),
             current_connection_id: Arc::new(Mutex::new(None)),
             ai_connection_id: Mutex::new(None),
+            external_ai_connection_id: Mutex::new(None),
             editor_query: Mutex::new(None),
             current_database: Mutex::new(None),
             current_connection_config: Mutex::new(None),
@@ -867,6 +870,12 @@ async fn profile_to_config(
         config = config.with(key.clone(), value.clone());
     }
 
+    if profile.enable_external_agents {
+        // Enforce profile-wide read-only and disable external file/network access
+        config = config.with("read_only", "true");
+        config = config.with("external_access", "false");
+    }
+
     // The secret lives in the keychain, never in connections.json.
     match cached_password(state, profile_id).await {
         Ok(secret) => config = config.with_secret(secret),
@@ -926,6 +935,7 @@ async fn connect_impl(
         *client_lock = None;
         // The AI session dies with the old client.
         *state.ai_connection_id.lock().await = None;
+        *state.external_ai_connection_id.lock().await = None;
         // The memory key names the old connection; a failed reconnect must not
         // leave it pointing at stale memories.
         *state.memory_connection_key.lock().await = None;
@@ -1102,6 +1112,21 @@ async fn connect_impl(
         Err(e) => {
             log::warn!("AI session B failed to open ({e}); AI tools will use the editor session");
             *state.ai_connection_id.lock().await = None;
+        }
+    }
+
+    // Dedicated External AI session on the same worker socket for external MCP agents.
+    let ext_ai_conn_id = ConnectionId(Uuid::new_v4());
+    let ext_ai_cfg = resolved.clone();
+    let ext_ai_result = client.connect_with_id(ext_ai_conn_id, ext_ai_cfg).await;
+    match ext_ai_result {
+        Ok(_) => {
+            log::info!("External AI session established");
+            *state.external_ai_connection_id.lock().await = Some(ext_ai_conn_id);
+        }
+        Err(e) => {
+            log::warn!("External AI session failed to open ({e})");
+            *state.external_ai_connection_id.lock().await = None;
         }
     }
 
@@ -2085,6 +2110,9 @@ pub async fn disconnect(state: State<'_, AppState>) -> Result<DisconnectResult, 
         if let Some(ai_id) = *state.ai_connection_id.lock().await {
             let _ = c.disconnect_id(ai_id).await;
         }
+        if let Some(ext_ai_id) = *state.external_ai_connection_id.lock().await {
+            let _ = c.disconnect_id(ext_ai_id).await;
+        }
         log::debug!("Running disconnect on connector client");
         let _ = c.shutdown().await;
     }
@@ -2102,6 +2130,7 @@ pub async fn disconnect(state: State<'_, AppState>) -> Result<DisconnectResult, 
 
     *state.current_connection_id.lock().await = None;
     *state.ai_connection_id.lock().await = None;
+    *state.external_ai_connection_id.lock().await = None;
     *state.current_database.lock().await = None;
     *state.driver_capabilities.lock().await = None;
     *state.memory_connection_key.lock().await = None;
