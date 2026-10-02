@@ -52,6 +52,13 @@ pub fn static_tool_schemas() -> Vec<ToolSchema> {
     lucent_tools_schema(dummy_ctx())
 }
 
+pub fn filter_external_tools(allowed_names: &[String]) -> Vec<ToolSchema> {
+    let all = static_tool_schemas();
+    all.into_iter()
+        .filter(|t| allowed_names.contains(&t.name))
+        .collect()
+}
+
 /// Maps one MCP JSON-RPC request to its response envelope.
 ///
 /// `tools/call` is only validated and routed here (the binary fills `content`
@@ -164,7 +171,8 @@ mod tests {
                 "run_readonly_query",
                 "preview_dml",
                 "save_memory",
-                "search_query_history"
+                "search_query_history",
+                "get_preflight_context"
             ]
         );
         // Each schema is a JSON-schema object; search_schema requires "query".
@@ -274,5 +282,15 @@ mod tests {
             assert_eq!(s.description, t.description());
             assert_eq!(s.input_schema, t.parameters());
         }
+    }
+
+    #[test]
+    fn filter_external_tools_filters_by_descriptor_names() {
+        let allowed = vec!["run_readonly_query".to_string(), "get_preflight_context".to_string()];
+        let filtered = filter_external_tools(&allowed);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().any(|t| t.name == "run_readonly_query"));
+        assert!(filtered.iter().any(|t| t.name == "get_preflight_context"));
+        assert!(!filtered.iter().any(|t| t.name == "preview_dml"));
     }
 }

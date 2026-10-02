@@ -1,6 +1,7 @@
 pub mod execute;
 pub mod memory;
 pub mod objects;
+pub mod preflight;
 pub mod search_schema;
 
 use lucent_protocol::ConnectionId;
@@ -66,6 +67,7 @@ pub enum LucentToolEnum {
     PreviewDml(execute::PreviewDml),
     SaveMemory(memory::SaveMemory),
     SearchQueryHistory(memory::SearchQueryHistory),
+    GetPreflightContext(preflight::GetPreflightContext),
 }
 
 impl LucentToolEnum {
@@ -77,6 +79,7 @@ impl LucentToolEnum {
             LucentToolEnum::PreviewDml(_) => "preview_dml",
             LucentToolEnum::SaveMemory(_) => "save_memory",
             LucentToolEnum::SearchQueryHistory(_) => "search_query_history",
+            LucentToolEnum::GetPreflightContext(_) => "get_preflight_context",
         }
     }
 
@@ -88,6 +91,7 @@ impl LucentToolEnum {
             LucentToolEnum::PreviewDml(t) => t.description(),
             LucentToolEnum::SaveMemory(t) => t.description(),
             LucentToolEnum::SearchQueryHistory(t) => t.description(),
+            LucentToolEnum::GetPreflightContext(t) => t.description(),
         }
     }
 
@@ -99,6 +103,7 @@ impl LucentToolEnum {
             LucentToolEnum::PreviewDml(t) => t.parameters(),
             LucentToolEnum::SaveMemory(t) => t.parameters(),
             LucentToolEnum::SearchQueryHistory(t) => t.parameters(),
+            LucentToolEnum::GetPreflightContext(t) => t.parameters(),
         }
     }
 
@@ -114,6 +119,7 @@ impl LucentToolEnum {
             LucentToolEnum::PreviewDml(t) => t.call(args, ctx).await,
             LucentToolEnum::SaveMemory(t) => t.call(args, ctx).await,
             LucentToolEnum::SearchQueryHistory(t) => t.call(args, ctx).await,
+            LucentToolEnum::GetPreflightContext(t) => t.call(args, ctx).await,
         }
     }
 }
@@ -162,6 +168,7 @@ pub fn all_tools(ctx: AiToolContext) -> Vec<LucentToolEnum> {
         LucentToolEnum::RunReadonlyQuery(execute::RunReadonlyQuery::new(ctx.clone())),
         LucentToolEnum::PreviewDml(execute::PreviewDml::new(ctx.clone())),
         LucentToolEnum::SaveMemory(memory::SaveMemory::new(ctx.clone())),
-        LucentToolEnum::SearchQueryHistory(memory::SearchQueryHistory::new(ctx)),
+        LucentToolEnum::SearchQueryHistory(memory::SearchQueryHistory::new(ctx.clone())),
+        LucentToolEnum::GetPreflightContext(preflight::GetPreflightContext::new(ctx)),
     ]
 }
