@@ -50,9 +50,10 @@ impl Connector for DuckDbConnector {
             .to_string();
         // Absent means read-write, which is what a query editor needs.
         let read_only = config.get("read_only") == Some("true");
+        let external_access = config.get("external_access") != Some("false");
 
         // Opening a database file is filesystem work and can block.
-        let handle = tokio::task::spawn_blocking(move || DuckHandle::open(&path, read_only))
+        let handle = tokio::task::spawn_blocking(move || DuckHandle::open_ext(&path, read_only, external_access))
             .await
             .map_err(|e| {
                 LucentError::new(LucentErrorKind::Internal, format!("open task: {e}"))

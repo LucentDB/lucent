@@ -1,5 +1,8 @@
 use lucent_protocol::SqlDialect;
-use sqlparser::ast::{FromTable, Query, SetExpr, Statement, UtilityOption};
+use sqlparser::ast::{
+    Expr, FromTable, FunctionArg, FunctionArgExpr, FunctionArguments, JoinConstraint, JoinOperator,
+    ObjectName, Query, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, UtilityOption,
+};
 use sqlparser::dialect::Dialect;
 use sqlparser::parser::Parser;
 use thiserror::Error;
@@ -19,6 +22,8 @@ pub enum GuardError {
              prove the statement is read-only"
     )]
     UnknownDialect,
+    #[error("Forbidden function or replacement scan: {0}")]
+    ForbiddenFunction(String),
 }
 
 /// Layer 1 of read-only enforcement: syntactic AST check.
@@ -62,11 +67,6 @@ pub(crate) fn validate_readonly_with_parser(
 
 /// Recursively verify a `Query` — including its CTEs and set-operation branches —
 /// contains no data-modifying statements.
-///
-/// A writing CTE such as `WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x`
-/// parses as `Statement::Query`, but the CTE's body is a DML `SetExpr`
-/// (`Insert`/`Update`/`Delete`). A flat `matches!(stmt, Statement::Query(_))`
-/// check is one level too shallow and would let such statements through.
 fn check_query_readonly(q: &Query) -> Result<(), GuardError> {
     if let Some(with) = &q.with {
         for cte in &with.cte_tables {
@@ -76,12 +76,6 @@ fn check_query_readonly(q: &Query) -> Result<(), GuardError> {
     check_setexpr_readonly(&q.body)
 }
 
-/// sqlparser 0.62 parses `EXPLAIN (ANALYZE true) …` into the parenthesized
-/// `options` list and leaves the `analyze` field false — checking only the
-/// field would let a statement that ACTUALLY EXECUTES through the guard
-/// (C4). Any mention of ANALYZE is rejected: the guard fails closed, and
-/// `EXPLAIN (ANALYZE false)` is vanishingly rare next to the cost of a
-/// wrong answer.
 fn explain_options_contain_analyze(options: &Option<Vec<UtilityOption>>) -> bool {
     options
         .as_ref()
@@ -92,6 +86,250 @@ fn explain_options_contain_analyze(options: &Option<Vec<UtilityOption>>) -> bool
         .unwrap_or(false)
 }
 
+const FORBIDDEN_FUNCTIONS: &[&str] = &[
+    "read_text",
+    "read_csv",
+    "read_parquet",
+    "read_json",
+    "read_blob",
+    "glob",
+    "scan_parquet",
+    "scan_csv",
+    "httpfs",
+    "iceberg_scan",
+    "delta_scan",
+    "write_csv",
+    "copy_to",
+    "pg_read_file",
+    "pg_read_binary_file",
+    "pg_ls_dir",
+    "pg_stat_file",
+    "dblink",
+    "dblink_exec",
+];
+
+fn is_forbidden_func(name: &str) -> bool {
+    FORBIDDEN_FUNCTIONS.contains(&name)
+}
+
+fn check_table_name(name: &ObjectName) -> Result<(), GuardError> {
+    let name_str = name.to_string();
+    let last_str = name
+        .0
+        .last()
+        .map(|p| match p.as_ident() {
+            Some(id) => id.value.clone(),
+            None => p.to_string(),
+        })
+        .unwrap_or_default();
+    let last_lower = last_str.to_ascii_lowercase();
+
+    if is_forbidden_func(&last_lower) {
+        return Err(GuardError::ForbiddenFunction(name_str));
+    }
+
+    let cleaned = last_str.trim_matches('\'').trim_matches('"');
+    let lower_cleaned = cleaned.to_ascii_lowercase();
+    if lower_cleaned.ends_with(".csv")
+        || lower_cleaned.ends_with(".parquet")
+        || lower_cleaned.ends_with(".json")
+        || lower_cleaned.ends_with(".env")
+        || lower_cleaned.ends_with(".txt")
+        || cleaned.contains('/')
+        || cleaned.contains('\\')
+        || name_str.contains('/')
+        || name_str.contains('\\')
+    {
+        return Err(GuardError::ForbiddenFunction(name_str));
+    }
+
+    Ok(())
+}
+
+fn check_function_arg_expr(arg_expr: &FunctionArgExpr) -> Result<(), GuardError> {
+    match arg_expr {
+        FunctionArgExpr::Expr(e) => check_expr(e),
+        _ => Ok(()),
+    }
+}
+
+fn check_function_arg(arg: &FunctionArg) -> Result<(), GuardError> {
+    match arg {
+        FunctionArg::Named { arg, .. } => check_function_arg_expr(arg),
+        FunctionArg::ExprNamed { name, arg, .. } => {
+            check_expr(name)?;
+            check_function_arg_expr(arg)
+        }
+        FunctionArg::Unnamed(arg) => check_function_arg_expr(arg),
+    }
+}
+
+fn check_expr(expr: &Expr) -> Result<(), GuardError> {
+    match expr {
+        Expr::Function(func) => {
+            let func_name = func.name.to_string();
+            let last_str = func
+                .name
+                .0
+                .last()
+                .map(|p| match p.as_ident() {
+                    Some(id) => id.value.clone(),
+                    None => p.to_string(),
+                })
+                .unwrap_or_default();
+            let last_lower = last_str.to_ascii_lowercase();
+            if is_forbidden_func(&last_lower) {
+                return Err(GuardError::ForbiddenFunction(func_name));
+            }
+            match &func.args {
+                FunctionArguments::List(arg_list) => {
+                    for arg in &arg_list.args {
+                        check_function_arg(arg)?;
+                    }
+                }
+                FunctionArguments::Subquery(subquery) => {
+                    check_query_readonly(subquery)?;
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+        Expr::Subquery(subquery) => check_query_readonly(subquery),
+        Expr::InSubquery { subquery, expr, .. } => {
+            check_expr(expr)?;
+            check_query_readonly(subquery)
+        }
+        Expr::Exists { subquery, .. } => check_query_readonly(subquery),
+        Expr::BinaryOp { left, right, .. } => {
+            check_expr(left)?;
+            check_expr(right)
+        }
+        Expr::UnaryOp { expr, .. } => check_expr(expr),
+        Expr::Nested(e) => check_expr(e),
+        Expr::Case {
+            operand,
+            conditions,
+            else_result,
+            ..
+        } => {
+            if let Some(op) = operand {
+                check_expr(op)?;
+            }
+            for c in conditions {
+                check_expr(&c.condition)?;
+                check_expr(&c.result)?;
+            }
+            if let Some(el) = else_result {
+                check_expr(el)?;
+            }
+            Ok(())
+        }
+        Expr::Cast { expr, .. } => check_expr(expr),
+        Expr::InList { expr, list, .. } => {
+            check_expr(expr)?;
+            for item in list {
+                check_expr(item)?;
+            }
+            Ok(())
+        }
+        Expr::Between {
+            expr,
+            low,
+            high,
+            ..
+        } => {
+            check_expr(expr)?;
+            check_expr(low)?;
+            check_expr(high)
+        }
+        Expr::IsNull(e)
+        | Expr::IsNotNull(e)
+        | Expr::IsTrue(e)
+        | Expr::IsNotTrue(e)
+        | Expr::IsFalse(e)
+        | Expr::IsNotFalse(e)
+        | Expr::IsUnknown(e)
+        | Expr::IsNotUnknown(e) => check_expr(e),
+        Expr::Tuple(exprs) => {
+            for e in exprs {
+                check_expr(e)?;
+            }
+            Ok(())
+        }
+        Expr::Array(arr) => {
+            for e in &arr.elem {
+                check_expr(e)?;
+            }
+            Ok(())
+        }
+        Expr::Like { expr, pattern, .. }
+        | Expr::ILike { expr, pattern, .. }
+        | Expr::SimilarTo { expr, pattern, .. } => {
+            check_expr(expr)?;
+            check_expr(pattern)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn check_table_factor(tf: &TableFactor) -> Result<(), GuardError> {
+    match tf {
+        TableFactor::Table { name, args, .. } => {
+            check_table_name(name)?;
+            if let Some(targs) = args {
+                for arg in &targs.args {
+                    check_function_arg(arg)?;
+                }
+            }
+            Ok(())
+        }
+        TableFactor::Function { name, args, .. } => {
+            check_table_name(name)?;
+            for arg in args {
+                check_function_arg(arg)?;
+            }
+            Ok(())
+        }
+        TableFactor::TableFunction { expr, .. } => check_expr(expr),
+        TableFactor::Derived { subquery, .. } => check_query_readonly(subquery),
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => check_table_with_joins(table_with_joins),
+        TableFactor::Pivot { table, .. } | TableFactor::Unpivot { table, .. } => {
+            check_table_factor(table)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn check_table_with_joins(twj: &TableWithJoins) -> Result<(), GuardError> {
+    check_table_factor(&twj.relation)?;
+    for join in &twj.joins {
+        check_table_factor(&join.relation)?;
+        match &join.join_operator {
+            JoinOperator::Join(c)
+            | JoinOperator::Inner(c)
+            | JoinOperator::Left(c)
+            | JoinOperator::LeftOuter(c)
+            | JoinOperator::Right(c)
+            | JoinOperator::RightOuter(c)
+            | JoinOperator::FullOuter(c)
+            | JoinOperator::CrossJoin(c)
+            | JoinOperator::Semi(c)
+            | JoinOperator::LeftSemi(c)
+            | JoinOperator::RightSemi(c)
+            | JoinOperator::Anti(c)
+            | JoinOperator::LeftAnti(c)
+            | JoinOperator::RightAnti(c) => match c {
+                JoinConstraint::On(expr) => check_expr(expr)?,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn check_setexpr_readonly(body: &SetExpr) -> Result<(), GuardError> {
     match body {
         SetExpr::Select(sel) => {
@@ -99,6 +337,23 @@ fn check_setexpr_readonly(body: &SetExpr) -> Result<(), GuardError> {
                 // `SELECT … INTO table` creates a table — a write, even
                 // though the statement parses as a Select (C4).
                 return Err(GuardError::NotReadOnly);
+            }
+            for twj in &sel.from {
+                check_table_with_joins(twj)?;
+            }
+            for item in &sel.projection {
+                match item {
+                    SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => {
+                        check_expr(e)?;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(selection) = &sel.selection {
+                check_expr(selection)?;
+            }
+            if let Some(having) = &sel.having {
+                check_expr(having)?;
             }
             Ok(())
         }
@@ -360,5 +615,27 @@ mod tests {
             extract_table_name("DELETE FROM orders WHERE id=1", PG).as_deref(),
             Some("orders")
         );
+    }
+
+    #[test]
+    fn guard_rejects_filesystem_and_exfiltration_functions_and_replacement_scans() {
+        let forbidden_queries = [
+            "SELECT * FROM read_text('/etc/passwd')",
+            "SELECT * FROM main.read_text('/etc/passwd')",
+            "SELECT * FROM duckdb.read_csv('data.csv')",
+            "SELECT * FROM 'data.csv'",
+            "SELECT * FROM '/etc/hosts'",
+            "SELECT count(*) FROM glob('/*')",
+            "SELECT * FROM pg_read_file('config.json')",
+            "SELECT * FROM pg_ls_dir('/tmp')",
+        ];
+
+        for q in forbidden_queries {
+            let err = validate_readonly(q, SqlDialect::DuckDb).unwrap_err();
+            assert!(
+                matches!(err, GuardError::ForbiddenFunction(_)),
+                "query {q} should fail with ForbiddenFunction, got: {err:?}"
+            );
+        }
     }
 }

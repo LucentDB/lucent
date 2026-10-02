@@ -40,6 +40,10 @@ impl DuckHandle {
     /// lock only bites **across processes** — a second process cannot open the
     /// same file, regardless of mode.
     pub fn open(path: &str, read_only: bool) -> Result<Self, LucentError> {
+        Self::open_ext(path, read_only, true)
+    }
+
+    pub fn open_ext(path: &str, read_only: bool, external_access: bool) -> Result<Self, LucentError> {
         let mut config = Config::default();
         config = config
             .access_mode(if read_only {
@@ -48,6 +52,12 @@ impl DuckHandle {
                 AccessMode::ReadWrite
             })
             .map_err(|e| err(LucentErrorKind::Internal, format!("access mode: {e}")))?;
+
+        if !external_access {
+            config = config
+                .enable_external_access(false)
+                .map_err(|e| err(LucentErrorKind::Internal, format!("external access: {e}")))?;
+        }
 
         let conn = Connection::open_with_flags(path, config).map_err(|e| {
             // A missing file in read-only mode and a locked file are the two
