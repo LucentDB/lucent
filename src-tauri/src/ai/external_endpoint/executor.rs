@@ -1,0 +1,257 @@
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use lucent_protocol::{ConnectionId, DriverCapabilities};
+
+use crate::ai::acp::bridge::ToolExecutor;
+use crate::ai::embed::Embedder;
+use crate::ai::external_endpoint::mirror::InodeTracker;
+use crate::ai::schema_graph::SchemaGraph;
+use crate::ai::tools::{AiToolContext, ToolError, ToolOutput};
+use crate::client::ConnectorClient;
+use crate::connections::ConnectionProfile;
+
+pub struct ExternalEndpointContext {
+    pub client: Arc<Mutex<Option<ConnectorClient>>>,
+    pub external_ai_connection_id: Arc<Mutex<Option<ConnectionId>>>,
+    pub schema_graph: Arc<Mutex<Option<SchemaGraph>>>,
+    pub embedder: Arc<Mutex<Option<Embedder>>>,
+    pub capabilities: Arc<Mutex<Option<DriverCapabilities>>>,
+    pub active_profile: Arc<Mutex<Option<ConnectionProfile>>>,
+    pub inode_tracker: Arc<Mutex<Option<InodeTracker>>>,
+    pub reopen_lock: Arc<Mutex<()>>,
+}
+
+pub struct DynamicContextToolExecutor {
+    context: Arc<ExternalEndpointContext>,
+}
+
+impl DynamicContextToolExecutor {
+    pub fn new(context: Arc<ExternalEndpointContext>) -> Self {
+        Self { context }
+    }
+}
+
+pub async fn run_connector_canary(
+    client: &ConnectorClient,
+    conn_id: ConnectionId,
+) -> Result<(), String> {
+    let temp_canary = std::env::temp_dir().join(format!("lucent-canary-{}.csv", std::process::id()));
+    std::fs::write(&temp_canary, b"id,val\n1,canary\n")
+        .map_err(|e| format!("Failed to create canary file: {e}"))?;
+
+    let sql = format!("SELECT count(*) FROM '{}'", temp_canary.display());
+    let exec_res = client.execute(conn_id, &sql).await;
+
+    let _ = std::fs::remove_file(&temp_canary);
+
+    match exec_res {
+        Ok(_) => Err("Canary failed: external access is not disabled on DuckDB handle!".into()),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("disabled by configuration") || msg.contains("Permission") {
+                Ok(())
+            } else {
+                Err(format!("Canary failed unexpectedly: {msg}"))
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolExecutor for DynamicContextToolExecutor {
+    async fn call(&self, tool: &str, args: serde_json::Value) -> Result<ToolOutput, ToolError> {
+        // 1. Profile Gating
+        let profile = {
+            let profile_guard = self.context.active_profile.lock().await;
+            profile_guard.clone()
+        };
+
+        let Some(profile) = profile else {
+            return Err(ToolError::Execution(
+                "External agent access is disabled: no active database connection profile.".into(),
+            ));
+        };
+
+        if !profile.enable_external_agents {
+            return Err(ToolError::Execution(
+                "External agent access is disabled for the active connection profile.".into(),
+            ));
+        }
+
+        // 2. DML Blocking & Tool Specific Restrictions
+        if tool == "preview_dml" {
+            return Err(ToolError::Execution(
+                "preview_dml is not allowed in external agent mode: external access is strictly read-only".into(),
+            ));
+        }
+
+        if tool == "search_query_history" && !profile.allow_query_history {
+            return Err(ToolError::Execution(
+                "Query history search is disabled for this profile.".into(),
+            ));
+        }
+
+        // 3. Locked Reopen Protocol on Inode / File Swap
+        {
+            let _lock = self.context.reopen_lock.lock().await;
+            let mut tracker_guard = self.context.inode_tracker.lock().await;
+            if let Some(ref mut tracker) = *tracker_guard {
+                if tracker.check_and_update() {
+                    log::info!(
+                        "Detected file swap for {:?}, executing locked reopen protocol",
+                        tracker.path()
+                    );
+                    let path = tracker.path().to_path_buf();
+                    let mut client_guard = self.context.client.lock().await;
+                    if let Some(ref mut client) = *client_guard {
+                        let mut conn_guard = self.context.external_ai_connection_id.lock().await;
+                        if let Some(old_id) = *conn_guard {
+                            let _ = client.disconnect_id(old_id).await;
+                        }
+
+                        let new_id = ConnectionId(uuid::Uuid::new_v4());
+                        let cfg = lucent_protocol::ConnectionConfig::new("duckdb")
+                            .with("path", path.to_string_lossy().to_string())
+                            .with("read_only", "true")
+                            .with("external_access", "false");
+
+                        if let Ok(server_info) = client.connect_with_id(new_id, cfg).await {
+                            *conn_guard = Some(new_id);
+                            *self.context.capabilities.lock().await =
+                                Some(server_info.capabilities.clone());
+
+                            // Run connector-level canary probe
+                            let canary_res = run_connector_canary(client, new_id).await;
+                            if let Err(e) = canary_res {
+                                log::error!("Connector canary verification failed on reopen: {e}");
+                            }
+
+                            // Refresh schema graph
+                            if let Ok((new_graph, _snapshot)) =
+                                SchemaGraph::from_catalog(new_id, client, &server_info.capabilities).await
+                            {
+                                *self.context.schema_graph.lock().await = Some(new_graph);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Build Dynamic Context and Dispatch
+        let conn_id = *self.context.external_ai_connection_id.lock().await;
+        let capabilities = self.context.capabilities.lock().await.clone();
+        let tool_ctx = AiToolContext {
+            db: Arc::clone(&self.context.client),
+            connection_id: conn_id,
+            memory_connection_key: None,
+            capabilities,
+            config: crate::ai::config::AiConfig::default(),
+            schema_graph: Arc::clone(&self.context.schema_graph),
+            embedder: Arc::clone(&self.context.embedder),
+            reranker: Arc::new(Mutex::new(None)),
+            memory_manager: Arc::new(
+                crate::ai::memory::MemoryManager::open_in_memory()
+                    .expect("in-memory memory db for external agent executor"),
+            ),
+        };
+
+        match tool {
+            "run_readonly_query" => {
+                crate::ai::tools::execute::RunReadonlyQuery::new(tool_ctx.clone())
+                    .call(args, &tool_ctx)
+                    .await
+            }
+            "search_schema" => {
+                crate::ai::tools::search_schema::SearchSchema::new(tool_ctx.clone())
+                    .call(args, &tool_ctx)
+                    .await
+            }
+            "get_objects_info" => {
+                crate::ai::tools::objects::GetObjectsInfo::new(tool_ctx.clone())
+                    .call(args, &tool_ctx)
+                    .await
+            }
+            "get_preflight_context" => {
+                crate::ai::tools::preflight::GetPreflightContext::new(tool_ctx.clone())
+                    .call(args, &tool_ctx)
+                    .await
+            }
+            "search_query_history" => {
+                crate::ai::tools::memory::SearchQueryHistory::new(tool_ctx.clone())
+                    .call(args, &tool_ctx)
+                    .await
+            }
+            _ => Err(ToolError::Execution(format!(
+                "Tool '{tool}' is not available in external agent mode"
+            ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::acp::bridge::ToolExecutor;
+
+    pub fn create_mock_external_context(enabled: bool) -> Arc<ExternalEndpointContext> {
+        let profile = if enabled {
+            Some(ConnectionProfile {
+                id: "test_prof".into(),
+                name: "Test DuckDB".into(),
+                driver: "duckdb".into(),
+                alias: None,
+                params: Default::default(),
+                ssh_tunnel_id: None,
+                group: None,
+                color: None,
+                icon: None,
+                last_used: None,
+                created_at: String::new(),
+                updated_at: String::new(),
+                enable_external_agents: true,
+                allow_query_history: false,
+            })
+        } else {
+            None
+        };
+
+        Arc::new(ExternalEndpointContext {
+            client: Arc::new(Mutex::new(None)),
+            external_ai_connection_id: Arc::new(Mutex::new(None)),
+            schema_graph: Arc::new(Mutex::new(None)),
+            embedder: Arc::new(Mutex::new(None)),
+            capabilities: Arc::new(Mutex::new(None)),
+            active_profile: Arc::new(Mutex::new(profile)),
+            inode_tracker: Arc::new(Mutex::new(None)),
+            reopen_lock: Arc::new(Mutex::new(())),
+        })
+    }
+
+    #[tokio::test]
+    async fn executor_rejects_when_profile_disabled_or_dml_requested() {
+        let context = create_mock_external_context(false);
+        let executor = DynamicContextToolExecutor::new(context);
+
+        let err = executor.call("run_readonly_query", serde_json::json!({"sql": "SELECT 1"})).await.unwrap_err();
+        assert!(err.to_string().contains("disabled"));
+
+        let context_enabled = create_mock_external_context(true);
+        let executor_enabled = DynamicContextToolExecutor::new(context_enabled);
+
+        let err = executor_enabled.call("preview_dml", serde_json::json!({"sql": "DELETE FROM t"})).await.unwrap_err();
+        assert!(err.to_string().contains("not allowed in external agent mode"));
+    }
+
+    #[tokio::test]
+    async fn executor_rejects_query_history_when_disabled_on_profile() {
+        let context = create_mock_external_context(true);
+        let executor = DynamicContextToolExecutor::new(context);
+
+        let err = executor
+            .call("search_query_history", serde_json::json!({"query": "SELECT"}))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Query history search is disabled"));
+    }
+}
