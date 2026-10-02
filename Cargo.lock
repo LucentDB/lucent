@@ -4292,6 +4292,7 @@ dependencies = [
  "fs2",
  "futures",
  "keyring",
+ "libc",
  "log",
  "lucent-protocol",
  "regex",

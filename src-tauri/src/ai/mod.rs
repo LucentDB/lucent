@@ -5,6 +5,7 @@ pub mod config;
 pub mod context;
 pub mod embed;
 pub mod events;
+pub mod external_endpoint;
 pub mod guard;
 pub mod indexer;
 pub mod memory;
