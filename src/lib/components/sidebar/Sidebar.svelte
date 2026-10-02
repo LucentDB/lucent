@@ -377,9 +377,12 @@
                           ondata={handleObjectsLoaded}
                         >
                           {#snippet children(objects)}
-                            {#each groupObjects(objects)
-                              .map( (g) => ({ ...g, items: g.items.filter( (o) => objectMatches(o.name, searchQueryLower) ) }) )
-                              .filter((g) => g.items.length > 0) as group}
+                            {@const matchingObjects = searchQueryLower
+                              ? objects.filter((o) =>
+                                  objectMatches(o.name, searchQueryLower),
+                                )
+                              : objects}
+                            {#each groupObjects(matchingObjects) as group}
                               <div class="group-node">
                                 <button
                                   class="group-header"
