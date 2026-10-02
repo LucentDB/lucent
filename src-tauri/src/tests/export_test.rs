@@ -354,3 +354,38 @@ fn csv_export_quotes_a_decimal_that_contains_the_delimiter() {
     let csv = format_csv(&columns, &rows, &ExportOptions::default());
     assert!(csv.contains("\"1,234.56\""), "got: {csv}");
 }
+
+#[test]
+fn csv_neutralizes_triggers_with_whitespace_newlines_and_pipes() {
+    // CWE-1236: Spreadsheet software strips leading whitespace or line feeds
+    // before checking formula triggers like =, +, -, @, |, etc.
+    let columns = vec![
+        ColumnMeta {
+            name: "c1".into(),
+            type_name: "text".into(),
+        },
+        ColumnMeta {
+            name: "c2".into(),
+            type_name: "text".into(),
+        },
+        ColumnMeta {
+            name: "c3".into(),
+            type_name: "text".into(),
+        },
+        ColumnMeta {
+            name: "c4".into(),
+            type_name: "text".into(),
+        },
+    ];
+    let rows = vec![vec![
+        serde_json::json!("  =SUM(1)"),
+        serde_json::json!("\n=CMD"),
+        serde_json::json!("|cmd"),
+        serde_json::json!(" \t +10"),
+    ]];
+    let csv = format_csv(&columns, &rows, &ExportOptions::default());
+    assert!(csv.contains("'\t  =SUM(1)"), "got: {csv}");
+    assert!(csv.contains("'\t\n=CMD"), "got: {csv}");
+    assert!(csv.contains("'|cmd"), "got: {csv}");
+    assert!(csv.contains("'\t \t +10"), "got: {csv}");
+}

@@ -73,12 +73,12 @@ fn csv_format_value(v: &serde_json::Value, null_str: &str, delimiter: char) -> S
 }
 
 /// Prefix a cell with `'` when it starts with a spreadsheet formula
-/// trigger. Without this, Excel/Sheets evaluates exported cells as formulas
-/// — CWE-1236 CSV injection (S2). Applied BEFORE quoting so the prefix also
-/// protects cells that need RFC-4180 quoting.
+/// trigger (including when preceded by leading whitespace). Without this,
+/// Excel/Sheets evaluates exported cells as formulas — CWE-1236 CSV injection (S2).
+/// Applied BEFORE quoting so the prefix also protects cells that need RFC-4180 quoting.
 fn neutralize_formula(s: &str) -> Cow<'_, str> {
-    match s.chars().next() {
-        Some('=' | '+' | '-' | '@' | '\t' | '\r') => {
+    match s.trim_start().chars().next() {
+        Some('=' | '+' | '-' | '@' | '\t' | '\r' | '\n' | '|') => {
             let mut out = String::with_capacity(s.len() + 1);
             out.push('\'');
             out.push_str(s);
