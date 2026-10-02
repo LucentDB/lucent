@@ -58,4 +58,21 @@ describe('Sidebar explorer', () => {
       invoke.mock.calls.filter(([c]) => c === 'get_schema_objects'),
     ).toHaveLength(0);
   });
+
+  it('sets aria-expanded attribute on database and schema toggle buttons', async () => {
+    render(SidebarHarness, { props: { onObjectClick: () => {} } });
+    await waitFor(() => expect(screen.getByText('app')).toBeTruthy());
+
+    const dbBtn = screen.getByText('app').closest('button');
+    expect(dbBtn?.getAttribute('aria-expanded')).toBe('true');
+
+    await waitFor(() => expect(screen.getByText('public')).toBeTruthy());
+    const schemaBtn = screen.getByText('public').closest('button');
+    expect(schemaBtn?.getAttribute('aria-expanded')).toBe('false');
+
+    schemaBtn?.click();
+    await waitFor(() =>
+      expect(schemaBtn?.getAttribute('aria-expanded')).toBe('true'),
+    );
+  });
 });
