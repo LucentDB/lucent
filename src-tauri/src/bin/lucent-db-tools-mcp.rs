@@ -64,6 +64,7 @@ fn parse_tool_arguments(tool: &str, raw_args: Option<&str>) -> serde_json::Value
         "preview_dml" => serde_json::json!({ "sql": trimmed, "description": "" }),
         "get_objects_info" => serde_json::json!({ "objects": [{ "name": trimmed }] }),
         "search_query_history" => serde_json::json!({ "query": trimmed }),
+        "get_preflight_context" => serde_json::json!({}),
         "save_memory" => {
             serde_json::json!({ "category": "quirk", "key_phrase": "rule", "rule_text": trimmed })
         }
@@ -112,6 +113,44 @@ fn usage() -> String {
         ));
     }
     out
+}
+
+fn resolve_endpoint_with_custom_discovery(
+    arg_socket: Option<String>,
+    arg_token: Option<String>,
+    custom_disc: Option<std::path::PathBuf>,
+) -> Result<(String, String, Vec<lucent_lib::ai::acp::mcp_server::ToolSchema>), Box<dyn std::error::Error>> {
+    let env_socket = std::env::var("LUCENT_ACP_SOCKET").ok();
+    let env_token = std::env::var("LUCENT_ACP_TOKEN").ok();
+
+    if let (Some(s), Some(t)) = (arg_socket.or(env_socket), arg_token.or(env_token)) {
+        return Ok((s, t, mcp_server::static_tool_schemas()));
+    }
+
+    let discovery_path = if let Some(p) = custom_disc {
+        p
+    } else if let Ok(path_str) = std::env::var("LUCENT_EXTERNAL_MCP") {
+        std::path::PathBuf::from(path_str)
+    } else {
+        lucent_lib::ai::external_endpoint::discovery::default_discovery_file_path()
+            .map_err(|e| format!("resolve default discovery file path: {e}"))?
+    };
+
+    if discovery_path.exists() {
+        let disc = lucent_lib::ai::external_endpoint::discovery::read_discovery_file_at(&discovery_path)
+            .map_err(|e| format!("read external endpoint discovery file {}: {e}", discovery_path.display()))?;
+        let tools = lucent_lib::ai::acp::mcp_server::filter_external_tools(&disc.tools);
+        return Ok((disc.socket, disc.token, tools));
+    }
+
+    Err("--socket and --token required (or active Lucent external endpoint discovery file external-mcp.json)".into())
+}
+
+fn resolve_endpoint(
+    arg_socket: Option<String>,
+    arg_token: Option<String>,
+) -> Result<(String, String, Vec<lucent_lib::ai::acp::mcp_server::ToolSchema>), Box<dyn std::error::Error>> {
+    resolve_endpoint_with_custom_discovery(arg_socket, arg_token, None)
 }
 
 #[tokio::main]
@@ -163,12 +202,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", usage());
         return Ok(());
     }
-    let socket = socket
-        .or_else(|| std::env::var("LUCENT_ACP_SOCKET").ok())
-        .ok_or("--socket required")?;
-    let token = token
-        .or_else(|| std::env::var("LUCENT_ACP_TOKEN").ok())
-        .ok_or("--token required")?;
+    let (socket, token, tools) = resolve_endpoint(socket, token)?;
 
     // CLI mode: execute a single tool call directly and exit
     if let Some(tool) = cli_tool {
@@ -208,10 +242,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stdout = tokio::io::stdout();
     let mut reader = tokio::io::BufReader::new(stdin);
     let mut writer = tokio::io::BufWriter::new(stdout);
-
-    // The tool schemas are static: build once from a default context (no DB —
-    // schemas don't need a live connection).
-    let tools = mcp_server::static_tool_schemas();
 
     loop {
         let mut line = String::new();
@@ -349,5 +379,49 @@ mod tests {
         // can't drift from `tools/list`.
         assert!(u.contains(r#""required":["sql"]"#), "{u}");
         assert!(u.contains("SHORTHAND"), "{u}");
+    }
+
+    #[test]
+    fn tools_advertised_match_descriptor_tools_array() {
+        use lucent_lib::ai::external_endpoint::discovery::{DiscoveryInfo, EndpointStatus};
+
+        let disc = DiscoveryInfo {
+            version: "1.0".into(),
+            status: EndpointStatus::Connected,
+            socket: "/disc.sock".into(),
+            token: "token2".into(),
+            pid: 1,
+            connection: None,
+            tools: vec!["run_readonly_query".into(), "search_schema".into()],
+        };
+        let tools = lucent_lib::ai::acp::mcp_server::filter_external_tools(&disc.tools);
+        assert_eq!(tools.len(), 2);
+        assert!(tools.iter().any(|t| t.name == "run_readonly_query"));
+        assert!(!tools.iter().any(|t| t.name == "search_query_history"));
+    }
+
+    #[test]
+    fn resolve_endpoint_auto_discovers_from_discovery_path() {
+        use lucent_lib::ai::external_endpoint::discovery::{write_discovery_file_at, DiscoveryInfo, EndpointStatus};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let disc_path = temp_dir.path().join("external-mcp.json");
+        let disc = DiscoveryInfo {
+            version: "1.0".into(),
+            status: EndpointStatus::Connected,
+            socket: "/tmp/custom.sock".into(),
+            token: "tok123".into(),
+            pid: 1234,
+            connection: None,
+            tools: vec!["run_readonly_query".into(), "get_preflight_context".into()],
+        };
+        write_discovery_file_at(&disc_path, &disc).unwrap();
+
+        let (sock, tok, tools) = resolve_endpoint_with_custom_discovery(None, None, Some(disc_path)).unwrap();
+        assert_eq!(sock, "/tmp/custom.sock");
+        assert_eq!(tok, "tok123");
+        assert_eq!(tools.len(), 2);
+        assert!(tools.iter().any(|t| t.name == "run_readonly_query"));
+        assert!(tools.iter().any(|t| t.name == "get_preflight_context"));
     }
 }
