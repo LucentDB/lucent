@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "build:sidecars": "node scripts/stage-sidecars.mjs",
+    "build:workers:debug": "cargo build --bin lucent-driver-postgres --bin lucent-driver-duckdb --bin lucent-db-tools-mcp",
     "build:app": "npm run build:sidecars && tauri build",
     "preview": "vite preview",
     "tauri": "tauri",
