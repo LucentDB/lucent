@@ -247,6 +247,9 @@ pub fn run() {
                 let state = app_handle.state::<commands::AppState>();
                 tauri::async_runtime::block_on(state.indexing.stop_all());
                 tauri::async_runtime::block_on(async {
+                    if let Some(mut mgr) = state.external_endpoint_manager.lock().await.take() {
+                        let _ = mgr.shutdown().await;
+                    }
                     let _ = state
                         .memory_manager
                         .with_connection(|conn| {

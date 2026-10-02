@@ -334,7 +334,7 @@ pub struct AppState {
     /// editor's session (the same worker socket, a different ConnectionId).
     pub ai_connection_id: Mutex<Option<ConnectionId>>,
     /// Dedicated external AI session on the same worker socket for external MCP agents.
-    pub external_ai_connection_id: Mutex<Option<ConnectionId>>,
+    pub external_ai_connection_id: Arc<Mutex<Option<ConnectionId>>>,
     /// The in-flight editor query (if any) — used by cancel_query. Set before
     /// execute().await, cleared after; holds the newest in-flight editor query;
     /// older completions must not clear a newer registration.
@@ -396,7 +396,7 @@ pub struct AppState {
     /// Capabilities of the connected driver. `None` when disconnected.
     /// Phase 2 moves this onto `LiveConnection`; `capabilities()` is the seam
     /// that keeps that a small change.
-    pub driver_capabilities: Mutex<Option<lucent_protocol::DriverCapabilities>>,
+    pub driver_capabilities: Arc<Mutex<Option<lucent_protocol::DriverCapabilities>>>,
     /// Background schema indexing manager. Holds per-connection indexing tasks,
     /// persistent BLAKE3 cache store, and telemetry emitter.
     pub indexing: crate::ai::indexer::IndexingManager,
@@ -408,6 +408,10 @@ pub struct AppState {
     /// handles, permission registry, connection/session state (phase D).
     /// `Clone` is cheap — the chat driver takes a copy per turn.
     pub acp: crate::ai::acp::AcpState,
+    /// External agent endpoint context providing isolated MCP access.
+    pub external_endpoint_context: Arc<crate::ai::external_endpoint::executor::ExternalEndpointContext>,
+    /// External agent endpoint manager hosting the Unix domain socket listener.
+    pub external_endpoint_manager: Arc<tokio::sync::Mutex<Option<crate::ai::external_endpoint::server::ExternalEndpointManager>>>,
 }
 
 impl Default for AppState {
@@ -435,23 +439,58 @@ impl AppState {
                     .expect("fallback cache opens")
             });
         let indexing = crate::ai::indexer::IndexingManager::new(cache, sink);
+        let client = Arc::new(Mutex::new(None));
+        let external_ai_connection_id = Arc::new(Mutex::new(None));
+        let driver_capabilities = Arc::new(Mutex::new(None));
+        let schema_graph = Arc::new(Mutex::new(None));
+        let embedder = Arc::new(Mutex::new(None));
+
+        let external_endpoint_context = Arc::new(crate::ai::external_endpoint::executor::ExternalEndpointContext {
+            client: client.clone(),
+            external_ai_connection_id: external_ai_connection_id.clone(),
+            schema_graph: schema_graph.clone(),
+            embedder: embedder.clone(),
+            capabilities: driver_capabilities.clone(),
+            active_profile: Arc::new(tokio::sync::Mutex::new(None)),
+            inode_tracker: Arc::new(tokio::sync::Mutex::new(None)),
+            reopen_lock: Arc::new(tokio::sync::Mutex::new(())),
+        });
+
+        let external_endpoint_manager = Arc::new(tokio::sync::Mutex::new(None));
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let ctx = external_endpoint_context.clone();
+            let mgr = external_endpoint_manager.clone();
+            handle.spawn(async move {
+                match crate::ai::external_endpoint::server::ExternalEndpointManager::start(ctx, None).await {
+                    Ok(started) => {
+                        log::info!("External MCP endpoint started at {}", started.socket_path.display());
+                        *mgr.lock().await = Some(started);
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to start external MCP endpoint: {e}");
+                    }
+                }
+            });
+        }
+
         Self {
             repo: Arc::new(ConnectionProfileRepository::load()),
             supervisor: Mutex::new(None),
-            client: Arc::new(Mutex::new(None)),
+            client,
             current_connection_id: Arc::new(Mutex::new(None)),
             ai_connection_id: Mutex::new(None),
-            external_ai_connection_id: Mutex::new(None),
+            external_ai_connection_id,
             editor_query: Mutex::new(None),
             current_database: Mutex::new(None),
             current_connection_config: Mutex::new(None),
             memory_connection_key: Mutex::new(None),
-            driver_capabilities: Mutex::new(None),
+            driver_capabilities,
             conversations: DashMap::new(),
             schema_cache: Arc::new(SchemaCache::new(ai_config.schema_cache_ttl_secs)),
             ai_config: Arc::new(RwLock::new(ai_config)),
-            schema_graph: Arc::new(Mutex::new(None)),
-            embedder: Arc::new(Mutex::new(None)),
+            schema_graph,
+            embedder,
             memory_embedder: Arc::new(tokio::sync::OnceCell::new()),
             #[cfg(test)]
             memory_embedder_test_gate: None,
@@ -477,6 +516,8 @@ impl AppState {
                 .build()
                 .expect("reqwest client for the ACP registry builds"),
             acp: crate::ai::acp::AcpState::new(),
+            external_endpoint_context,
+            external_endpoint_manager,
         }
     }
 
@@ -936,6 +977,11 @@ async fn connect_impl(
         // The AI session dies with the old client.
         *state.ai_connection_id.lock().await = None;
         *state.external_ai_connection_id.lock().await = None;
+        *state.external_endpoint_context.active_profile.lock().await = None;
+        *state.external_endpoint_context.inode_tracker.lock().await = None;
+        if let Some(ref manager) = *state.external_endpoint_manager.lock().await {
+            let _ = manager.sync_profile().await;
+        }
         // The memory key names the old connection; a failed reconnect must not
         // leave it pointing at stale memories.
         *state.memory_connection_key.lock().await = None;
@@ -1165,7 +1211,44 @@ async fn connect_impl(
             .await;
     }
 
-    *state.client.lock().await = Some(client);
+    *state.client.lock().await = Some(client.clone());
+
+    // Profile sync for external endpoint
+    let profile = if let Some(pid) = profile_id {
+        state.repo.get_profile(pid).await
+    } else {
+        None
+    };
+
+    if let Some(ref p) = profile {
+        if p.enable_external_agents && p.driver == "duckdb" {
+            if let Some(ext_conn) = *state.external_ai_connection_id.lock().await {
+                if let Err(canary_err) = crate::ai::external_endpoint::server::ExternalEndpointManager::run_connector_canary(&client, ext_conn).await {
+                    log::error!("Connector canary verification failed for external agents: {canary_err}");
+                } else {
+                    log::info!("Connector canary verified external access disabled on DuckDB handle");
+                }
+            }
+        }
+    }
+
+    *state.external_endpoint_context.active_profile.lock().await = profile.clone();
+    if let Some(ref p) = profile {
+        if p.enable_external_agents && p.driver == "duckdb" {
+            if let Some(path) = p.params.get("path") {
+                *state.external_endpoint_context.inode_tracker.lock().await =
+                    Some(crate::ai::external_endpoint::mirror::InodeTracker::for_path(path));
+            }
+        } else {
+            *state.external_endpoint_context.inode_tracker.lock().await = None;
+        }
+    } else {
+        *state.external_endpoint_context.inode_tracker.lock().await = None;
+    }
+
+    if let Some(ref manager) = *state.external_endpoint_manager.lock().await {
+        let _ = manager.sync_profile().await;
+    }
 
     *state.current_database.lock().await = Some(database.clone());
     *state.current_connection_config.lock().await = Some(resolved.clone());
@@ -1248,6 +1331,26 @@ pub async fn save_connection(
         .await
         .map_err(|e| CommandError::new("FileError", e))?;
 
+    // If the saved profile is currently active, sync it with the external endpoint
+    let is_active = {
+        let active = state.external_endpoint_context.active_profile.lock().await;
+        active.as_ref().map(|p| p.id == profile.id).unwrap_or(false)
+    };
+    if is_active {
+        *state.external_endpoint_context.active_profile.lock().await = Some(profile.clone());
+        if profile.enable_external_agents && profile.driver == "duckdb" {
+            if let Some(path) = profile.params.get("path") {
+                *state.external_endpoint_context.inode_tracker.lock().await =
+                    Some(crate::ai::external_endpoint::mirror::InodeTracker::for_path(path));
+            }
+        } else {
+            *state.external_endpoint_context.inode_tracker.lock().await = None;
+        }
+        if let Some(ref manager) = *state.external_endpoint_manager.lock().await {
+            let _ = manager.sync_profile().await;
+        }
+    }
+
     Ok(profile)
 }
 
@@ -1258,7 +1361,21 @@ pub async fn delete_connection(state: State<'_, AppState>, id: String) -> Result
         .repo
         .delete_profile(&id)
         .await
-        .map_err(|e| CommandError::new("FileError", e))
+        .map_err(|e| CommandError::new("FileError", e))?;
+
+    let is_active = {
+        let active = state.external_endpoint_context.active_profile.lock().await;
+        active.as_ref().map(|p| p.id == id).unwrap_or(false)
+    };
+    if is_active {
+        *state.external_endpoint_context.active_profile.lock().await = None;
+        *state.external_endpoint_context.inode_tracker.lock().await = None;
+        if let Some(ref manager) = *state.external_endpoint_manager.lock().await {
+            let _ = manager.sync_profile().await;
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -2134,6 +2251,11 @@ pub async fn disconnect(state: State<'_, AppState>) -> Result<DisconnectResult, 
     *state.current_database.lock().await = None;
     *state.driver_capabilities.lock().await = None;
     *state.memory_connection_key.lock().await = None;
+    *state.external_endpoint_context.active_profile.lock().await = None;
+    *state.external_endpoint_context.inode_tracker.lock().await = None;
+    if let Some(ref manager) = *state.external_endpoint_manager.lock().await {
+        let _ = manager.sync_profile().await;
+    }
 
     // Notebook sessions hold ConnectionIds into the dying worker; clear them
     // so attach/restart fails fast instead of against dead connections.
