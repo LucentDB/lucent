@@ -102,6 +102,12 @@ tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 # Test-only Postgres client for the eval harness (evals.rs compiles under
 # plain `cargo test` via `#[cfg(any(test, feature = "evals"))]`) and for the

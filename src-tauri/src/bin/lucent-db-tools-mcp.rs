@@ -119,12 +119,27 @@ fn resolve_endpoint_with_custom_discovery(
     arg_socket: Option<String>,
     arg_token: Option<String>,
     custom_disc: Option<std::path::PathBuf>,
-) -> Result<(String, String, Vec<lucent_lib::ai::acp::mcp_server::ToolSchema>), Box<dyn std::error::Error>> {
+) -> Result<
+    (
+        String,
+        String,
+        Vec<lucent_lib::ai::acp::mcp_server::ToolSchema>,
+        Option<std::path::PathBuf>,
+        lucent_lib::ai::external_endpoint::discovery::EndpointStatus,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let env_socket = std::env::var("LUCENT_ACP_SOCKET").ok();
     let env_token = std::env::var("LUCENT_ACP_TOKEN").ok();
 
     if let (Some(s), Some(t)) = (arg_socket.or(env_socket), arg_token.or(env_token)) {
-        return Ok((s, t, mcp_server::static_tool_schemas()));
+        return Ok((
+            s,
+            t,
+            mcp_server::static_tool_schemas(),
+            None,
+            lucent_lib::ai::external_endpoint::discovery::EndpointStatus::Connected,
+        ));
     }
 
     let discovery_path = if let Some(p) = custom_disc {
@@ -140,7 +155,7 @@ fn resolve_endpoint_with_custom_discovery(
         let disc = lucent_lib::ai::external_endpoint::discovery::read_discovery_file_at(&discovery_path)
             .map_err(|e| format!("read external endpoint discovery file {}: {e}", discovery_path.display()))?;
         let tools = lucent_lib::ai::acp::mcp_server::filter_external_tools(&disc.tools);
-        return Ok((disc.socket, disc.token, tools));
+        return Ok((disc.socket, disc.token, tools, Some(discovery_path), disc.status));
     }
 
     Err("--socket and --token required (or active Lucent external endpoint discovery file external-mcp.json)".into())
@@ -149,7 +164,16 @@ fn resolve_endpoint_with_custom_discovery(
 fn resolve_endpoint(
     arg_socket: Option<String>,
     arg_token: Option<String>,
-) -> Result<(String, String, Vec<lucent_lib::ai::acp::mcp_server::ToolSchema>), Box<dyn std::error::Error>> {
+) -> Result<
+    (
+        String,
+        String,
+        Vec<lucent_lib::ai::acp::mcp_server::ToolSchema>,
+        Option<std::path::PathBuf>,
+        lucent_lib::ai::external_endpoint::discovery::EndpointStatus,
+    ),
+    Box<dyn std::error::Error>,
+> {
     resolve_endpoint_with_custom_discovery(arg_socket, arg_token, None)
 }
 
@@ -202,10 +226,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", usage());
         return Ok(());
     }
-    let (socket, token, tools) = resolve_endpoint(socket, token)?;
+    let (socket, token, tools, discovery_path, status) = resolve_endpoint(socket, token)?;
 
     // CLI mode: execute a single tool call directly and exit
     if let Some(tool) = cli_tool {
+        if status == lucent_lib::ai::external_endpoint::discovery::EndpointStatus::Disconnected {
+            eprintln!("Error: External agent access is disabled for the active connection profile.");
+            std::process::exit(1);
+        }
         let (sock_r, mut sock_w) = connect_socket(&socket).await?;
         wire::write_hello(&mut sock_w, &token).await?;
         let mut sock_r = tokio::io::BufReader::new(sock_r);
@@ -251,9 +279,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let req: serde_json::Value = serde_json::from_str(line.trim_end())?;
         if req.get("method").and_then(|m| m.as_str()) == Some("tools/call") {
+            let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
+
+            // Check if profile is disconnected (inspect status as required by spec §4.1)
+            let is_disconnected = if let Some(ref p) = discovery_path {
+                if let Ok(disc) = lucent_lib::ai::external_endpoint::discovery::read_discovery_file_at(p) {
+                    disc.status == lucent_lib::ai::external_endpoint::discovery::EndpointStatus::Disconnected
+                } else {
+                    status == lucent_lib::ai::external_endpoint::discovery::EndpointStatus::Disconnected
+                }
+            } else {
+                status == lucent_lib::ai::external_endpoint::discovery::EndpointStatus::Disconnected
+            };
+
+            if is_disconnected {
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": "External agent access is disabled for the active connection profile."
+                        }],
+                        "isError": true
+                    }
+                });
+                let mut out = serde_json::to_string(&resp)?;
+                out.push('\n');
+                tokio::io::AsyncWriteExt::write_all(&mut writer, out.as_bytes()).await?;
+                tokio::io::AsyncWriteExt::flush(&mut writer).await?;
+                continue;
+            }
+
             // Forward to the bridge and answer from its response. One call in
             // flight at a time (the bridge serves one connection sequentially).
-            let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
             let name = req
                 .pointer("/params/name")
                 .and_then(|v| v.as_str())
@@ -421,11 +480,35 @@ mod tests {
         };
         write_discovery_file_at(&disc_path, &disc).unwrap();
 
-        let (sock, tok, tools) = resolve_endpoint_with_custom_discovery(None, None, Some(disc_path)).unwrap();
+        let (sock, tok, tools, disc_file, status) = resolve_endpoint_with_custom_discovery(None, None, Some(disc_path.clone())).unwrap();
         assert_eq!(sock, "/tmp/custom.sock");
         assert_eq!(tok, "tok123");
         assert_eq!(tools.len(), 2);
+        assert_eq!(disc_file, Some(disc_path));
+        assert_eq!(status, EndpointStatus::Connected);
         assert!(tools.iter().any(|t| t.name == "run_readonly_query"));
         assert!(tools.iter().any(|t| t.name == "get_preflight_context"));
+    }
+
+    #[test]
+    fn resolve_endpoint_inspects_disconnected_status() {
+        use lucent_lib::ai::external_endpoint::discovery::{write_discovery_file_at, DiscoveryInfo, EndpointStatus};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let disc_path = temp_dir.path().join("external-mcp.json");
+        let disc = DiscoveryInfo {
+            version: "1.0".into(),
+            status: EndpointStatus::Disconnected,
+            socket: "/tmp/custom.sock".into(),
+            token: "tok123".into(),
+            pid: 1234,
+            connection: None,
+            tools: vec!["run_readonly_query".into()],
+        };
+        write_discovery_file_at(&disc_path, &disc).unwrap();
+
+        let (_sock, _tok, _tools, _path, status) =
+            resolve_endpoint_with_custom_discovery(None, None, Some(disc_path)).unwrap();
+        assert_eq!(status, EndpointStatus::Disconnected);
     }
 }

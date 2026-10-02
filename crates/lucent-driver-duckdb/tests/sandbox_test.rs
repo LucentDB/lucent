@@ -27,8 +27,8 @@ fn duckdb_sandbox_rejects_external_file_access_when_disabled() {
 
     let err_str = err.to_string();
     assert!(
-        err_str.contains("disabled by configuration") || err_str.contains("Permission"),
-        "expected error to contain 'disabled by configuration' or 'Permission', got: {err_str}"
+        err_str.contains("disabled by configuration"),
+        "expected error to contain 'disabled by configuration', got: {err_str}"
     );
 
     // 2. Open with external_access = true (default) in a fresh file/handle
@@ -47,4 +47,27 @@ fn duckdb_sandbox_rejects_external_file_access_when_disabled() {
         .expect("regular handle should allow reading canary CSV");
 
     assert_eq!(count, 2);
+}
+
+#[test]
+fn duckdb_sandbox_rejects_external_file_access_in_memory() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let csv_path = temp_dir.path().join("canary.csv");
+    std::fs::write(&csv_path, b"id,val\n1,foo\n2,bar\n").unwrap();
+
+    let sandboxed = DuckHandle::open_ext(":memory:", false, false).expect("open in-memory sandboxed handle");
+
+    let query = format!("SELECT count(*) FROM '{}'", csv_path.display());
+    let err = sandboxed
+        .with_conn(|conn| {
+            conn.query_row(&query, [], |row| row.get::<_, i64>(0))
+                .map_err(|e| e.to_string())
+        })
+        .unwrap_err();
+
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("disabled by configuration"),
+        "expected error to contain 'disabled by configuration', got: {err_str}"
+    );
 }

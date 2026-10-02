@@ -201,8 +201,28 @@ pub fn is_pid_alive(pid: u32) -> bool {
 
     #[cfg(windows)]
     {
-        // On Windows: OpenProcess with PROCESS_QUERY_LIMITED_INFORMATION
-        false
+        use windows_sys::Win32::Foundation::{CloseHandle, FALSE};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            if handle.is_null() || handle == 0 as _ {
+                // If OpenProcess fails with ERROR_ACCESS_DENIED (5), the process exists
+                return std::io::Error::last_os_error().raw_os_error() == Some(5);
+            }
+            let mut exit_code: u32 = 0;
+            let success = GetExitCodeProcess(handle, &mut exit_code);
+            CloseHandle(handle);
+            if success != 0 {
+                // STILL_ACTIVE is 259 (0x103)
+                const STILL_ACTIVE: u32 = 259;
+                exit_code == STILL_ACTIVE
+            } else {
+                false
+            }
+        }
     }
 
     #[cfg(not(any(unix, windows)))]

@@ -118,6 +118,9 @@ async fn setup_test_endpoint_with_file(
         active_profile: Arc::new(tokio::sync::Mutex::new(Some(profile))),
         inode_tracker: Arc::new(tokio::sync::Mutex::new(Some(inode_tracker))),
         reopen_lock: Arc::new(tokio::sync::Mutex::new(())),
+        memory_manager: Arc::new(
+            lucent_lib::ai::memory::MemoryManager::open_in_memory().unwrap(),
+        ),
     });
 
     let manager = ExternalEndpointManager::start(context.clone(), Some(discovery_path.to_path_buf()))
@@ -274,6 +277,105 @@ async fn external_mcp_auto_discovers_and_handles_rename_swap() {
     assert!(text2.contains("100"), "Expected query result to contain 100 after swap, got: {text2}");
 
     // 10. Clean shutdown
+    manager.shutdown().await.unwrap();
+    supervisor.shutdown().await.unwrap();
+    let _ = child.kill().await;
+}
+
+#[tokio::test]
+async fn external_mcp_dynamic_disconnect_when_profile_toggled_off() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let discovery_path = temp_dir.path().join("external-mcp.json");
+    let db_path = temp_dir.path().join("toggle.duckdb");
+
+    // 1. Start endpoint manager with db_path
+    let (mut manager, context, mut supervisor, _client) =
+        setup_test_endpoint_with_file(&db_path, &discovery_path).await;
+
+    // 2. Spawn real compiled `lucent-db-tools-mcp` binary via stdio
+    let binary = test_binary_path("lucent-db-tools-mcp");
+    let mut child = tokio::process::Command::new(&binary)
+        .env("LUCENT_EXTERNAL_MCP", discovery_path.to_str().unwrap())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn lucent-db-tools-mcp");
+
+    let mut stdin = BufWriter::new(child.stdin.take().unwrap());
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    // 3. Initialize
+    let init_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "test-harness", "version": "1.0" }
+        }
+    });
+    stdin.write_all(format!("{}\n", init_req).as_bytes()).await.unwrap();
+    stdin.flush().await.unwrap();
+
+    let mut line = String::new();
+    stdout.read_line(&mut line).await.unwrap();
+    let init_res: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(init_res["id"], 1);
+
+    // 4. Query before disconnect: must succeed
+    let query_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "run_readonly_query",
+            "arguments": { "sql": "SELECT sum(val) as s FROM items" }
+        }
+    });
+    stdin.write_all(format!("{}\n", query_req).as_bytes()).await.unwrap();
+    stdin.flush().await.unwrap();
+
+    line.clear();
+    stdout.read_line(&mut line).await.unwrap();
+    let query_res: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(query_res["id"], 2);
+    assert_eq!(query_res["result"]["isError"], false);
+
+    // 5. Dynamically toggle profile flag off
+    {
+        let mut guard = context.active_profile.lock().await;
+        if let Some(ref mut p) = *guard {
+            p.enable_external_agents = false;
+        }
+    }
+    manager.sync_profile().await.expect("sync profile disconnected");
+
+    // 6. Query after disconnect: must fail with spec §4.1 message
+    let query_req2 = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "run_readonly_query",
+            "arguments": { "sql": "SELECT sum(val) as s FROM items" }
+        }
+    });
+    stdin.write_all(format!("{}\n", query_req2).as_bytes()).await.unwrap();
+    stdin.flush().await.unwrap();
+
+    line.clear();
+    stdout.read_line(&mut line).await.unwrap();
+    let query_res2: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(query_res2["id"], 3);
+    assert_eq!(query_res2["result"]["isError"], true);
+    let err_text = query_res2["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        err_text.contains("External agent access is disabled for the active connection profile."),
+        "expected spec §4.1 disabled message, got: {err_text}"
+    );
+
+    // 7. Clean shutdown
     manager.shutdown().await.unwrap();
     supervisor.shutdown().await.unwrap();
     let _ = child.kill().await;

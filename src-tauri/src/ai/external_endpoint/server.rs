@@ -57,6 +57,7 @@ impl ExternalEndpointManager {
             .map(|p| p.to_string_lossy().contains("tmp") || p.to_string_lossy().contains("temp"))
             .unwrap_or(false);
 
+        #[cfg(unix)]
         let socket_path = if is_custom_test_dir {
             discovery_path
                 .parent()
@@ -67,6 +68,7 @@ impl ExternalEndpointManager {
             default_socket_path()?
         };
 
+        #[cfg(unix)]
         if socket_path.exists() {
             let _ = std::fs::remove_file(&socket_path);
         }
@@ -83,6 +85,16 @@ impl ExternalEndpointManager {
         #[cfg(unix)]
         let listener = tokio::net::UnixListener::bind(&socket_path)
             .map_err(|e| format!("Failed to bind external MCP socket at {}: {e}", socket_path.display()))?;
+
+        #[cfg(windows)]
+        let pipe_name = format!(r"\\.\pipe\lucent-external-{}-{}", std::process::id(), &token[..8]);
+        #[cfg(windows)]
+        let first_server = tokio::net::windows::named_pipe::ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&pipe_name)
+            .map_err(|e| format!("Failed to create external MCP named pipe at {pipe_name}: {e}"))?;
+        #[cfg(windows)]
+        let socket_path = PathBuf::from(&pipe_name);
 
         // Write initial discovery file
         let initial_info = DiscoveryInfo {
@@ -127,6 +139,52 @@ impl ExternalEndpointManager {
                             Err(e) => {
                                 log::debug!("External listener accept stopped: {e}");
                                 break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        #[cfg(windows)]
+        tokio::spawn(async move {
+            use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+            use tokio::time::{sleep, Duration};
+            const ERROR_PIPE_BUSY: i32 = 231;
+
+            let mut pending: Option<NamedPipeServer> = Some(first_server);
+            loop {
+                let mut instance = match pending.take() {
+                    Some(inst) => inst,
+                    None => match ServerOptions::new().create(&pipe_name) {
+                        Ok(inst) => inst,
+                        Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                            sleep(Duration::from_millis(50)).await;
+                            continue;
+                        }
+                        Err(e) => {
+                            log::debug!("create pipe instance failed: {e}");
+                            break;
+                        }
+                    },
+                };
+                tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        log::info!("External endpoint accept loop shutting down");
+                        break;
+                    }
+                    conn_res = instance.connect() => {
+                        match conn_res {
+                            Ok(()) => {
+                                let (reader, writer) = tokio::io::split(instance);
+                                let token = loop_token.clone();
+                                let executor = executor.clone();
+                                tokio::spawn(async move {
+                                    let _ = handle_external_stream(reader, writer, token, executor).await;
+                                });
+                            }
+                            Err(e) => {
+                                log::debug!("External named pipe connect failed: {e}");
                             }
                         }
                     }
@@ -221,6 +279,7 @@ impl ExternalEndpointManager {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
+        #[cfg(unix)]
         if self.socket_path.exists() {
             let _ = std::fs::remove_file(&self.socket_path);
         }
@@ -288,6 +347,19 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let custom_discovery = temp_dir.path().join("test-mcp.json");
 
+        // Write a stale descriptor with a dead PID (e.g. 999_999_999)
+        let stale_info = DiscoveryInfo {
+            version: "1.0".into(),
+            status: EndpointStatus::Connected,
+            socket: temp_dir.path().join("stale.sock").to_string_lossy().to_string(),
+            token: "stale_token_12345".into(),
+            pid: 999_999_999,
+            connection: None,
+            tools: vec!["run_readonly_query".into()],
+        };
+        write_discovery_file_at(&custom_discovery, &stale_info).unwrap();
+        assert!(custom_discovery.exists());
+
         let context = Arc::new(ExternalEndpointContext {
             client: Arc::new(tokio::sync::Mutex::new(None)),
             external_ai_connection_id: Arc::new(tokio::sync::Mutex::new(None)),
@@ -297,13 +369,69 @@ mod tests {
             active_profile: Arc::new(tokio::sync::Mutex::new(None)),
             inode_tracker: Arc::new(tokio::sync::Mutex::new(None)),
             reopen_lock: Arc::new(tokio::sync::Mutex::new(())),
+            memory_manager: Arc::new(crate::ai::memory::MemoryManager::open_in_memory().unwrap()),
         });
 
-        let mut manager = ExternalEndpointManager::start(context, Some(custom_discovery)).await.unwrap();
+        let mut manager = ExternalEndpointManager::start(context, Some(custom_discovery.clone())).await.unwrap();
+        #[cfg(unix)]
         assert!(manager.socket_path.exists());
 
+        // Verify the stale descriptor was purged and replaced with current process PID
+        let active_disc = read_discovery_file_at(&custom_discovery).unwrap();
+        assert_eq!(active_disc.pid, std::process::id());
+        assert_eq!(active_disc.token, manager.token);
+
         manager.shutdown().await.unwrap();
+        #[cfg(unix)]
         assert!(!manager.socket_path.exists());
+    }
+
+    #[tokio::test]
+    async fn connector_canary_negative_and_positive_verification() {
+        use crate::supervisor::{new_log_buffer, Supervisor};
+        use lucent_protocol::ConnectionConfig;
+
+        let mut supervisor = Supervisor::for_driver("duckdb", new_log_buffer());
+        supervisor.ensure_running().await.expect("start duckdb worker");
+        let socket = supervisor.endpoint().to_string();
+        let token = supervisor.handshake_token().to_string();
+
+        // 1. Unsandboxed connection (external_access = true by default)
+        let (client, unmasked_cid) = ConnectorClient::connect(
+            &socket,
+            &token,
+            ConnectionConfig::new("duckdb").with("path", ":memory:"),
+        )
+        .await
+        .expect("connect unmasked session");
+
+        // Canary MUST fail when external access is NOT disabled
+        let err = ExternalEndpointManager::run_connector_canary(&client, unmasked_cid)
+            .await
+            .expect_err("canary should fail when external_access is true");
+        assert!(
+            err.contains("Canary failed: external access is not disabled on DuckDB handle!"),
+            "unexpected error: {err}"
+        );
+
+        // 2. Sandboxed connection (external_access = false)
+        let sandboxed_cid = ConnectionId(uuid::Uuid::new_v4());
+        client
+            .connect_with_id(
+                sandboxed_cid,
+                ConnectionConfig::new("duckdb")
+                    .with("path", ":memory:")
+                    .with("external_access", "false"),
+            )
+            .await
+            .expect("connect sandboxed session");
+
+        // Canary MUST succeed when external access is disabled
+        ExternalEndpointManager::run_connector_canary(&client, sandboxed_cid)
+            .await
+            .expect("canary should pass when external_access is false");
+
+        let _ = supervisor.shutdown().await;
     }
 
     #[tokio::test]
@@ -322,6 +450,7 @@ mod tests {
             active_profile: Arc::new(tokio::sync::Mutex::new(None)),
             inode_tracker: Arc::new(tokio::sync::Mutex::new(None)),
             reopen_lock: Arc::new(tokio::sync::Mutex::new(())),
+            memory_manager: Arc::new(crate::ai::memory::MemoryManager::open_in_memory().unwrap()),
         });
 
         let mut manager = ExternalEndpointManager::start(context.clone(), Some(custom_discovery.clone())).await.unwrap();

@@ -19,6 +19,7 @@ pub struct ExternalEndpointContext {
     pub active_profile: Arc<Mutex<Option<ConnectionProfile>>>,
     pub inode_tracker: Arc<Mutex<Option<InodeTracker>>>,
     pub reopen_lock: Arc<Mutex<()>>,
+    pub memory_manager: Arc<crate::ai::memory::MemoryManager>,
 }
 
 pub struct DynamicContextToolExecutor {
@@ -48,7 +49,7 @@ pub async fn run_connector_canary(
         Ok(_) => Err("Canary failed: external access is not disabled on DuckDB handle!".into()),
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("disabled by configuration") || msg.contains("Permission") {
+            if msg.contains("disabled by configuration") {
                 Ok(())
             } else {
                 Err(format!("Canary failed unexpectedly: {msg}"))
@@ -134,12 +135,17 @@ impl ToolExecutor for DynamicContextToolExecutor {
                                 )));
                             }
 
-                            // Refresh schema graph
-                            if let Ok((new_graph, _snapshot)) =
-                                SchemaGraph::from_catalog(new_id, client, &server_info.capabilities).await
-                            {
-                                *self.context.schema_graph.lock().await = Some(new_graph);
-                            }
+                            // Refresh schema graph in background (spec §4.2 step 4)
+                            let schema_graph_slot = Arc::clone(&self.context.schema_graph);
+                            let bg_client = client.clone();
+                            let bg_caps = server_info.capabilities.clone();
+                            tokio::spawn(async move {
+                                if let Ok((new_graph, _snapshot)) =
+                                    SchemaGraph::from_catalog(new_id, &bg_client, &bg_caps).await
+                                {
+                                    *schema_graph_slot.lock().await = Some(new_graph);
+                                }
+                            });
                         }
                     }
                 }
@@ -149,19 +155,28 @@ impl ToolExecutor for DynamicContextToolExecutor {
         // 4. Build Dynamic Context and Dispatch
         let conn_id = *self.context.external_ai_connection_id.lock().await;
         let capabilities = self.context.capabilities.lock().await.clone();
+        let memory_connection_key = {
+            let host = profile.params.get("host").map(|s| s.as_str()).unwrap_or("");
+            let port = profile
+                .params
+                .get("port")
+                .and_then(|s| s.parse::<u16>().ok())
+                .unwrap_or(0);
+            let database = profile.params.get("database").map(|s| s.as_str()).unwrap_or("");
+            Some(format!("{host}:{port}/{database}"))
+        };
+        let mut config = crate::ai::config::AiConfig::default();
+        config.ai_query_timeout_secs = 15;
         let tool_ctx = AiToolContext {
             db: Arc::clone(&self.context.client),
             connection_id: conn_id,
-            memory_connection_key: None,
+            memory_connection_key,
             capabilities,
-            config: crate::ai::config::AiConfig::default(),
+            config,
             schema_graph: Arc::clone(&self.context.schema_graph),
             embedder: Arc::clone(&self.context.embedder),
             reranker: Arc::new(Mutex::new(None)),
-            memory_manager: Arc::new(
-                crate::ai::memory::MemoryManager::open_in_memory()
-                    .expect("in-memory memory db for external agent executor"),
-            ),
+            memory_manager: Arc::clone(&self.context.memory_manager),
         };
 
         match tool {
@@ -233,6 +248,9 @@ mod tests {
             active_profile: Arc::new(Mutex::new(profile)),
             inode_tracker: Arc::new(Mutex::new(None)),
             reopen_lock: Arc::new(Mutex::new(())),
+            memory_manager: Arc::new(
+                crate::ai::memory::MemoryManager::open_in_memory().unwrap(),
+            ),
         })
     }
 
@@ -261,5 +279,110 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Query history search is disabled"));
+    }
+
+    #[tokio::test]
+    async fn executor_searches_real_query_history_and_golden_queries() {
+        // Isolate the query-history file from the developer's real config dir:
+        // `history_file_path()` consults this thread-local under `cfg(test)`,
+        // so without it the `append_entry` below writes a synthetic entry into
+        // the user's `query_history.jsonl`. The default `#[tokio::test]` flavor
+        // is current_thread, so the override covers the synchronous append and
+        // search calls in this test.
+        let history_dir = tempfile::tempdir().unwrap();
+        crate::connections::TEST_CONFIG_DIR
+            .with(|cell| *cell.borrow_mut() = Some(history_dir.path().to_path_buf()));
+
+        let mut params = std::collections::BTreeMap::new();
+        params.insert("host".into(), "localhost".into());
+        params.insert("port".into(), "5432".into());
+        params.insert("database".into(), "analytics".into());
+
+        let profile = ConnectionProfile {
+            id: "test_history_prof".into(),
+            name: "Test DuckDB".into(),
+            driver: "duckdb".into(),
+            alias: None,
+            params,
+            ssh_tunnel_id: None,
+            group: None,
+            color: None,
+            icon: None,
+            last_used: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            enable_external_agents: true,
+            allow_query_history: true,
+        };
+
+        let mem_mgr = Arc::new(crate::ai::memory::MemoryManager::open_in_memory().unwrap());
+        // Seed golden query for the connection key "localhost:5432/analytics"
+        mem_mgr
+            .save_golden_query(crate::ai::memory::GoldenQuery {
+                id: "g1".into(),
+                connection_id: "localhost:5432/analytics".into(),
+                schema_name: "public".into(),
+                natural_prompt: "monthly active users".into(),
+                sql_text: "SELECT count(*) FROM monthly_users".into(),
+                tables_used: vec!["monthly_users".into()],
+                verified: true,
+                run_count: 1,
+                last_run_at: 0,
+                embedding_model: "".into(),
+                embedding_version: 0,
+                embedding: vec![],
+                created_at: 0,
+            })
+            .await
+            .unwrap();
+
+        // Seed human query history entry matching "localhost:5432/analytics"
+        let entry = crate::query_history::QueryHistoryEntry::new(
+            "localhost:5432/analytics".into(),
+            "localhost:5432/analytics".into(),
+            "analytics".into(),
+            "SELECT count(*) FROM orders_archive".into(),
+            42,
+            Some(100),
+            "success".into(),
+            None,
+        );
+        crate::query_history::append_entry(entry).unwrap();
+
+        let context = Arc::new(ExternalEndpointContext {
+            client: Arc::new(Mutex::new(None)),
+            external_ai_connection_id: Arc::new(Mutex::new(None)),
+            schema_graph: Arc::new(Mutex::new(None)),
+            embedder: Arc::new(Mutex::new(None)),
+            capabilities: Arc::new(Mutex::new(None)),
+            active_profile: Arc::new(Mutex::new(Some(profile))),
+            inode_tracker: Arc::new(Mutex::new(None)),
+            reopen_lock: Arc::new(Mutex::new(())),
+            memory_manager: mem_mgr,
+        });
+
+        let executor = DynamicContextToolExecutor::new(context);
+
+        // Search for golden query
+        let golden_res = executor
+            .call("search_query_history", serde_json::json!({"query": "monthly active users"}))
+            .await
+            .unwrap();
+        let golden_text = match golden_res {
+            ToolOutput::Text { content } => content,
+            _ => panic!("expected Text output"),
+        };
+        assert!(golden_text.contains("monthly_users"), "golden query not found: {golden_text}");
+
+        // Search for human history
+        let history_res = executor
+            .call("search_query_history", serde_json::json!({"query": "orders_archive"}))
+            .await
+            .unwrap();
+        let history_text = match history_res {
+            ToolOutput::Text { content } => content,
+            _ => panic!("expected Text output"),
+        };
+        assert!(history_text.contains("orders_archive"), "history entry not found: {history_text}");
     }
 }

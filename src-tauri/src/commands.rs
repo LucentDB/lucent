@@ -445,6 +445,14 @@ impl AppState {
         let schema_graph = Arc::new(Mutex::new(None));
         let embedder = Arc::new(Mutex::new(None));
 
+        let memory_manager = Arc::new(
+            crate::ai::memory::MemoryManager::open_default().unwrap_or_else(|e| {
+                log::warn!("memory db unavailable, falling back to in-memory: {e}");
+                crate::ai::memory::MemoryManager::open_in_memory()
+                    .expect("in-memory memory db opens")
+            }),
+        );
+
         let external_endpoint_context = Arc::new(crate::ai::external_endpoint::executor::ExternalEndpointContext {
             client: client.clone(),
             external_ai_connection_id: external_ai_connection_id.clone(),
@@ -454,6 +462,7 @@ impl AppState {
             active_profile: Arc::new(tokio::sync::Mutex::new(None)),
             inode_tracker: Arc::new(tokio::sync::Mutex::new(None)),
             reopen_lock: Arc::new(tokio::sync::Mutex::new(())),
+            memory_manager: memory_manager.clone(),
         });
 
         let external_endpoint_manager = Arc::new(tokio::sync::Mutex::new(None));
@@ -495,13 +504,7 @@ impl AppState {
             #[cfg(test)]
             memory_embedder_test_gate: None,
             reranker: Arc::new(Mutex::new(None)),
-            memory_manager: Arc::new(
-                crate::ai::memory::MemoryManager::open_default().unwrap_or_else(|e| {
-                    log::warn!("memory db unavailable, falling back to in-memory: {e}");
-                    crate::ai::memory::MemoryManager::open_in_memory()
-                        .expect("in-memory memory db opens")
-                }),
-            ),
+            memory_manager,
             approved_save_paths: Arc::new(Mutex::new(load_approved_paths())),
             api_key_cache: Arc::new(RwLock::new(None)),
             password_cache: Arc::new(RwLock::new(HashMap::new())),
