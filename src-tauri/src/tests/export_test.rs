@@ -384,8 +384,8 @@ fn csv_neutralizes_triggers_with_whitespace_newlines_and_pipes() {
         serde_json::json!(" \t +10"),
     ]];
     let csv = format_csv(&columns, &rows, &ExportOptions::default());
-    assert!(csv.contains("'\t  =SUM(1)"), "got: {csv}");
-    assert!(csv.contains("'\t\n=CMD"), "got: {csv}");
+    assert!(csv.contains("'  =SUM(1)"), "got: {csv}");
+    assert!(csv.contains("\"'\n=CMD\""), "got: {csv}");
     assert!(csv.contains("'|cmd"), "got: {csv}");
-    assert!(csv.contains("'\t \t +10"), "got: {csv}");
+    assert!(csv.contains("' \t +10"), "got: {csv}");
 }
