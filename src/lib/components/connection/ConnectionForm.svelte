@@ -59,6 +59,9 @@
   let password = $state('');
   let group = $state(profile?.group ?? '');
   let color = $state(profile?.color ?? '#3b82f6');
+  let enableExternalAgents = $state(profile?.enableExternalAgents ?? false);
+  let allowQueryHistory = $state(profile?.allowQueryHistory ?? false);
+  let copiedMcp = $state(false);
   let showPassword = $state(false);
 
   let isNew = $derived(!profile);
@@ -125,6 +128,8 @@
       alias = profile.alias ?? '';
       group = profile.group ?? '';
       color = profile.color ?? '#3b82f6';
+      enableExternalAgents = profile.enableExternalAgents ?? false;
+      allowQueryHistory = profile.allowQueryHistory ?? false;
     }
   });
 
@@ -181,6 +186,8 @@
         lastUsed: profile?.lastUsed ?? null,
         createdAt: profile?.createdAt ?? '',
         updatedAt: profile?.updatedAt ?? '',
+        enableExternalAgents,
+        allowQueryHistory,
       };
       onSave?.(p, password || undefined);
     } finally {
@@ -215,6 +222,8 @@
           lastUsed: null,
           createdAt: '',
           updatedAt: '',
+          enableExternalAgents,
+          allowQueryHistory,
         };
         // Use direct invoke so the connections query is NOT refetched and NO card flashes at top of UI
         const { invoke } = await import('@tauri-apps/api/core');
@@ -564,6 +573,63 @@
                 ></button>
               {/each}
             </div>
+          </div>
+
+          <!-- External AI Agents (MCP) -->
+          <div class="field" style="margin-top: 0.5rem; display: flex; flex-direction: column; gap: 0.5rem;">
+            <span class="label-text">External AI Agents (MCP)</span>
+            <label class="checkbox-label" for="form-enable-external-agents">
+              <input
+                id="form-enable-external-agents"
+                type="checkbox"
+                bind:checked={enableExternalAgents}
+              />
+              <span>Allow external AI assistants (MCP)</span>
+            </label>
+
+            {#if enableExternalAgents}
+              <div class="mcp-notice-box">
+                <p class="mcp-warning-text">
+                  Enabling external AI access sets this profile to strictly read-only with local file system access disabled.
+                </p>
+              </div>
+
+              <label class="checkbox-label" for="form-allow-query-history">
+                <input
+                  id="form-allow-query-history"
+                  type="checkbox"
+                  bind:checked={allowQueryHistory}
+                />
+                <span>Allow query history search in MCP</span>
+              </label>
+
+              <button
+                type="button"
+                class="copy-mcp-btn"
+                onclick={async () => {
+                  const snippet = JSON.stringify(
+                    {
+                      mcpServers: {
+                        lucent: {
+                          command: 'lucent-db-tools-mcp',
+                        },
+                      },
+                    },
+                    null,
+                    2,
+                  );
+                  if (navigator?.clipboard?.writeText) {
+                    await navigator.clipboard.writeText(snippet);
+                  }
+                  copiedMcp = true;
+                  setTimeout(() => {
+                    copiedMcp = false;
+                  }, 2000);
+                }}
+              >
+                {copiedMcp ? '✓ Copied!' : 'Copy MCP Config for Cursor / Claude Desktop'}
+              </button>
+            {/if}
           </div>
         </div>
       </div>
@@ -997,5 +1063,50 @@
     .action-row {
       flex-wrap: wrap;
     }
+  }
+
+  .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    cursor: pointer;
+    color: var(--text);
+  }
+
+  .mcp-notice-box {
+    background: var(--bg-warning-subtle, rgba(245, 158, 11, 0.1));
+    border: 1px solid var(--border-warning, rgba(245, 158, 11, 0.3));
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-top: 4px;
+    margin-bottom: 4px;
+  }
+
+  .mcp-warning-text {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-warning, #d97706);
+    line-height: 1.4;
+  }
+
+  .copy-mcp-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    cursor: pointer;
+    margin-top: 4px;
+    transition: background 0.15s ease;
+  }
+
+  .copy-mcp-btn:hover {
+    background: var(--bg-hover);
   }
 </style>

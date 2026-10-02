@@ -49,6 +49,8 @@ export interface ConnectionProfile {
   lastUsed: string | null;
   createdAt: string;
   updatedAt: string;
+  enableExternalAgents?: boolean;
+  allowQueryHistory?: boolean;
 }
 
 export interface TestConnectionResult {
