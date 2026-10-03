@@ -19,6 +19,12 @@
     { id: 'sql-insert', label: 'INSERTs', ext: '.sql' },
   ] as const;
 
+  function handleKeydown(e: KeyboardEvent) {
+    if (open && e.key === 'Escape') {
+      open = false;
+    }
+  }
+
   async function handleExport(formatId: string) {
     open = false;
     if (columns.length === 0 || rows.length === 0) return;
@@ -61,12 +67,17 @@
   }
 </script>
 
+<svelte:window onkeydown={handleKeydown} />
+
 <div class="export-dropdown">
   <button
     class="export-btn"
     {disabled}
     onclick={() => (open = !open)}
     title="Export results"
+    aria-label="Export results"
+    aria-expanded={open}
+    aria-haspopup="menu"
   >
     <svg
       width="16"
@@ -86,9 +97,13 @@
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="dropdown-backdrop" onclick={() => (open = false)}></div>
-    <div class="dropdown-menu">
+    <div class="dropdown-menu" role="menu">
       {#each exportFormats as fmt}
-        <button class="menu-item" onclick={() => handleExport(fmt.id)}>
+        <button
+          class="menu-item"
+          role="menuitem"
+          onclick={() => handleExport(fmt.id)}
+        >
           <span class="menu-label">Export as {fmt.label}</span>
           <span class="menu-ext">{fmt.ext}</span>
         </button>
