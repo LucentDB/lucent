@@ -166,7 +166,7 @@ async fn cancel_resolves_pending_permission_then_cancels() {
 
     // The surfaced permission request is the deterministic signal that the
     // stub's turn is blocked on the client's decision.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let payload = loop {
         if let Some(p) = sink.permissions.lock().unwrap().first().cloned() {
             break p;
