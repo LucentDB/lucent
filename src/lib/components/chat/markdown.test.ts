@@ -86,3 +86,53 @@ test('preserves GFM task list checkboxes', () => {
   expect(out).toContain('Todo item');
   expect(out).toContain('Done item');
 });
+
+test('handles case-insensitive checkbox input types while stripping uppercase non-checkbox inputs', () => {
+  const uppercaseCheckbox = renderMarkdown('<input type="CHECKBOX" checked />');
+  expect(uppercaseCheckbox.toLowerCase()).toContain('type="checkbox"');
+
+  const paddedCheckbox = renderMarkdown('<input type=" checkbox " />');
+  expect(paddedCheckbox.toLowerCase()).toContain('type="checkbox"');
+
+  const uppercaseText = renderMarkdown('<input type="TEXT" value="phish" />');
+  expect(uppercaseText.toLowerCase()).not.toContain('type="text"');
+  expect(uppercaseText).not.toContain('phish');
+
+  const uppercasePassword = renderMarkdown('<input type="PASSWORD" />');
+  expect(uppercasePassword.toLowerCase()).not.toContain('type="password"');
+});
+
+test('strips autofocus attributes from elements to prevent focus hijacking', () => {
+  const out = renderMarkdown(
+    '<input type="checkbox" autofocus /><a href="https://example.com" autofocus>link</a>',
+  );
+  expect(out.toLowerCase()).not.toContain('autofocus');
+});
+
+test('strips blob: URLs in links and images', () => {
+  const linkOut = renderMarkdown('[click](blob:https://example.com/uuid)');
+  expect(linkOut.toLowerCase()).not.toContain('blob:');
+
+  const imgOut = renderMarkdown('![img](blob:https://example.com/uuid)');
+  expect(imgOut.toLowerCase()).not.toContain('blob:');
+});
+
+test('allows relative URLs and standard safe schemes', () => {
+  const relOut = renderMarkdown('[relative](/path/to/page)');
+  expect(relOut).toContain('href="/path/to/page"');
+
+  const mailOut = renderMarkdown('[email](mailto:test@example.com)');
+  expect(mailOut).toContain('href="mailto:test@example.com"');
+});
+
+test('strips forbidden base, meta, and link tags from rendered markdown', () => {
+  const payload = `
+<base href="https://attacker.com/" />
+<meta http-equiv="refresh" content="0;url=https://attacker.com" />
+<link rel="stylesheet" href="https://attacker.com/evil.css" />
+`;
+  const out = renderMarkdown(payload);
+  expect(out.toLowerCase()).not.toContain('<base');
+  expect(out.toLowerCase()).not.toContain('<meta');
+  expect(out.toLowerCase()).not.toContain('<link');
+});

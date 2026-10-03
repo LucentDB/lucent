@@ -23,6 +23,9 @@
   // accumulated buffer while the body renders one page slice of it. Column
   // order still comes from the table.
   const startCount = $derived(table.getStartVisibleLeafColumns().length);
+  // Cache the full row model array reactively at module scope to avoid invoking
+  // table.getRowModel() repeatedly inside the iteration loop for every row.
+  const allTableRows = $derived(table.getRowModel().rows);
 
   function widthOf(index) {
     return columnWidths[index] || 150;
@@ -32,7 +35,7 @@
 <tbody>
   {#each pageRows as row, i}
     {@const absolute = pageOffset + i}
-    {@const tableRow = table.getRowModel().rows[absolute]}
+    {@const tableRow = allTableRows[absolute]}
     <tr class:even={absolute % 2 === 0}>
       <td
         class="row-num cell-start"

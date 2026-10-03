@@ -117,15 +117,14 @@
     </button>
 
     {#if !collapsed}
-      <div
+      <button
+        type="button"
         class="gutter-grip"
         onpointerdown={(e) => {
           e.preventDefault();
           onGripDown?.(e);
         }}
         onkeydown={gripKeydown}
-        role="button"
-        tabindex="0"
         aria-label="Reorder cell — drag, or Alt with arrow keys"
         title="Drag to reorder (Alt+↑/↓)"
       >
@@ -137,7 +136,7 @@
           <circle cx="2" cy="10" r="1.1" fill="currentColor" />
           <circle cx="6" cy="10" r="1.1" fill="currentColor" />
         </svg>
-      </div>
+      </button>
     {/if}
   </div>
 </div>
@@ -295,6 +294,13 @@
 
   /* ─── Drag grip ────────────────────────────────────────────────── */
   .gutter-grip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    font: inherit;
+    line-height: 0;
     color: var(--text-muted);
     cursor: grab;
     opacity: 0;

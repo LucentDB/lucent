@@ -19,6 +19,13 @@
     { id: 'sql-insert', label: 'INSERTs' },
   ] as const;
 
+  function handleKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape' && open) {
+      e.stopPropagation();
+      open = false;
+    }
+  }
+
   async function handleCopy(formatId: string) {
     open = false;
     if (columns.length === 0 || rows.length === 0) return;
@@ -49,7 +56,8 @@
   }
 </script>
 
-<div class="copy-dropdown">
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="copy-dropdown" onkeydown={handleKeydown}>
   <button
     class="copy-btn"
     {disabled}
@@ -57,6 +65,7 @@
     title="Copy results"
     aria-label="Copy results"
     aria-expanded={open}
+    aria-haspopup="true"
   >
     <svg
       width="16"
@@ -72,12 +81,20 @@
   </button>
 
   {#if open}
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="dropdown-backdrop" onclick={() => (open = false)}></div>
-    <div class="dropdown-menu">
+    <button
+      type="button"
+      class="dropdown-backdrop"
+      onclick={() => (open = false)}
+      aria-label="Close copy options"
+      tabindex="-1"
+    ></button>
+    <div class="dropdown-menu" role="menu">
       {#each copyFormats as fmt}
-        <button class="menu-item" onclick={() => handleCopy(fmt.id)}>
+        <button
+          class="menu-item"
+          role="menuitem"
+          onclick={() => handleCopy(fmt.id)}
+        >
           Copy as {fmt.label}
         </button>
       {/each}
@@ -113,6 +130,8 @@
     position: fixed;
     inset: 0;
     z-index: 99;
+    border: none;
+    background: transparent;
   }
   .dropdown-menu {
     position: absolute;

@@ -27,7 +27,7 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
 // in rendered markdown within the webview environment.
 DOMPurify.addHook('uponSanitizeElement', (node, data) => {
   if (data.tagName === 'input' && node instanceof Element) {
-    const type = node.getAttribute('type');
+    const type = node.getAttribute('type')?.toLowerCase().trim();
     if (type !== 'checkbox') {
       node.parentNode?.removeChild(node);
     }
@@ -45,6 +45,9 @@ const FORBIDDEN_MARKDOWN_TAGS = [
   'select',
   'textarea',
   'button',
+  'base',
+  'meta',
+  'link',
 ];
 
 const SQL_LANGUAGES = new Set([
@@ -76,9 +79,11 @@ export function renderMarkdown(text: string): string {
     const html = typeof result === 'string' ? result : String(result);
     return DOMPurify.sanitize(html, {
       FORBID_TAGS: FORBIDDEN_MARKDOWN_TAGS,
-      // Only safe link protocols, so `data:`/`javascript:` URLs are dropped.
+      FORBID_ATTR: ['autofocus'],
+      // Only safe link protocols and relative paths, so `data:`, `javascript:`,
+      // `blob:`, and protocol-relative `//host` URLs are dropped.
       ALLOWED_URI_REGEXP:
-        /^(?:(?:(?:f|ht)tps?|mailto|tel):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i,
+        /^(?:(?:(?:f|ht)tps?|mailto|tel):|(?:(?!\/\/)[^:]*?(?:[/?#]|$)))/i,
     });
   } catch {
     return String(text ?? '')

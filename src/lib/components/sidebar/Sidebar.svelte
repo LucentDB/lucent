@@ -159,6 +159,9 @@
     <div class="connection-switcher">
       <button
         class="switcher-btn"
+        aria-label="Switch connection"
+        aria-expanded={switcherOpen}
+        aria-haspopup="true"
         onclick={() => (switcherOpen = !switcherOpen)}
       >
         <!-- Database icon -->
@@ -223,13 +226,15 @@
     <input
       type="text"
       placeholder="Search objects..."
+      aria-label="Search objects"
       bind:value={searchQuery}
     />
     {#if searchQuery}
       <button
         class="clear-btn"
         onclick={() => (searchQuery = '')}
-        title="Clear"
+        title="Clear search"
+        aria-label="Clear search"
       >
         <svg
           width="12"
@@ -269,7 +274,11 @@
       {#each databases.filter( (d) => dbMatches(d.name, schemasByDb[d.name], loadedObjects, searchQueryLower) ) as db}
         <div class="tree-node">
           <div class="db-row-wrap">
-            <button class="node-row db-row" onclick={() => toggleDb(db.name)}>
+            <button
+              class="node-row db-row"
+              aria-expanded={expandedDbs.has(db.name)}
+              onclick={() => toggleDb(db.name)}
+            >
               <svg
                 class="chevron"
                 class:open={expandedDbs.has(db.name)}
@@ -330,6 +339,8 @@
                   <div class="schema-node">
                     <button
                       class="node-row schema-row"
+                      aria-expanded={expandedSchemas.has(schema.name) ||
+                        !!searchQuery}
                       onclick={() => toggleSchema(schema)}
                     >
                       <svg
@@ -377,13 +388,19 @@
                           ondata={handleObjectsLoaded}
                         >
                           {#snippet children(objects)}
-                            {#each groupObjects(objects)
-                              .map( (g) => ({ ...g, items: g.items.filter( (o) => objectMatches(o.name, searchQueryLower) ) }) )
-                              .filter((g) => g.items.length > 0) as group}
+                            {@const matchingObjects = searchQueryLower
+                              ? objects.filter((o) =>
+                                  objectMatches(o.name, searchQueryLower),
+                                )
+                              : objects}
+                            {#each groupObjects(matchingObjects) as group}
                               <div class="group-node">
                                 <button
                                   class="group-header"
                                   class:open={expandedGroups.has(
+                                    `${schema.name}|${group.kind}`,
+                                  ) || !!searchQuery}
+                                  aria-expanded={expandedGroups.has(
                                     `${schema.name}|${group.kind}`,
                                   ) || !!searchQuery}
                                   onclick={() =>

@@ -1,7 +1,9 @@
 use crate::ai::memory::observations::{InjectionClass, Observation, Origin};
 use crate::ai::memory::reflection::CurationProposal;
 use crate::ai::memory::retrieval::cosine_similarity;
-use crate::ai::memory::security::{sanitize_rule_text, sanitize_sql_snippet, SourceTrust};
+use crate::ai::memory::security::{
+    sanitize_key_phrase, sanitize_rule_text, sanitize_sql_snippet, SourceTrust,
+};
 use crate::ai::memory::{
     compute_memory_doc_hash, MemoryCategory, MemoryItem, MemoryManager, MemoryScope, MemoryStatus,
     MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME, TOOL_RULE_STABILITY_HOURS,
@@ -14,6 +16,7 @@ pub fn validate_and_build_memory_item(
     obs: &Observation,
     _graph: Option<&SchemaGraph>,
 ) -> Result<MemoryItem, String> {
+    let sanitized_key_phrase = sanitize_key_phrase(&proposal.key_phrase)?;
     let sanitized_rule = sanitize_rule_text(&proposal.rule_text)?;
     let sanitized_sql = match proposal.sql_snippet.as_deref() {
         Some(s) => Some(sanitize_sql_snippet(Some(s))?.unwrap_or_default()),
@@ -64,7 +67,7 @@ pub fn validate_and_build_memory_item(
         scope: MemoryScope::from_str(&proposal.scope),
         scope_key: obs.connection_key.clone(),
         category: MemoryCategory::from_str(&proposal.category),
-        key_phrase: proposal.key_phrase.clone(),
+        key_phrase: sanitized_key_phrase,
         rule_text: sanitized_rule,
         sql_snippet: sanitized_sql,
         importance: proposal.confidence.clamp(0.1, 1.0),

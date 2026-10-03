@@ -16,8 +16,13 @@
 <div class="code-block-wrap">
   <div class="code-block-hdr">
     <span class="code-lang">{lang || 'code'}</span>
-    <button class="copy-btn" onclick={copy}
-      >{copied ? 'Copied!' : 'Copy'}</button
+    <button
+      type="button"
+      class="copy-btn"
+      onclick={copy}
+      aria-label={copied
+        ? 'Code copied to clipboard'
+        : 'Copy code to clipboard'}>{copied ? 'Copied!' : 'Copy'}</button
     >
   </div>
   <pre class="code-block"><code>{code.trimEnd()}</code></pre>

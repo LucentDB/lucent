@@ -793,3 +793,22 @@ fn table_base_sql_quotes_every_namespace_segment_separately() {
         r#"SELECT * FROM "analytics.main"."users""#
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn test_connections_file_permissions_unix() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_dir, _config_path) = with_temp_config_dir();
+    let profile = ConnectionProfile::new("Perm Test".into());
+    write_all(&[profile], &[]).unwrap();
+
+    let path = connections_file_path();
+    let metadata = std::fs::metadata(&path).unwrap();
+    let mode = metadata.permissions().mode();
+    assert_eq!(
+        mode & 0o777,
+        0o600,
+        "connections.json should have 0o600 permissions on Unix"
+    );
+}

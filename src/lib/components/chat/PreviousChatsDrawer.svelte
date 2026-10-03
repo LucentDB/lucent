@@ -145,10 +145,25 @@
     });
   }
 
+  // Cache lowercased conversation titles in a WeakMap to avoid repeated string allocations
+  // on every item during search filtering across keystrokes, without creating intermediate objects or extra array passes.
+  const searchQueryLower = $derived(searchQuery.trim().toLowerCase());
+  const titleCache = new WeakMap<ChatConversation, string>();
+
+  function getLowerTitle(c: ChatConversation): string {
+    let lower = titleCache.get(c);
+    if (lower === undefined) {
+      lower = (c.title || '').toLowerCase();
+      titleCache.set(c, lower);
+    }
+    return lower;
+  }
+
   const filteredConversations = $derived.by(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return conversations;
-    return conversations.filter((c) => (c.title || '').toLowerCase().includes(q));
+    if (!searchQueryLower) return conversations;
+    return conversations.filter((c) =>
+      getLowerTitle(c).includes(searchQueryLower),
+    );
   });
 </script>
 

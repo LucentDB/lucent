@@ -68,17 +68,18 @@ fn csv_format_value(v: &serde_json::Value, null_str: &str, delimiter: char) -> S
     match v {
         serde_json::Value::Null => null_str.to_string(),
         serde_json::Value::String(s) => csv_quote(s, delimiter),
+        serde_json::Value::Number(n) => csv_quote_raw(&n.to_string(), delimiter),
         other => csv_quote(&other.to_string(), delimiter),
     }
 }
 
 /// Prefix a cell with `'` when it starts with a spreadsheet formula
-/// trigger. Without this, Excel/Sheets evaluates exported cells as formulas
-/// — CWE-1236 CSV injection (S2). Applied BEFORE quoting so the prefix also
-/// protects cells that need RFC-4180 quoting.
+/// trigger (including when preceded by leading whitespace). Without this,
+/// Excel/Sheets evaluates exported cells as formulas — CWE-1236 CSV injection (S2).
+/// Applied BEFORE quoting so the prefix also protects cells that need RFC-4180 quoting.
 fn neutralize_formula(s: &str) -> Cow<'_, str> {
-    match s.chars().next() {
-        Some('=' | '+' | '-' | '@' | '\t' | '\r') => {
+    match s.trim_start().chars().next() {
+        Some('=' | '+' | '-' | '@' | '\t' | '\r' | '\n' | '|') => {
             let mut out = String::with_capacity(s.len() + 1);
             out.push('\'');
             out.push_str(s);
@@ -88,13 +89,17 @@ fn neutralize_formula(s: &str) -> Cow<'_, str> {
     }
 }
 
-fn csv_quote(s: &str, delimiter: char) -> String {
-    let s = neutralize_formula(s);
+fn csv_quote_raw(s: &str, delimiter: char) -> String {
     if s.contains(delimiter) || s.contains('"') || s.contains('\n') || s.contains('\r') {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
     }
+}
+
+fn csv_quote(s: &str, delimiter: char) -> String {
+    let s = neutralize_formula(s);
+    csv_quote_raw(&s, delimiter)
 }
 
 // ─── JSON Formatting ────────────────────────────────────────────────────────

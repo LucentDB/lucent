@@ -183,10 +183,13 @@
 
       <!-- Error banner -->
       {#if connectError || connections.errorMessage}
-        <div class="error-banner selectable">
+        <div class="error-banner selectable" role="alert">
           <span>{connections.errorMessage ?? connectError}</span>
           <button
+            type="button"
             class="dismiss-btn"
+            aria-label="Dismiss error"
+            title="Dismiss error"
             onclick={() => (connections.errorMessage = null)}>✕</button
           >
         </div>
@@ -198,6 +201,7 @@
           <button
             class="quick-connect-toggle"
             type="button"
+            aria-expanded={quickConnectOpen}
             onclick={() => (quickConnectOpen = !quickConnectOpen)}
           >
             <svg

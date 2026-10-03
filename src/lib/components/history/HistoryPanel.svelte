@@ -59,6 +59,7 @@
     <h2 class="panel-title">Query History</h2>
     <button
       class="close-btn"
+      title="Close query history"
       aria-label="Close query history"
       onclick={() => onClose?.()}
     >
