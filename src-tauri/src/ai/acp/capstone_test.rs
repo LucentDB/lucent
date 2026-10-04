@@ -539,8 +539,6 @@ async fn agent_spawning_mcp_binary_marks_bridge_connected() {
     acp.drop_session("conv-connect").await;
 }
 
-use crate::ai::acp::driver::tests::env_var_guard;
-
 #[tokio::test]
 async fn tools_gate_claims_tools_when_the_bridge_connects() {
     // Spec D4, connected side, end to end: the stub plays a real agent's
