@@ -243,16 +243,18 @@ export const CLAUSE_KEYWORDS: Record<SqlClause, string[]> = {
  * parser — good enough to gate keyword suggestions.
  */
 export function classifyClause(textBeforeCursor: string): SqlClause {
-  const tokens = textBeforeCursor
-    .toLowerCase()
-    .replace(/[^a-z\s]/g, ' ')
-    .split(/\s+/)
-    .filter(Boolean);
+  // Optimization: Use RegExp matching iterator over textBeforeCursor directly instead of
+  // chaining lowerCase(), replace(), split() and filter(), avoiding multiple large string and array
+  // allocations on every autocomplete evaluation/keystroke.
+  const wordRegex = /[a-zA-Z]+/g;
   let clause: SqlClause = 'statement-start';
   let inCase = false;
   let afterCase: SqlClause = 'statement-start';
   let prev = '';
-  for (const t of tokens) {
+  let match: RegExpExecArray | null;
+
+  while ((match = wordRegex.exec(textBeforeCursor)) !== null) {
+    const t = match[0].toLowerCase();
     if (inCase) {
       if (t === 'when') clause = 'case-when';
       else if (t === 'then') clause = 'case-then';
