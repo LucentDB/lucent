@@ -13,9 +13,7 @@ describe('NotebookToolbar', () => {
         onRestartSession: vi.fn(),
       },
     });
-    const btn = screen
-      .getByText('Run All')
-      .closest('button') as HTMLButtonElement;
+    const btn = screen.getByText('Run All').closest('button') as HTMLButtonElement;
     expect(btn.title).toBe('Run all cells');
 
     rerender({ isRunning: true });
