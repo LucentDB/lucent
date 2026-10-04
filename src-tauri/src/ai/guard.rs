@@ -452,10 +452,11 @@ fn check_table_with_joins(twj: &TableWithJoins) -> Result<(), GuardError> {
             | JoinOperator::RightSemi(c)
             | JoinOperator::Anti(c)
             | JoinOperator::LeftAnti(c)
-            | JoinOperator::RightAnti(c) => match c {
-                JoinConstraint::On(expr) => check_expr(expr)?,
-                _ => {}
-            },
+            | JoinOperator::RightAnti(c) => {
+                if let JoinConstraint::On(expr) = c {
+                    check_expr(expr)?;
+                }
+            }
             _ => {}
         }
     }
@@ -484,13 +485,10 @@ fn check_setexpr_readonly(body: &SetExpr) -> Result<(), GuardError> {
             if let Some(selection) = &sel.selection {
                 check_expr(selection)?;
             }
-            match &sel.group_by {
-                sqlparser::ast::GroupByExpr::Expressions(exprs, _) => {
-                    for e in exprs {
-                        check_expr(e)?;
-                    }
+            if let sqlparser::ast::GroupByExpr::Expressions(exprs, _) = &sel.group_by {
+                for e in exprs {
+                    check_expr(e)?;
                 }
-                _ => {}
             }
             if let Some(having) = &sel.having {
                 check_expr(having)?;
