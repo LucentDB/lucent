@@ -27,6 +27,7 @@
       onclick={onRunAll}
       disabled={isRunning}
       type="button"
+      title={isRunning ? 'Running all cells…' : 'Run all cells'}
     >
       {#if isRunning && runAllProgress}
         <span class="btn-spinner" aria-hidden="true"></span>
