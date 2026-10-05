@@ -369,7 +369,7 @@
                       />
                       <span class="schema-name">{schema.name}</span>
                       {#if searchQuery && loadedObjects[schema.name]}
-                        <!-- Pass full object 'o' to objectMatches to utilize WeakMap lowerNameCache and prevent toLowerCase allocations -->
+                        <!-- Bolt optimization: Pass full object 'o' to objectMatches to utilize WeakMap lowerNameCache and eliminate per-keystroke toLowerCase allocations -->
                         {@const matchCount = loadedObjects[schema.name].filter(
                           (o) => objectMatches(o, searchQueryLower),
                         ).length}
@@ -389,7 +389,7 @@
                           ondata={handleObjectsLoaded}
                         >
                           {#snippet children(objects)}
-                            <!-- Pass full object 'o' to objectMatches to utilize WeakMap lowerNameCache and prevent toLowerCase allocations -->
+                            <!-- Bolt optimization: Pass full object 'o' to objectMatches to utilize WeakMap lowerNameCache and eliminate per-keystroke toLowerCase allocations -->
                             {@const matchingObjects = searchQueryLower
                               ? objects.filter((o) =>
                                   objectMatches(o, searchQueryLower),
