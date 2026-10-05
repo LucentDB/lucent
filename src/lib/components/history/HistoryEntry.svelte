@@ -15,6 +15,16 @@
     onCopy?: (sql: string) => void;
   } = $props();
 
+  let copied = $state(false);
+
+  function handleCopy(sql: string) {
+    onCopy?.(sql);
+    copied = true;
+    setTimeout(() => {
+      copied = false;
+    }, 1500);
+  }
+
   function truncateSql(sql: string, maxLen = 80): string {
     const line = sql.split('\n')[0];
     return line.length > maxLen ? line.slice(0, maxLen) + '…' : line;
@@ -102,21 +112,35 @@
     <button
       type="button"
       class="action-btn"
-      aria-label="Copy SQL"
-      title="Copy SQL"
-      onclick={() => onCopy?.(entry.sql)}
+      class:copied
+      aria-label={copied ? 'SQL copied to clipboard' : 'Copy SQL'}
+      title={copied ? 'Copied!' : 'Copy SQL'}
+      onclick={() => handleCopy(entry.sql)}
     >
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-      >
-        <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-      </svg>
+      {#if copied}
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2.5"
+        >
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      {:else}
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+      {/if}
     </button>
     <button
       type="button"
@@ -241,5 +265,8 @@
   }
   .action-btn.faved {
     color: var(--warning);
+  }
+  .action-btn.copied {
+    color: var(--accent);
   }
 </style>

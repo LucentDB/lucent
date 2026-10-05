@@ -51,4 +51,23 @@ describe('HistoryEntry accessibility', () => {
       screen.getByRole('button', { name: 'Unfavorite query' }),
     ).toBeDefined();
   });
+
+  it('updates copy button aria-label and triggers onCopy when clicked', async () => {
+    let copiedSql = '';
+    const { fireEvent } = await import('@testing-library/svelte');
+    render(HistoryEntry, {
+      entry: sampleEntry,
+      onCopy: (sql) => {
+        copiedSql = sql;
+      },
+    });
+
+    const copyBtn = screen.getByRole('button', { name: 'Copy SQL' });
+    await fireEvent.click(copyBtn);
+
+    expect(copiedSql).toBe(sampleEntry.sql);
+    expect(
+      screen.getByRole('button', { name: 'SQL copied to clipboard' }),
+    ).toBeDefined();
+  });
 });
