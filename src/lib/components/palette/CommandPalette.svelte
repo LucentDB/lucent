@@ -76,7 +76,11 @@
       icons[id] ||
       (typeof id === 'string' && id.trim().startsWith('<') ? id : null) ||
       '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
-    return DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true } });
+    return DOMPurify.sanitize(svg, {
+      USE_PROFILES: { svg: true },
+      FORBID_TAGS: ['script', 'style', 'foreignObject', 'iframe'],
+      FORBID_ATTR: ['onerror', 'onload', 'onclick', 'onmouseover'],
+    });
   }
 
   onMount(() => {
