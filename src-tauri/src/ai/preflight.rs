@@ -82,6 +82,7 @@ pub fn probe_candidates<'a>(
 pub fn build_probe_sql(
     candidates: &[&crate::ai::schema_graph::ColumnEntry],
     literal: &str,
+    builder: &dyn crate::sql_builder::SqlBuilder,
 ) -> Option<String> {
     if candidates.is_empty() {
         return None;
@@ -94,7 +95,7 @@ pub fn build_probe_sql(
     variants.dedup();
     let in_list = variants
         .iter()
-        .map(|v| format!("'{}'", v.replace('\'', "''")))
+        .map(|v| builder.quote_string(v))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -102,15 +103,17 @@ pub fn build_probe_sql(
         .iter()
         .map(|c| {
             let qualified = format!(
-                "\"{}\".\"{}\"",
-                c.schema.replace('"', "\"\""),
-                c.table.replace('"', "\"\"")
+                "{}.{}",
+                builder.quote_identifier(&c.schema),
+                builder.quote_identifier(&c.table)
             );
-            let col = c.name.replace('"', "\"\"");
-            let tag = format!("{}.{}.{}", c.schema, c.table, c.name).replace('\'', "''");
+            let col = builder.quote_identifier(&c.name);
+            let tag_str = format!("{}.{}.{}", c.schema, c.table, c.name);
+            let tag = builder.quote_string(&tag_str);
+            let cast_col = builder.cast_to_text(&col);
             format!(
-                "(SELECT '{tag}' AS col, \"{col}\"::text AS val FROM {qualified} \
-                  WHERE \"{col}\" IN ({in_list}) LIMIT 1)"
+                "(SELECT {tag} AS col, {cast_col} AS val FROM {qualified} \
+                  WHERE {col} IN ({in_list}) LIMIT 1)"
             )
         })
         .collect();
@@ -264,9 +267,10 @@ async fn probe_literals(
             return hints;
         }
     };
+    let builder = crate::sql_builder::for_driver(capabilities);
     for lit in literals {
         let candidates = probe_candidates(graph, lit);
-        let Some(sql) = build_probe_sql(&candidates, lit) else {
+        let Some(sql) = build_probe_sql(&candidates, lit, builder.as_ref()) else {
             continue;
         };
         match client.execute(connection_id, &sql).await {
@@ -511,7 +515,8 @@ mod tests {
     fn probe_sql_is_single_statement_with_case_variants() {
         let g = graph_for_probing();
         let cands = probe_candidates(&g, "0005433348362");
-        let sql = build_probe_sql(&cands, "0005433348362").expect("candidates exist");
+        let pg = crate::sql_builder::PostgresSqlBuilder;
+        let sql = build_probe_sql(&cands, "0005433348362", &pg).expect("candidates exist");
         assert!(!sql.contains(';'), "single statement only: {sql}");
         assert!(sql.contains("LIMIT 1"), "each probe stops at first hit");
         assert!(
@@ -524,9 +529,22 @@ mod tests {
     fn probe_sql_dedupes_case_variants_and_escapes_quotes() {
         let g = graph_for_probing();
         let cands = probe_candidates(&g, "OLEG PETROV");
-        let sql = build_probe_sql(&cands, "O'LEG").expect("candidates exist");
+        let pg = crate::sql_builder::PostgresSqlBuilder;
+        let sql = build_probe_sql(&cands, "O'LEG", &pg).expect("candidates exist");
         assert!(sql.contains("O''LEG"), "single quotes doubled: {sql}");
         assert!(!sql.contains("ILIKE"), "equality only");
+    }
+
+    #[test]
+    fn probe_sql_uses_driver_builder_syntax() {
+        let g = graph_for_probing();
+        let cands = probe_candidates(&g, "0005433348362");
+        let duck = crate::sql_builder::DuckDbSqlBuilder;
+        let sql = build_probe_sql(&cands, "0005433348362", &duck).expect("candidates exist");
+        assert!(
+            sql.contains("CAST(\"ticket_no\" AS VARCHAR)"),
+            "DuckDB cast syntax used: {sql}"
+        );
     }
 
     #[tokio::test]
