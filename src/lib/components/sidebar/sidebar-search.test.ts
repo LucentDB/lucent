@@ -5,6 +5,10 @@ test('objectMatches is case-insensitive and empty-query matches all', () => {
   expect(objectMatches('Users', '')).toBe(true);
   expect(objectMatches('Users', 'user')).toBe(true);
   expect(objectMatches('orders', 'user')).toBe(false);
+  // Also accepts object reference { name: string } using lowerNameCache
+  const userObj = { name: 'Users' };
+  expect(objectMatches(userObj, 'user')).toBe(true);
+  expect(objectMatches(userObj, 'order')).toBe(false);
 });
 
 test('schemaMatches by schema name or contained object', () => {

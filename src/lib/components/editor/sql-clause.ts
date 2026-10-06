@@ -1,5 +1,6 @@
 import { completeFromList, ifNotIn } from '@codemirror/autocomplete';
 import type {
+  Completion,
   CompletionContext,
   CompletionSource,
 } from '@codemirror/autocomplete';
@@ -347,15 +348,27 @@ export function clauseKeywordSource(dialect: SQLDialect): CompletionSource {
     'null',
     'unknown',
   ]);
+
+  // Pre-compute completion options per clause for this dialect to avoid
+  // filter/map allocations on every completion context evaluation.
+  const clauseOptions = new Map<SqlClause, Completion[]>();
+  for (const [clause, keywords] of Object.entries(CLAUSE_KEYWORDS) as [
+    SqlClause,
+    string[],
+  ][]) {
+    const options = keywords
+      .filter((k) => dialectWords.has(k))
+      .map((label) => ({ label, type: 'keyword' as const, boost: -1 }));
+    clauseOptions.set(clause, options);
+  }
+
   return ifNotIn(
     ['QuotedIdentifier', 'String', 'LineComment', 'BlockComment', '.'],
     (context: CompletionContext) => {
       const clause = classifyClause(
         context.state.doc.sliceString(0, context.pos),
       );
-      const options = (CLAUSE_KEYWORDS[clause] ?? [])
-        .filter((k) => dialectWords.has(k))
-        .map((label) => ({ label, type: 'keyword' as const, boost: -1 }));
+      const options = clauseOptions.get(clause) ?? [];
       return completeFromList(options)(context);
     },
   );
