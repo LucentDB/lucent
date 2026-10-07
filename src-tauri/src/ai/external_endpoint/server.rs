@@ -1,16 +1,18 @@
-use lucent_protocol::ConnectionId;
 use std::path::PathBuf;
 use std::sync::Arc;
+use lucent_protocol::ConnectionId;
 use tokio::io::AsyncWriteExt;
 
 use crate::ai::acp::bridge::ToolExecutor;
 use crate::ai::acp::wire;
 use crate::ai::external_endpoint::discovery::{
-    cleanup_discovery_file_at, default_discovery_file_path, default_socket_path, ensure_socket_dir,
-    is_pid_alive, read_discovery_file_at, write_discovery_file_at, ConnectionSummary,
-    DiscoveryInfo, EndpointStatus,
+    cleanup_discovery_file_at, default_discovery_file_path, default_socket_path,
+    ensure_socket_dir, is_pid_alive, read_discovery_file_at,
+    write_discovery_file_at, ConnectionSummary, DiscoveryInfo, EndpointStatus,
 };
-use crate::ai::external_endpoint::executor::{DynamicContextToolExecutor, ExternalEndpointContext};
+use crate::ai::external_endpoint::executor::{
+    DynamicContextToolExecutor, ExternalEndpointContext,
+};
 use crate::ai::tools::ToolOutput;
 use crate::client::ConnectorClient;
 
@@ -81,19 +83,11 @@ impl ExternalEndpointManager {
         };
 
         #[cfg(unix)]
-        let listener = tokio::net::UnixListener::bind(&socket_path).map_err(|e| {
-            format!(
-                "Failed to bind external MCP socket at {}: {e}",
-                socket_path.display()
-            )
-        })?;
+        let listener = tokio::net::UnixListener::bind(&socket_path)
+            .map_err(|e| format!("Failed to bind external MCP socket at {}: {e}", socket_path.display()))?;
 
         #[cfg(windows)]
-        let pipe_name = format!(
-            r"\\.\pipe\lucent-external-{}-{}",
-            std::process::id(),
-            &token[..8]
-        );
+        let pipe_name = format!(r"\\.\pipe\lucent-external-{}-{}", std::process::id(), &token[..8]);
         #[cfg(windows)]
         let first_server = tokio::net::windows::named_pipe::ServerOptions::new()
             .first_pipe_instance(true)
@@ -260,20 +254,22 @@ impl ExternalEndpointManager {
                     tools,
                 }
             }
-            _ => DiscoveryInfo {
-                version: "1.0".into(),
-                status: EndpointStatus::Disconnected,
-                socket: self.socket_path.to_string_lossy().to_string(),
-                token: self.token.clone(),
-                pid: std::process::id(),
-                connection: None,
-                tools: vec![
-                    "run_readonly_query".into(),
-                    "search_schema".into(),
-                    "get_objects_info".into(),
-                    "get_preflight_context".into(),
-                ],
-            },
+            _ => {
+                DiscoveryInfo {
+                    version: "1.0".into(),
+                    status: EndpointStatus::Disconnected,
+                    socket: self.socket_path.to_string_lossy().to_string(),
+                    token: self.token.clone(),
+                    pid: std::process::id(),
+                    connection: None,
+                    tools: vec![
+                        "run_readonly_query".into(),
+                        "search_schema".into(),
+                        "get_objects_info".into(),
+                        "get_preflight_context".into(),
+                    ],
+                }
+            }
         };
 
         write_discovery_file_at(&self.discovery_path, &info)
@@ -307,9 +303,7 @@ where
     let Some(hello) = wire::read_hello(&mut reader).await? else {
         return Ok(());
     };
-    let wire::Hello::Hello {
-        token: client_token,
-    } = hello;
+    let wire::Hello::Hello { token: client_token } = hello;
     if client_token != token {
         return Ok(()); // silent close on token mismatch
     }
@@ -357,11 +351,7 @@ mod tests {
         let stale_info = DiscoveryInfo {
             version: "1.0".into(),
             status: EndpointStatus::Connected,
-            socket: temp_dir
-                .path()
-                .join("stale.sock")
-                .to_string_lossy()
-                .to_string(),
+            socket: temp_dir.path().join("stale.sock").to_string_lossy().to_string(),
             token: "stale_token_12345".into(),
             pid: 999_999_999,
             connection: None,
@@ -382,9 +372,7 @@ mod tests {
             memory_manager: Arc::new(crate::ai::memory::MemoryManager::open_in_memory().unwrap()),
         });
 
-        let mut manager = ExternalEndpointManager::start(context, Some(custom_discovery.clone()))
-            .await
-            .unwrap();
+        let mut manager = ExternalEndpointManager::start(context, Some(custom_discovery.clone())).await.unwrap();
         #[cfg(unix)]
         assert!(manager.socket_path.exists());
 
@@ -404,10 +392,7 @@ mod tests {
         use lucent_protocol::ConnectionConfig;
 
         let mut supervisor = Supervisor::for_driver("duckdb", new_log_buffer());
-        supervisor
-            .ensure_running()
-            .await
-            .expect("start duckdb worker");
+        supervisor.ensure_running().await.expect("start duckdb worker");
         let socket = supervisor.endpoint().to_string();
         let token = supervisor.handshake_token().to_string();
 
@@ -468,10 +453,7 @@ mod tests {
             memory_manager: Arc::new(crate::ai::memory::MemoryManager::open_in_memory().unwrap()),
         });
 
-        let mut manager =
-            ExternalEndpointManager::start(context.clone(), Some(custom_discovery.clone()))
-                .await
-                .unwrap();
+        let mut manager = ExternalEndpointManager::start(context.clone(), Some(custom_discovery.clone())).await.unwrap();
 
         // 1. Initial status: Disconnected
         let disc1 = read_discovery_file_at(&custom_discovery).unwrap();
