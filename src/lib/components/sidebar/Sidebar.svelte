@@ -78,6 +78,26 @@
 
   let searchQuery = $state('');
   let searchQueryLower = $derived(searchQuery.toLowerCase());
+
+  // Cached derived filters to avoid re-evaluating dbMatches and schemaMatches
+  // across tree nodes on every render cycle.
+  let filteredDatabases = $derived(
+    databases.filter((d) =>
+      dbMatches(d.name, schemasByDb[d.name], loadedObjects, searchQueryLower),
+    ),
+  );
+
+  let filteredSchemasByDb = $derived(
+    Object.fromEntries(
+      Object.entries(schemasByDb).map(([dbName, dbSchemas]) => [
+        dbName,
+        (dbSchemas ?? []).filter((s) =>
+          schemaMatches(s, loadedObjects[s.name], searchQueryLower),
+        ),
+      ]),
+    ),
+  );
+
   let objectLabels = {
     table: 'Tables',
     view: 'Views',
@@ -271,7 +291,7 @@
     {:else if databases.length === 0}
       <div class="empty-root">Connect to a database to explore</div>
     {:else}
-      {#each databases.filter( (d) => dbMatches(d.name, schemasByDb[d.name], loadedObjects, searchQueryLower) ) as db}
+      {#each filteredDatabases as db}
         <div class="tree-node">
           <div class="db-row-wrap">
             <button
@@ -335,7 +355,7 @@
               {#if schemas.isPending}
                 <div class="loading-line">Loading…</div>
               {:else if schemasByDb[db.name]}
-                {#each schemasByDb[db.name].filter( (s) => schemaMatches(s, loadedObjects[s.name], searchQueryLower) ) as schema}
+                {#each filteredSchemasByDb[db.name] ?? [] as schema}
                   <div class="schema-node">
                     <button
                       class="node-row schema-row"
