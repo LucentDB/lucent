@@ -63,6 +63,13 @@ describe('LogsDrawer', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it('closes when pressing Escape key', async () => {
+    const onClose = vi.fn();
+    render(LogsDrawer, { onClose });
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('renders region role and live region for screen readers', () => {
     const { getByRole, container } = render(LogsDrawer, { onClose: vi.fn() });
     expect(getByRole('region', { name: 'Worker stderr logs' })).toBeTruthy();
