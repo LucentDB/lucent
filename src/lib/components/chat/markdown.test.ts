@@ -136,3 +136,11 @@ test('strips forbidden base, meta, and link tags from rendered markdown', () => 
   expect(out.toLowerCase()).not.toContain('<meta');
   expect(out.toLowerCase()).not.toContain('<link');
 });
+
+test('strips inline style attributes to prevent CSS injection and UI spoofing', () => {
+  const out = renderMarkdown(
+    '<p style="position:fixed;top:0;left:0;width:100%;height:100%;z-index:9999;background:red">Overlay</p>',
+  );
+  expect(out.toLowerCase()).not.toContain('style=');
+  expect(out).toContain('<p>Overlay</p>');
+});

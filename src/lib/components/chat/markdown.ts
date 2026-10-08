@@ -79,7 +79,7 @@ export function renderMarkdown(text: string): string {
     const html = typeof result === 'string' ? result : String(result);
     return DOMPurify.sanitize(html, {
       FORBID_TAGS: FORBIDDEN_MARKDOWN_TAGS,
-      FORBID_ATTR: ['autofocus'],
+      FORBID_ATTR: ['autofocus', 'style'],
       // Only safe link protocols and relative paths, so `data:`, `javascript:`,
       // `blob:`, and protocol-relative `//host` URLs are dropped.
       ALLOWED_URI_REGEXP:
