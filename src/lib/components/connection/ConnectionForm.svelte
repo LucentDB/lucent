@@ -576,7 +576,10 @@
           </div>
 
           <!-- External AI Agents (MCP) -->
-          <div class="field" style="margin-top: 0.5rem; display: flex; flex-direction: column; gap: 0.5rem;">
+          <div
+            class="field"
+            style="margin-top: 0.5rem; display: flex; flex-direction: column; gap: 0.5rem;"
+          >
             <span class="label-text">External AI Agents (MCP)</span>
             <label class="checkbox-label" for="form-enable-external-agents">
               <input
@@ -590,7 +593,8 @@
             {#if enableExternalAgents}
               <div class="mcp-notice-box">
                 <p class="mcp-warning-text">
-                  Enabling external AI access sets this profile to strictly read-only with local file system access disabled.
+                  Enabling external AI access sets this profile to strictly
+                  read-only with local file system access disabled.
                 </p>
               </div>
 
@@ -627,7 +631,9 @@
                   }, 2000);
                 }}
               >
-                {copiedMcp ? '✓ Copied!' : 'Copy MCP Config for Cursor / Claude Desktop'}
+                {copiedMcp
+                  ? '✓ Copied!'
+                  : 'Copy MCP Config for Cursor / Claude Desktop'}
               </button>
             {/if}
           </div>
