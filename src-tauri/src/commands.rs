@@ -2617,9 +2617,10 @@ pub(crate) fn load_api_key(config: &AiConfig) -> Result<String, String> {
 
     // 2. Try OPENAI_API_KEY env var
     if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-        if !key.is_empty() {
+        let trimmed = key.trim().to_string();
+        if !trimmed.is_empty() {
             log::debug!("LLM API key loaded from OPENAI_API_KEY env var");
-            return Ok(key);
+            return Ok(trimmed);
         }
         log::warn!("OPENAI_API_KEY env var is set but empty");
     } else {
@@ -2630,8 +2631,12 @@ pub(crate) fn load_api_key(config: &AiConfig) -> Result<String, String> {
     let account = keychain_account(&config.provider);
     match keyring::Entry::new(KEYCHAIN_SERVICE, account).and_then(|e| e.get_password()) {
         Ok(key) => {
-            log::debug!("LLM API key loaded from OS keychain");
-            return Ok(key);
+            let trimmed = key.trim().to_string();
+            if !trimmed.is_empty() {
+                log::debug!("LLM API key loaded from OS keychain");
+                return Ok(trimmed);
+            }
+            log::warn!("Keychain API key is empty");
         }
         Err(keyring_err) => {
             log::warn!(
@@ -3740,10 +3745,13 @@ pub async fn save_ai_settings(
     validate_custom_endpoint(&config)?;
     let config = normalize_acp_config(config);
     if let Some(key) = api_key {
-        keyring::Entry::new(KEYCHAIN_SERVICE, keychain_account(&config.provider))
-            .map_err(|e| format!("Keychain error: {e}"))?
-            .set_password(&key)
-            .map_err(|e| format!("Failed to save key: {e}"))?;
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            keyring::Entry::new(KEYCHAIN_SERVICE, keychain_account(&config.provider))
+                .map_err(|e| format!("Keychain error: {e}"))?
+                .set_password(trimmed)
+                .map_err(|e| format!("Failed to save key: {e}"))?;
+        }
     }
     crate::ai::config::save_config_to_disk(&config)
         .map_err(|e| format!("Failed to save config: {e}"))?;
@@ -3760,10 +3768,12 @@ pub async fn list_ai_models(
     endpoint: Option<String>,
 ) -> Result<Vec<crate::ai::providers::dispatch::ModelSummary>, String> {
     let key = match api_key {
-        Some(k) if !k.is_empty() => k,
+        Some(k) if !k.trim().is_empty() => k.trim().to_string(),
         _ => keyring::Entry::new(KEYCHAIN_SERVICE, keychain_account(&provider))
             .ok()
             .and_then(|entry| entry.get_password().ok())
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
             .unwrap_or_default(),
     };
     crate::ai::providers::dispatch::list_models_for(&provider, &key, &endpoint).await
@@ -4626,6 +4636,34 @@ mod api_key_cache_tests {
     #[test]
     fn miss_when_empty() {
         assert_eq!(cached_api_key(&None, &AiProvider::OpenAI), None);
+    }
+}
+
+#[cfg(test)]
+mod api_key_sanitization_tests {
+    use super::load_api_key;
+    use crate::ai::config::{AiConfig, AiProvider};
+
+    #[test]
+    fn load_api_key_trims_env_var_and_skips_whitespace() {
+        let config = AiConfig {
+            provider: AiProvider::OpenAI,
+            ..AiConfig::default()
+        };
+
+        // Valid OPENAI_API_KEY with surrounding whitespace should be trimmed
+        std::env::set_var("OPENAI_API_KEY", "  sk-test-key-1234  \n");
+        let key = load_api_key(&config).expect("should load env var");
+        assert_eq!(key, "sk-test-key-1234");
+
+        // Whitespace-only OPENAI_API_KEY should be skipped
+        std::env::set_var("OPENAI_API_KEY", "   \n\t ");
+        let res = load_api_key(&config);
+        if let Ok(k) = res {
+            assert!(!k.trim().is_empty(), "returned key must not be whitespace");
+        }
+
+        std::env::remove_var("OPENAI_API_KEY");
     }
 }
 
