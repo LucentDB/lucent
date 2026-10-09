@@ -369,8 +369,9 @@
                       />
                       <span class="schema-name">{schema.name}</span>
                       {#if searchQuery && loadedObjects[schema.name]}
+                        <!-- Pass object `o` instead of `o.name` to leverage sidebar-search's WeakMap lowerNameCache -->
                         {@const matchCount = loadedObjects[schema.name].filter(
-                          (o) => objectMatches(o.name, searchQueryLower),
+                          (o) => objectMatches(o, searchQueryLower),
                         ).length}
                         <span class="count-badge" class:match={matchCount > 0}
                           >{matchCount}</span
@@ -388,9 +389,10 @@
                           ondata={handleObjectsLoaded}
                         >
                           {#snippet children(objects)}
+                            <!-- Pass object `o` instead of `o.name` to leverage sidebar-search's WeakMap lowerNameCache -->
                             {@const matchingObjects = searchQueryLower
                               ? objects.filter((o) =>
-                                  objectMatches(o.name, searchQueryLower),
+                                  objectMatches(o, searchQueryLower),
                                 )
                               : objects}
                             {#each groupObjects(matchingObjects) as group}
