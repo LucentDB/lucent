@@ -785,6 +785,7 @@ pub(crate) mod tests {
 
     pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    #[allow(dead_code)]
     pub(crate) struct EnvVarGuard<'a>(
         &'a str,
         Option<String>,
