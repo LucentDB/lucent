@@ -101,7 +101,12 @@
   class:err={statusIcon === 'error'}
   class:stopped={statusIcon === 'stopped'}
 >
-  <button class="tcc-hdr" onclick={() => (open = !open)}>
+  <button
+    type="button"
+    class="tcc-hdr"
+    aria-expanded={open}
+    onclick={() => (open = !open)}
+  >
     <span class="tcc-icon">
       {#if statusIcon === 'spinner'}
         <svg
