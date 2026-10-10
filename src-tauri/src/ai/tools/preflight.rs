@@ -56,8 +56,8 @@ impl GetPreflightContext {
         )
         .await;
 
-        let content =
-            preflight.unwrap_or_else(|| "No preflight hints found for the given prompt.".to_string());
+        let content = preflight
+            .unwrap_or_else(|| "No preflight hints found for the given prompt.".to_string());
 
         Ok(ToolOutput::Text { content })
     }
@@ -79,6 +79,7 @@ mod tests {
             embedder: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             reranker: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             memory_manager: crate::ai::tools::test_memory_manager(),
+            result_scope: crate::ai::result_store::ResultScope::isolated("test"),
         };
 
         let tool = GetPreflightContext::new(ctx.clone());

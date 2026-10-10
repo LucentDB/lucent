@@ -70,6 +70,7 @@ async fn e2e_text_protocol_tool_parsing() {
         memory_manager: std::sync::Arc::new(
             lucent_lib::ai::memory::MemoryManager::open_in_memory().expect("in-memory memory db"),
         ),
+        result_scope: lucent_lib::ai::result_store::ResultScope::isolated("test"),
     });
     assert!(
         calls.iter().any(|t| t.name() == "search_objects"),

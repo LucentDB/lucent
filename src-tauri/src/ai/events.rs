@@ -55,6 +55,11 @@ pub enum AiEvent {
         row_count: usize,
         sql: String,
         execution_time_ms: u64,
+        /// Rows rendered into the model-visible preview (≤ the preview cap).
+        /// The eval harness divides this by `row_count` for "rows seen /
+        /// rows returned" (§5.10). Defaults to 0 for old recorded events.
+        #[serde(default)]
+        rendered_rows: usize,
     },
     Done {
         conversation_id: String,

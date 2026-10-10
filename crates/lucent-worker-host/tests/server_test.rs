@@ -151,16 +151,97 @@ async fn connects_and_streams_a_result_batch() {
     let response: WorkerResponse = read_message(&mut framed).await.unwrap().unwrap();
     match response {
         WorkerResponse::ResultBatch {
-            is_final, shape, ..
+            is_final,
+            shape,
+            worker_ms,
+            ..
         } => match shape {
             ResultShape::Tabular { rows, .. } => {
                 assert!(is_final);
                 assert_eq!(rows.len(), 1);
+                assert!(worker_ms.is_some(), "the final batch carries worker_ms");
             }
             _ => panic!("expected Tabular result shape"),
         },
         other => panic!("expected ResultBatch, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn only_the_final_batch_carries_worker_ms() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path: PathBuf = dir.path().join("worker-ms.sock");
+    let token = "test-token".to_string();
+
+    let listener = bind(&socket_path).unwrap();
+    let connector = PanicOnDemandConnector {
+        panic_queries: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+    };
+    let server_token = token.clone();
+    let server = tokio::spawn(async move {
+        serve(listener, server_token, connector).await.unwrap();
+    });
+
+    let stream = UnixStream::connect(&socket_path).await.unwrap();
+    let mut framed = new_framed(stream);
+    write_message(&mut framed, &lucent_protocol::PROTOCOL_VERSION)
+        .await
+        .unwrap();
+    write_message(&mut framed, &token).await.unwrap();
+    let ack: WorkerResponse = read_message(&mut framed).await.unwrap().unwrap();
+    assert!(matches!(ack, WorkerResponse::HandshakeAccepted));
+
+    let connection_id = ConnectionId(Uuid::new_v4());
+    write_message(
+        &mut framed,
+        &WorkerRequest::Connect {
+            connection_id,
+            config: ConnectionConfig::new("fake"),
+        },
+    )
+    .await
+    .unwrap();
+    let resp: WorkerResponse = read_message(&mut framed).await.unwrap().unwrap();
+    assert!(matches!(resp, WorkerResponse::Connected { .. }));
+
+    let query_id = QueryId(Uuid::new_v4());
+    write_message(
+        &mut framed,
+        &WorkerRequest::Execute {
+            connection_id,
+            query_id,
+            command: "SELECT A".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    // The fixture sends Batch(shape, false) then Batch(shape, true).
+    let first: WorkerResponse = read_message(&mut framed).await.unwrap().unwrap();
+    match &first {
+        WorkerResponse::ResultBatch {
+            is_final: false,
+            worker_ms,
+            ..
+        } => {
+            // `is_none()`, not `assert_eq!(worker_ms, None)`: matching on
+            // `&resp` makes `worker_ms` a `&Option<u64>` (E0277).
+            assert!(worker_ms.is_none(), "only the final batch is timed");
+        }
+        other => panic!("expected non-final ResultBatch first, got {other:?}"),
+    }
+    let second: WorkerResponse = read_message(&mut framed).await.unwrap().unwrap();
+    match &second {
+        WorkerResponse::ResultBatch {
+            is_final: true,
+            worker_ms,
+            ..
+        } => {
+            assert!(worker_ms.is_some(), "the final batch carries worker_ms");
+        }
+        other => panic!("expected final ResultBatch second, got {other:?}"),
+    }
+    server.abort();
 }
 
 #[tokio::test]

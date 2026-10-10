@@ -178,6 +178,18 @@ impl AcpState {
         tool_ctx: &AiToolContext,
         sink: &Arc<dyn AgentSink>,
     ) -> Result<Arc<SessionEntry>, String> {
+        self.session_for_filtered(conversation_id, process, tool_ctx, sink, &[])
+            .await
+    }
+
+    pub async fn session_for_filtered(
+        &self,
+        conversation_id: &str,
+        process: &Arc<crate::ai::acp::manager::AgentProcess>,
+        tool_ctx: &AiToolContext,
+        sink: &Arc<dyn AgentSink>,
+        excluded: &'static [&'static str],
+    ) -> Result<Arc<SessionEntry>, String> {
         // The session's connection may have died since creation — a stale session
         // id is worthless to the restarted process. Evict and recreate.
         let cached = self.sessions.lock().await.get(conversation_id).cloned();
@@ -204,7 +216,10 @@ impl AcpState {
 
         let handle = Arc::new(BridgeHandle::new(conversation_id));
         let tools = handle.connection();
-        let executor: Arc<dyn ToolExecutor> = Arc::new(ContextToolExecutor::new(tool_ctx.clone()));
+        let executor: Arc<dyn ToolExecutor> = Arc::new(ContextToolExecutor::new_filtered(
+            tool_ctx.clone(),
+            excluded,
+        ));
         let correlator = Arc::new(crate::ai::acp::correlator::CorrelatorState::default());
         let serve_sink: Arc<dyn AgentSink> = Arc::new(
             crate::ai::acp::correlator::CorrelatingSink::new(sink.clone(), correlator.clone()),
@@ -356,6 +371,7 @@ impl AcpState {
             bridge: handle.clone(),
             tools,
             first_prompt: AtomicBool::new(true),
+            last_memory_hash: AtomicU64::new(0),
             tools_notice: AtomicBool::new(false),
             correlator,
             _endpoint_dir: dir,
@@ -420,6 +436,11 @@ pub struct SessionEntry {
     /// MCP client completes the hello handshake.
     pub tools: Arc<BridgeConnection>,
     pub first_prompt: AtomicBool,
+    /// Hash of the memory/golden-queries block last delivered to this session
+    /// (0 = none). Follow-ups re-attach the block only when its hash changed
+    /// (F13) — ACP sessions keep their history, so resending an identical
+    /// block every turn would pile up once per turn.
+    pub last_memory_hash: AtomicU64,
     /// Whether the "DB tools unavailable" notice was already emitted for
     /// this session (exactly-once per session).
     pub tools_notice: AtomicBool,
@@ -703,6 +724,7 @@ mod tests {
             embedder: Arc::new(Mutex::new(None)),
             reranker: Arc::new(Mutex::new(None)),
             memory_manager: crate::ai::tools::test_memory_manager(),
+            result_scope: crate::ai::result_store::ResultScope::isolated("test"),
         }
     }
 
@@ -834,7 +856,7 @@ mod tests {
         acp.session_for("conv-opencode", &process, &tool_ctx(), &sink)
             .await
             .expect("session/new round-trips");
-        
+
         let workspace = crate::ai::acp::driver::workspace_dir("stub", "conv-opencode").unwrap();
         let config_path = workspace.join("opencode.json");
         let content = std::fs::read_to_string(&config_path).expect("opencode.json must be created");
@@ -842,7 +864,9 @@ mod tests {
         assert_eq!(parsed["$schema"], "https://opencode.ai/config.json");
         assert_eq!(parsed["mcp"]["lucent-db-tools"]["type"], "local");
         assert_eq!(parsed["mcp"]["lucent-db-tools"]["enabled"], true);
-        let cmd = parsed["mcp"]["lucent-db-tools"]["command"].as_array().expect("command is an array");
+        let cmd = parsed["mcp"]["lucent-db-tools"]["command"]
+            .as_array()
+            .expect("command is an array");
         assert_eq!(cmd.len(), 5);
         assert_eq!(cmd[1], "--socket");
         assert_eq!(cmd[3], "--token");

@@ -40,11 +40,15 @@ fn finalize_active_thinking(segs: &mut [serde_json::Value]) {
     let now_ms = chrono::Utc::now().timestamp_millis();
     if let Some(last) = segs.last_mut() {
         if last.get("type").and_then(|v| v.as_str()) == Some("thinking")
-            && last.get("streaming").and_then(|v| v.as_bool()).unwrap_or(false)
+            && last
+                .get("streaming")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
         {
             last["streaming"] = serde_json::Value::Bool(false);
             if let Some(started) = last.get("startedAt").and_then(|v| v.as_i64()) {
-                last["durationMs"] = serde_json::Value::Number(serde_json::Number::from((now_ms - started).max(0)));
+                last["durationMs"] =
+                    serde_json::Value::Number(serde_json::Number::from((now_ms - started).max(0)));
             }
         }
     }
@@ -58,7 +62,10 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
                 let now_ms = chrono::Utc::now().timestamp_millis();
                 if let Some(last) = segs.last_mut() {
                     if last.get("type").and_then(|v| v.as_str()) == Some("thinking")
-                        && last.get("streaming").and_then(|v| v.as_bool()).unwrap_or(false)
+                        && last
+                            .get("streaming")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
                     {
                         if let Some(c) = last.get_mut("content") {
                             if let Some(s) = c.as_str() {
@@ -112,7 +119,14 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
                     }));
                 }
             }
-            crate::ai::events::AiEvent::ToolResult { id, summary, output, input, status, .. } => {
+            crate::ai::events::AiEvent::ToolResult {
+                id,
+                summary,
+                output,
+                input,
+                status,
+                ..
+            } => {
                 let mut segs = self.turn_segments.lock().unwrap();
                 for seg in segs.iter_mut() {
                     if seg.get("type").and_then(|v| v.as_str()) == Some("tool_call") {
@@ -126,7 +140,9 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
                                     call["args"] = inp.clone();
                                 }
                                 call["status"] = serde_json::Value::String(match status {
-                                    crate::ai::events::ToolResultStatus::Completed => "completed".into(),
+                                    crate::ai::events::ToolResultStatus::Completed => {
+                                        "completed".into()
+                                    }
                                     crate::ai::events::ToolResultStatus::Failed => "failed".into(),
                                 });
                             }
@@ -155,7 +171,10 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
                 }
 
                 let state = self.app_handle.state::<AppState>();
-                let mut entry = state.llm_usage.entry(self.conversation_id.clone()).or_default();
+                let mut entry = state
+                    .llm_usage
+                    .entry(self.conversation_id.clone())
+                    .or_default();
                 let accumulated = accumulate_usage(&entry, usage);
                 *entry = accumulated;
 
@@ -168,12 +187,15 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
 
                 let session_json = if !segs.is_empty() {
                     let now_ms = chrono::Utc::now().timestamp_millis();
-                    Some(serde_json::json!({
-                        "segments": *segs,
-                        "startedAt": self.turn_start_ms,
-                        "durationMs": (now_ms - self.turn_start_ms).max(0),
-                        "active": false,
-                    }).to_string())
+                    Some(
+                        serde_json::json!({
+                            "segments": *segs,
+                            "startedAt": self.turn_start_ms,
+                            "durationMs": (now_ms - self.turn_start_ms).max(0),
+                            "active": false,
+                        })
+                        .to_string(),
+                    )
                 } else {
                     None
                 };
@@ -181,7 +203,9 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
                 if !content.is_empty() || session_json.is_some() {
                     let mem_mgr = state.memory_manager.clone();
                     let conv_id = self.conversation_id.clone();
-                    let msg_id = self.assistant_message_id.clone()
+                    let msg_id = self
+                        .assistant_message_id
+                        .clone()
                         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                     let now = chrono::Utc::now().timestamp();
                     tauri::async_runtime::spawn(async move {
@@ -370,6 +394,10 @@ pub struct AppState {
     pub memory_embedder_test_gate: Option<Arc<MemoryEmbedderTestGate>>,
     pub reranker: Arc<Mutex<Option<crate::ai::rerank::Reranker>>>,
     pub memory_manager: Arc<crate::ai::memory::MemoryManager>,
+    /// Process-wide store of materialized AI result handles (§6A.3). One
+    /// `Arc` shared by every surface — the global byte cap spans chat cells,
+    /// notebook cells, the external endpoint, and evals.
+    pub result_store: Arc<crate::ai::result_store::ResultStore>,
     /// Paths the user explicitly chose in a native save dialog this session or
     /// a previous one (persisted to `<config_dir>/lucent/approved_save_paths.json`).
     /// Write commands only ever touch paths in this set — the frontend is an
@@ -409,9 +437,12 @@ pub struct AppState {
     /// `Clone` is cheap — the chat driver takes a copy per turn.
     pub acp: crate::ai::acp::AcpState,
     /// External agent endpoint context providing isolated MCP access.
-    pub external_endpoint_context: Arc<crate::ai::external_endpoint::executor::ExternalEndpointContext>,
+    pub external_endpoint_context:
+        Arc<crate::ai::external_endpoint::executor::ExternalEndpointContext>,
     /// External agent endpoint manager hosting the Unix domain socket listener.
-    pub external_endpoint_manager: Arc<tokio::sync::Mutex<Option<crate::ai::external_endpoint::server::ExternalEndpointManager>>>,
+    pub external_endpoint_manager: Arc<
+        tokio::sync::Mutex<Option<crate::ai::external_endpoint::server::ExternalEndpointManager>>,
+    >,
 }
 
 impl Default for AppState {
@@ -453,17 +484,22 @@ impl AppState {
             }),
         );
 
-        let external_endpoint_context = Arc::new(crate::ai::external_endpoint::executor::ExternalEndpointContext {
-            client: client.clone(),
-            external_ai_connection_id: external_ai_connection_id.clone(),
-            schema_graph: schema_graph.clone(),
-            embedder: embedder.clone(),
-            capabilities: driver_capabilities.clone(),
-            active_profile: Arc::new(tokio::sync::Mutex::new(None)),
-            inode_tracker: Arc::new(tokio::sync::Mutex::new(None)),
-            reopen_lock: Arc::new(tokio::sync::Mutex::new(())),
-            memory_manager: memory_manager.clone(),
-        });
+        let result_store = Arc::new(crate::ai::result_store::ResultStore::new());
+
+        let external_endpoint_context = Arc::new(
+            crate::ai::external_endpoint::executor::ExternalEndpointContext {
+                client: client.clone(),
+                external_ai_connection_id: external_ai_connection_id.clone(),
+                schema_graph: schema_graph.clone(),
+                embedder: embedder.clone(),
+                capabilities: driver_capabilities.clone(),
+                active_profile: Arc::new(tokio::sync::Mutex::new(None)),
+                inode_tracker: Arc::new(tokio::sync::Mutex::new(None)),
+                reopen_lock: Arc::new(tokio::sync::Mutex::new(())),
+                memory_manager: memory_manager.clone(),
+                result_store: result_store.clone(),
+            },
+        );
 
         let external_endpoint_manager = Arc::new(tokio::sync::Mutex::new(None));
 
@@ -471,9 +507,16 @@ impl AppState {
             let ctx = external_endpoint_context.clone();
             let mgr = external_endpoint_manager.clone();
             let start_endpoint = async move {
-                match crate::ai::external_endpoint::server::ExternalEndpointManager::start(ctx, None).await {
+                match crate::ai::external_endpoint::server::ExternalEndpointManager::start(
+                    ctx, None,
+                )
+                .await
+                {
                     Ok(started) => {
-                        log::info!("External MCP endpoint started at {}", started.socket_path.display());
+                        log::info!(
+                            "External MCP endpoint started at {}",
+                            started.socket_path.display()
+                        );
                         *mgr.lock().await = Some(started);
                     }
                     Err(e) => {
@@ -517,6 +560,7 @@ impl AppState {
             memory_embedder_test_gate: None,
             reranker: Arc::new(Mutex::new(None)),
             memory_manager,
+            result_store,
             approved_save_paths: Arc::new(Mutex::new(load_approved_paths())),
             api_key_cache: Arc::new(RwLock::new(None)),
             password_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -1000,6 +1044,9 @@ async fn connect_impl(
         // The memory key names the old connection; a failed reconnect must not
         // leave it pointing at stale memories.
         *state.memory_connection_key.lock().await = None;
+        // Results from the old connection must not page out in a
+        // conversation that now talks to another database.
+        state.result_store.clear_results();
     }
 
     // Invalidate schema cache for old connection
@@ -2278,6 +2325,9 @@ pub async fn disconnect(state: State<'_, AppState>) -> Result<DisconnectResult, 
     // Notebook sessions hold ConnectionIds into the dying worker; clear them
     // so attach/restart fails fast instead of against dead connections.
     state.notebook_sessions.clear();
+    // Results from the old connection must not page out in a conversation
+    // that now talks to another database.
+    state.result_store.clear_results();
 
     Ok(DisconnectResult { ok: true })
 }
@@ -2617,11 +2667,12 @@ pub(crate) fn load_api_key(config: &AiConfig) -> Result<String, String> {
 
     // 2. Try OPENAI_API_KEY env var
     if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-        if !key.is_empty() {
+        let trimmed = key.trim().to_string();
+        if !trimmed.is_empty() {
             log::debug!("LLM API key loaded from OPENAI_API_KEY env var");
-            return Ok(key);
+            return Ok(trimmed);
         }
-        log::warn!("OPENAI_API_KEY env var is set but empty");
+        log::warn!("OPENAI_API_KEY env var is set but blank");
     } else {
         log::debug!("OPENAI_API_KEY env var not set");
     }
@@ -2630,8 +2681,12 @@ pub(crate) fn load_api_key(config: &AiConfig) -> Result<String, String> {
     let account = keychain_account(&config.provider);
     match keyring::Entry::new(KEYCHAIN_SERVICE, account).and_then(|e| e.get_password()) {
         Ok(key) => {
-            log::debug!("LLM API key loaded from OS keychain");
-            return Ok(key);
+            let trimmed = key.trim().to_string();
+            if !trimmed.is_empty() {
+                log::debug!("LLM API key loaded from OS keychain");
+                return Ok(trimmed);
+            }
+            log::warn!("Keychain API key is blank");
         }
         Err(keyring_err) => {
             log::warn!(
@@ -2871,13 +2926,13 @@ pub(crate) fn pick_driver(
     tools: Vec<crate::ai::tools::LucentToolEnum>,
     tool_ctx: AiToolContext,
     acp_state: crate::ai::acp::AcpState,
+    acp_excluded_tools: &'static [&'static str],
 ) -> Box<dyn AgentDriver> {
     match acp {
-        Some(cfg) => Box::new(crate::ai::acp::driver::AcpChatDriver::new(
-            acp_state,
-            cfg.clone(),
-            tool_ctx,
-        )),
+        Some(cfg) => Box::new(
+            crate::ai::acp::driver::AcpChatDriver::new(acp_state, cfg.clone(), tool_ctx)
+                .with_excluded_tools(acp_excluded_tools),
+        ),
         None => Box::new(DatabaseAgent::new(
             provider.expect("the rig path always builds a provider"),
             tools,
@@ -3008,6 +3063,10 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
         embedder: state.embedder.clone(),
         reranker: state.reranker.clone(),
         memory_manager: state.memory_manager.clone(),
+        result_scope: crate::ai::result_store::ResultScope {
+            scope_id: conversation_id.clone(),
+            store: state.result_store.clone(),
+        },
     };
 
     // Pre-flight: augment the message with value hints and retrieved schema
@@ -3042,7 +3101,14 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
     } else {
         crate::ai::tools::all_tools(tool_ctx.clone())
     };
-    let driver = pick_driver(&config.acp, provider, tools, tool_ctx, state.acp.clone());
+    let driver = pick_driver(
+        &config.acp,
+        provider,
+        tools,
+        tool_ctx,
+        state.acp.clone(),
+        &[],
+    );
     let sink: Arc<dyn AgentSink> = Arc::new(TauriSink {
         channel,
         app_handle: app_handle.clone(),
@@ -3102,7 +3168,10 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
                 "ai:error",
                 AiErrorPayload {
                     conversation_id: conversation_id.clone(),
-                    message: format!("Agent timed out after 300 seconds. Try simplifying the question.{}", stderr_note)
+                    message: format!(
+                        "Agent timed out after 300 seconds. Try simplifying the question.{}",
+                        stderr_note
+                    ),
                 },
             );
             let mut s = conv_err.lock().await;
@@ -3113,6 +3182,7 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // Tauri command — the IPC args are the signature
 #[tauri::command]
 pub async fn ai_chat(
     state: State<'_, AppState>,
@@ -3146,6 +3216,7 @@ pub async fn ai_chat(
     .await
 }
 
+#[allow(clippy::too_many_arguments)] // mirrors the Tauri command's args
 async fn ai_chat_impl(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
@@ -3344,6 +3415,20 @@ pub async fn ai_cancel(state: State<'_, AppState>, conversation_id: String) -> R
     match &s.state {
         AgentState::Running { cancel } => {
             cancel.cancel();
+            // §6A.6/D2.5: mark every in-flight AI query of this conversation.
+            // Queued ones bail before sending; the one executing gets the
+            // DB-native cancel. One AI statement runs per connection (sequence
+            // lock), so this cannot hit another conversation or sampling.
+            let executing = state.result_store.cancel_scope(&conversation_id);
+            if !executing.is_empty() {
+                if let Some(client) = state.client_handle().await {
+                    for (query_id, conn_id) in executing {
+                        if let Err(e) = client.cancel(conn_id, query_id).await {
+                            log::warn!("cancel in-flight query {query_id:?} failed: {e}");
+                        }
+                    }
+                }
+            }
             // ACP: if the bridge is holding a `preview_dml` approval open,
             // nothing will ever approve it now — reject it so the agent's
             // MCP call completes with an error instead of hanging, and the
@@ -3378,6 +3463,7 @@ fn evict_conversation(state: &AppState, conversation_id: &str) {
     state.conversations.remove(conversation_id);
     state.llm_usage.remove(conversation_id);
     state.profile_snapshots.remove(conversation_id);
+    state.result_store.clear_scope(conversation_id);
 }
 
 #[tauri::command]
@@ -3541,6 +3627,13 @@ pub(crate) async fn execute_staged_dml(
     conv: &Arc<Mutex<ConversationState>>,
     staged_sql: String,
 ) -> Result<u64, String> {
+    // One AI statement sequence at a time per connection: without the guard
+    // this DML could land inside a sampling chunk's BEGIN … COMMIT and be
+    // rolled back by that chunk's ROLLBACK while reporting success.
+    let _seq = client
+        .lock_sequence(conn_id, 30_000)
+        .await
+        .map_err(|e| format!("DML not run: {e}"))?;
     let result = client
         .execute(conn_id, &staged_sql)
         .await
@@ -3740,10 +3833,13 @@ pub async fn save_ai_settings(
     validate_custom_endpoint(&config)?;
     let config = normalize_acp_config(config);
     if let Some(key) = api_key {
-        keyring::Entry::new(KEYCHAIN_SERVICE, keychain_account(&config.provider))
-            .map_err(|e| format!("Keychain error: {e}"))?
-            .set_password(&key)
-            .map_err(|e| format!("Failed to save key: {e}"))?;
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            keyring::Entry::new(KEYCHAIN_SERVICE, keychain_account(&config.provider))
+                .map_err(|e| format!("Keychain error: {e}"))?
+                .set_password(trimmed)
+                .map_err(|e| format!("Failed to save key: {e}"))?;
+        }
     }
     crate::ai::config::save_config_to_disk(&config)
         .map_err(|e| format!("Failed to save config: {e}"))?;
@@ -3760,10 +3856,12 @@ pub async fn list_ai_models(
     endpoint: Option<String>,
 ) -> Result<Vec<crate::ai::providers::dispatch::ModelSummary>, String> {
     let key = match api_key {
-        Some(k) if !k.is_empty() => k,
+        Some(k) if !k.trim().is_empty() => k.trim().to_string(),
         _ => keyring::Entry::new(KEYCHAIN_SERVICE, keychain_account(&provider))
             .ok()
             .and_then(|entry| entry.get_password().ok())
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
             .unwrap_or_default(),
     };
     crate::ai::providers::dispatch::list_models_for(&provider, &key, &endpoint).await
@@ -4630,6 +4728,65 @@ mod api_key_cache_tests {
 }
 
 #[cfg(test)]
+mod api_key_sanitization_tests {
+    use super::load_api_key;
+    use crate::ai::config::{AiConfig, AiProvider};
+
+    fn with_env<T>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        let prior: Vec<_> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+        for (k, v) in vars {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        let out = f();
+        for (k, prev) in prior {
+            match prev {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        out
+    }
+
+    /// `load_api_key` reads `~/.lucent/ai-key.txt` before the env var, so the
+    /// env-var arm only runs when HOME points at a directory without that
+    /// file — hence the throwaway HOME (same pattern as the ACP install tests).
+    #[test]
+    fn load_api_key_trims_env_var_and_skips_whitespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_str().unwrap();
+        let config = AiConfig {
+            provider: AiProvider::OpenAI,
+            ..AiConfig::default()
+        };
+
+        let key = with_env(
+            &[
+                ("HOME", Some(home)),
+                ("OPENAI_API_KEY", Some("  sk-test-key-1234  \n")),
+            ],
+            || load_api_key(&config),
+        );
+        assert_eq!(key.expect("env var key should load"), "sk-test-key-1234");
+
+        // A whitespace-only env var is skipped, so whatever comes back from
+        // the remaining lookup paths is never a blank key.
+        let res = with_env(
+            &[("HOME", Some(home)), ("OPENAI_API_KEY", Some("   \n\t "))],
+            || load_api_key(&config),
+        );
+        if let Ok(k) = res {
+            assert!(!k.trim().is_empty(), "returned key must not be whitespace");
+        }
+    }
+}
+
+#[cfg(test)]
 mod acp_config_normalization_tests {
     use super::normalize_acp_config;
     use crate::ai::config::{AcpAgentConfig, AiConfig, AiProvider};
@@ -4985,6 +5142,7 @@ mod acp_driver_branch_tests {
             embedder: Arc::new(Mutex::new(None)),
             reranker: Arc::new(Mutex::new(None)),
             memory_manager: crate::ai::tools::test_memory_manager(),
+            result_scope: crate::ai::result_store::ResultScope::isolated("test"),
         }
     }
 
@@ -5012,7 +5170,7 @@ mod acp_driver_branch_tests {
             auto_deny_permissions: false,
         });
         let driver: Box<dyn AgentDriver> =
-            pick_driver(&acp, None, Vec::new(), tool_ctx(), AcpState::new());
+            pick_driver(&acp, None, Vec::new(), tool_ctx(), AcpState::new(), &[]);
         assert!(
             driver
                 .as_any()
@@ -5029,6 +5187,7 @@ mod acp_driver_branch_tests {
             Vec::new(),
             tool_ctx(),
             AcpState::new(),
+            &[],
         );
         assert!(
             driver.as_any().is::<DatabaseAgent>(),
@@ -5155,6 +5314,7 @@ mod acp_dml_branch_tests {
             bridge: Arc::new(BridgeHandle::new("conv-1")),
             tools: Arc::new(crate::ai::acp::bridge::BridgeConnection::default()),
             first_prompt: std::sync::atomic::AtomicBool::new(false),
+            last_memory_hash: std::sync::atomic::AtomicU64::new(0),
             tools_notice: std::sync::atomic::AtomicBool::new(false),
             correlator: Arc::new(crate::ai::acp::correlator::CorrelatorState::default()),
             _endpoint_dir: None,
@@ -5278,7 +5438,8 @@ mod manual_memory_injection_tests {
     /// these tests never touch the real `memory.db` or load an ONNX model.
     fn state() -> AppState {
         let mut state = AppState::new();
-        state.memory_manager = Arc::new(crate::ai::memory::MemoryManager::open_in_memory().unwrap());
+        state.memory_manager =
+            Arc::new(crate::ai::memory::MemoryManager::open_in_memory().unwrap());
         state.memory_embedder_test_gate = Some(Arc::new(MemoryEmbedderTestGate::unavailable()));
         state
     }
@@ -5536,10 +5697,7 @@ mod manual_memory_injection_tests {
         assert_eq!(segments[1]["call"]["name"], "run_readonly_query");
         assert_eq!(segments[1]["call"]["status"], "completed");
         assert_eq!(segments[1]["call"]["summary"], "1 row");
-        assert_eq!(
-            segments[1]["call"]["output"]["rows"][0][0],
-            "42"
-        );
+        assert_eq!(segments[1]["call"]["output"]["rows"][0][0], "42");
 
         // Verify usage was keyed by conv_id
         let usage = super::get_ai_usage(app_state, conv_id).await.unwrap();

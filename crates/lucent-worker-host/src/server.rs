@@ -68,6 +68,10 @@ where
     // can be evicted AND its DB-side statement cancelled without touching
     // sibling queries on the same socket.
     let mut query_conns: HashMap<QueryId, ConnectionId> = HashMap::new();
+    // When each query was dispatched to its driver, for `worker_ms` (§6A.5).
+    // Entries are removed when the query terminates (final batch, failure, or
+    // dropped sender), so the map cannot grow past the in-flight set.
+    let mut started: HashMap<QueryId, std::time::Instant> = HashMap::new();
 
     // Replies from spawned handlers (catalog RPCs). Catalog queries hit the
     // database, so answering them inline in the select loop would stall result
@@ -144,6 +148,7 @@ where
                         batch_rxs.insert(query_id, rx);
                         sequences.insert(query_id, 0);
                         query_conns.insert(query_id, connection_id);
+                        started.insert(query_id, std::time::Instant::now());
                         let connector = connector.clone();
                         tokio::spawn(async move {
                             connector.execute(connection_id, query_id, command, tx).await;
@@ -237,12 +242,21 @@ where
                         let chunks =
                             split_shape_for_frame(query_id, shape, is_final, MAX_FRAME_LENGTH as u64);
                         let mut seq = sequences.get(&query_id).copied().unwrap_or(0);
+                        // Time the final chunk only: dispatch-to-last-row-forwarded
+                        // (§6A.5). Removed here so a second terminal event for the
+                        // same id cannot reuse a stale start time.
+                        let worker_ms = if is_final {
+                            started.remove(&query_id).map(|t| t.elapsed().as_millis() as u64)
+                        } else {
+                            None
+                        };
                         for (chunk_shape, chunk_final) in chunks {
                             let response = WorkerResponse::ResultBatch {
                                 query_id,
                                 shape: chunk_shape,
                                 sequence: seq,
                                 is_final: chunk_final,
+                                worker_ms: if chunk_final { worker_ms } else { None },
                             };
                             if write_message(&mut framed, &response).await.is_err() {
                                 eprintln!("worker: write failed — dropping query {query_id:?}");
@@ -272,6 +286,7 @@ where
                         batch_rxs.remove(&query_id);
                         sequences.remove(&query_id);
                         query_conns.remove(&query_id);
+                        started.remove(&query_id);
                     }
                     Some((query_id, None)) => {
                         // The sender dropped without a terminal event (e.g. the
@@ -285,6 +300,7 @@ where
                         batch_rxs.remove(&query_id);
                         sequences.remove(&query_id);
                         query_conns.remove(&query_id);
+                        started.remove(&query_id);
                         if write_message(&mut framed, &WorkerResponse::Error {
                             kind: lucent_protocol::LucentErrorKind::Internal,
                             message: "query task exited unexpectedly".into(),
@@ -326,6 +342,15 @@ where
             oob = oob_rx.recv() => {
                 match oob {
                     Some(response) => {
+                        // A cancel that resolved leaves no execute task to
+                        // clean up `started`: if the driver acked without
+                        // terminating, the entry would leak (one per cancel).
+                        // Evict it when the `Cancelled` acknowledgement is
+                        // forwarded — a failed cancel keeps the entry so the
+                        // still-running query's `worker_ms` still resolves.
+                        if let WorkerResponse::Cancelled { query_id } = &response {
+                            started.remove(query_id);
+                        }
                         let id = match &response {
                             WorkerResponse::Connected { connection_id, .. }
                             | WorkerResponse::ConnectionError { connection_id, .. }
@@ -381,6 +406,7 @@ fn split_shape_for_frame(
             shape: shape.clone(),
             sequence: 0,
             is_final,
+            worker_ms: Some(u64::MAX),
         })
         .unwrap_or(u64::MAX)
     }
@@ -442,6 +468,7 @@ mod split_tests {
             shape: shape.clone(),
             sequence: 0,
             is_final,
+            worker_ms: Some(u64::MAX),
         })
         .unwrap()
     }

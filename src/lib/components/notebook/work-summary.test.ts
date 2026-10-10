@@ -21,12 +21,13 @@ describe('workSummary', () => {
     expect(workSummary([tool('get_objects_info')], [])).toBe(
       'Inspected schema',
     );
-    expect(workSummary([tool('search_objects')], [])).toBe('Searched schema');
+    expect(workSummary([tool('search_schema')], [])).toBe('Searched schema');
     expect(workSummary([tool('preview_dml')], [])).toBe('Previewed 1 change');
+    expect(workSummary([tool('fetch_rows')], [])).toBe('Fetched 1 more page');
   });
 
   it('lists distinct tools in the order they were first called', () => {
-    expect(workSummary([tool('search_objects'), q('b'), q('c')], [])).toBe(
+    expect(workSummary([tool('search_schema'), q('b'), q('c')], [])).toBe(
       'Searched schema · ran 2 queries',
     );
   });

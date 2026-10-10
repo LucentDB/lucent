@@ -232,7 +232,7 @@ mod tests {
             schema: "bookings".into(),
             name: name.into(),
             kind: "table".into(),
-            row_count_estimate: 0,
+            row_estimate: crate::ai::schema_graph::RowEstimate::default(),
             partition_info: None,
         };
         let c = |id: usize, tid: usize, table: &str, name: &str, dt: &str| ColumnEntry {

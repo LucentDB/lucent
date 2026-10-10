@@ -208,7 +208,32 @@ impl IndexingManager {
             match result {
                 Ok(tier2) => {
                     if still_current {
-                        *graph_slot.lock().await = Some(tier2);
+                        let built_at = tier2.built_at_unix;
+                        *graph_slot.lock().await = Some(tier2.clone());
+                        if config.sample_column_values {
+                            if let (Some(c), Some(sconn)) =
+                                (client.as_ref(), sampling_connection_id)
+                            {
+                                if let Some(restored) =
+                                    crate::ai::schema_graph::restore_missing_samples(
+                                        &tier2,
+                                        c,
+                                        sconn,
+                                        &capabilities,
+                                    )
+                                    .await
+                                {
+                                    let still_ours =
+                                        *current_connection_id.lock().await == Some(connection_id);
+                                    let mut slot = graph_slot.lock().await;
+                                    if still_ours
+                                        && slot.as_ref().map(|g| g.built_at_unix) == Some(built_at)
+                                    {
+                                        *slot = Some(restored);
+                                    }
+                                }
+                            }
+                        }
                     } else {
                         log::debug!(
                             "indexer for connection {conn_id_for_task} finished after a reconnect; skipping graph swap"
@@ -432,7 +457,7 @@ mod tests {
             schema: "public".into(),
             name: "users".into(),
             kind: "table".into(),
-            row_count_estimate: 0,
+            row_estimate: crate::ai::schema_graph::RowEstimate::default(),
             partition_info: None,
         }];
         let columns = vec![

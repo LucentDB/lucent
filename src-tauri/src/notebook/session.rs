@@ -9,10 +9,13 @@ pub struct NotebookSession {
     pub database: String,
     pub profile_id: Option<String>,
     pub active_query_id: Option<QueryId>,
-    /// The AI cell currently running (if any) and its cancellation token.
-    /// AI cells cannot register a DB query id — the agent loop owns its own
-    /// queries — so the Stop button cancels the loop via this token (E2).
-    pub active_ai_cell: Option<(String, tokio_util::sync::CancellationToken)>,
+    /// The AI cell currently running (if any), its cancellation token, and
+    /// its result scope id. AI cells cannot register a DB query id — the
+    /// agent loop owns its own queries — so the Stop button cancels the loop
+    /// via this token (E2). The scope id rides along so the D3 overlap guard
+    /// (`clear_active_ai_cell_if_same`) also guards the scope: an older run
+    /// must not clear a newer run's live results.
+    pub active_ai_cell: Option<(String, tokio_util::sync::CancellationToken, String)>,
     /// Monotonic execution counter. An execution number records *when* a cell
     /// ran, so it must be owned by the session that owns the timeline — deriving
     /// it from how many cells are currently green cannot be correct.

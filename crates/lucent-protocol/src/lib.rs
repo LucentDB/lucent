@@ -9,9 +9,9 @@ pub use capabilities::{
     SqlDialect, StringLiteralStyle, TimeoutSupport,
 };
 pub use catalog::{
-    CatalogRequest, CatalogResult, ColumnDetail, ColumnPath, ForeignKey, ForeignKeyTarget,
-    Namespace, NamespacePath, ObjectDetail, ObjectKind, ObjectProperty, ObjectRef, ObjectSummary,
-    PartitionInfo, SearchHit,
+    CatalogRequest, CatalogResult, ColumnDetail, ColumnPath, FactSection, FactValue, ForeignKey,
+    ForeignKeyTarget, Namespace, NamespacePath, ObjectDetail, ObjectKind, ObjectProperty,
+    ObjectRef, ObjectSummary, PartitionInfo, SearchHit,
 };
 pub use error::{ErrorContext, LucentError, LucentErrorKind};
 pub use framing::{new_codec, new_framed, read_message, write_message, MAX_FRAME_LENGTH};

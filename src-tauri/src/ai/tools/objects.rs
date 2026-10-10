@@ -187,6 +187,7 @@ impl GetObjectsInfo {
 
         let mut results = details_to_json(&details);
 
+        let capabilities = self.ctx.capabilities.as_ref();
         if let Some(n) = sample_rows.filter(|n| *n > 0) {
             for (result_obj, detail) in results.iter_mut().zip(details.iter()) {
                 // Sample rows are user data, not catalog data — this stays an
@@ -206,10 +207,52 @@ impl GetObjectsInfo {
                         .join(".");
                     format!("{ns}.\"{}\"", detail.reference.name.replace('"', "\"\""))
                 };
-                match client
-                    .execute(conn_id, &format!("SELECT * FROM {qualified} LIMIT {n}"))
+                // One AI statement sequence at a time per connection: the
+                // preview must not interleave with another sequence's
+                // transaction on the same connection. A busy connection skips
+                // the preview, exactly like a failed preview is skipped today.
+                let _seq = match client
+                    .lock_sequence(
+                        conn_id,
+                        self.ctx
+                            .config
+                            .ai_query_timeout_secs
+                            .saturating_mul(1000)
+                            .max(5_000),
+                    )
                     .await
                 {
+                    Ok(g) => g,
+                    Err(e) => {
+                        log::warn!(
+                            "Sample rows fetch skipped for {}.{}: {e}",
+                            detail.reference.namespace.join("."),
+                            detail.reference.name
+                        );
+                        continue;
+                    }
+                };
+                let sql = format!("SELECT * FROM {qualified} LIMIT {n}");
+                // Reachable by Stop: a cancelled sample preview is simply
+                // omitted, as a failed one is today.
+                let in_flight = self.ctx.result_scope.register(conn_id);
+                let preview = match capabilities {
+                    Some(caps) => {
+                        super::bounded::execute_bounded(
+                            &client,
+                            conn_id,
+                            &sql,
+                            caps,
+                            self.ctx.config.ai_query_timeout_secs.saturating_mul(1000),
+                            None,
+                            Some(&in_flight),
+                        )
+                        .await
+                    }
+                    None => client.execute(conn_id, &sql).await,
+                };
+                in_flight.finish();
+                match preview {
                     Ok(preview) => {
                         let col_names: Vec<String> =
                             preview.columns.iter().map(|c| c.name.clone()).collect();

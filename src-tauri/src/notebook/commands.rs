@@ -26,6 +26,7 @@ enum CancelTarget {
     AiCell {
         cell_id: String,
         token: tokio_util::sync::CancellationToken,
+        scope_id: String,
     },
 }
 
@@ -35,31 +36,36 @@ enum CancelTarget {
 /// one of the two) (E2).
 fn resolve_cancel_target(
     active_query_id: Option<QueryId>,
-    active_ai_cell: &Option<(String, tokio_util::sync::CancellationToken)>,
+    active_ai_cell: &Option<(String, tokio_util::sync::CancellationToken, String)>,
 ) -> CancelTarget {
     if let Some(qid) = active_query_id {
         return CancelTarget::Query(qid);
     }
     match active_ai_cell {
-        Some((cell_id, token)) => CancelTarget::AiCell {
+        Some((cell_id, token, scope_id)) => CancelTarget::AiCell {
             cell_id: cell_id.clone(),
             token: token.clone(),
+            scope_id: scope_id.clone(),
         },
         None => CancelTarget::None,
     }
 }
 
 /// D3: clear the active AI cell registration only when it still names
-/// `cell_id`. Two overlapping runs mean an older run's completion (or a
-/// stale cancel) must not wipe a NEWER run's registration — that would
-/// silently make the newer run uncancellable.
+/// `cell_id` AND `scope_id`. Two overlapping runs of the SAME cell mean an
+/// older run's completion (or a stale cancel) must not wipe a NEWER run's
+/// registration — that would silently make the newer run uncancellable (Stop
+/// would resolve `CancelTarget::None` and strand the newer agent loop and its
+/// queries). Each run gets its own result scope id, so the pair identifies
+/// the exact run that registered.
 fn clear_active_ai_cell_if_same(
-    active: &mut Option<(String, tokio_util::sync::CancellationToken)>,
+    active: &mut Option<(String, tokio_util::sync::CancellationToken, String)>,
     cell_id: &str,
+    scope_id: &str,
 ) {
     if active
         .as_ref()
-        .map(|(id, _)| id == cell_id)
+        .map(|(id, _, scope)| id == cell_id && scope == scope_id)
         .unwrap_or(false)
     {
         *active = None;
@@ -722,6 +728,35 @@ fn acp_cell_session_key(session_key: &str, cell_id: &str) -> String {
     format!("notebook:{session_key}:{cell_id}")
 }
 
+/// One result scope per cell RUN (§6A.3, review V3). The ACP session key is
+/// per cell, not per run, so it cannot be the scope id.
+fn cell_result_scope_id(session_key: &str, cell_id: &str) -> String {
+    format!(
+        "{}:{}",
+        acp_cell_session_key(session_key, cell_id),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+/// The rig tool list for a notebook cell (ledger D1).
+fn cell_rig_tools(tool_ctx: &AiToolContext) -> Vec<crate::ai::tools::LucentToolEnum> {
+    crate::ai::tools::tools_excluding(
+        tool_ctx.clone(),
+        crate::ai::tools::NOTEBOOK_CELL_EXCLUDED_TOOLS,
+    )
+}
+
+/// The ACP-seam exclusions for a notebook cell. Empty for rig cells: their
+/// list is already filtered by `cell_rig_tools`, and `pick_driver` ignores
+/// the ACP argument on the rig path.
+fn cell_acp_excluded_tools(is_acp: bool) -> &'static [&'static str] {
+    if is_acp {
+        crate::ai::tools::NOTEBOOK_CELL_EXCLUDED_TOOLS
+    } else {
+        &[]
+    }
+}
+
 /// The note appended to a cell's response when Lucent refused permission
 /// requests on its behalf. `denied` is never empty at the call site.
 fn permission_refusal_note(denied: &[String]) -> String {
@@ -851,6 +886,7 @@ async fn run_ai_cell(
     };
 
     // ── Create AI tool context with notebook connection ───────────────────
+    let result_scope_id = cell_result_scope_id(session_key, &cell_id);
     let tool_ctx = AiToolContext {
         db: state.client.clone(),
         connection_id: Some(conn_id),
@@ -861,6 +897,10 @@ async fn run_ai_cell(
         embedder: state.embedder.clone(),
         reranker: state.reranker.clone(),
         memory_manager: state.memory_manager.clone(),
+        result_scope: crate::ai::result_store::ResultScope {
+            scope_id: result_scope_id.clone(),
+            store: state.result_store.clone(),
+        },
     };
 
     // ── Pre-flight: augment message with schema context ───────────────────
@@ -890,7 +930,7 @@ async fn run_ai_cell(
     // E2: register the cell run so notebook_cancel_cell (the Stop button)
     // can stop the agent loop. Cleared on every exit path below.
     if let Some(mut s) = state.notebook_sessions.get_mut(session_key) {
-        s.active_ai_cell = Some((cell_id.clone(), cancel.clone()));
+        s.active_ai_cell = Some((cell_id.clone(), cancel.clone(), result_scope_id.clone()));
     }
     let conv = Arc::new(tokio::sync::Mutex::new(ConversationState::new(
         cell_id.clone(),
@@ -931,10 +971,16 @@ async fn run_ai_cell(
     let tools = if is_acp {
         Vec::new() // ACP tools live behind the bridge — the agent calls them over MCP or the CLI helper.
     } else {
-        crate::ai::tools::all_tools(tool_ctx.clone())
+        cell_rig_tools(&tool_ctx)
     };
-    let agent =
-        crate::commands::pick_driver(&config.acp, provider, tools, tool_ctx, state.acp.clone());
+    let agent = crate::commands::pick_driver(
+        &config.acp,
+        provider,
+        tools,
+        tool_ctx,
+        state.acp.clone(),
+        cell_acp_excluded_tools(is_acp),
+    );
 
     // ── Run the agent loop (with 5-minute timeout) ────────────────────────
     log::info!("AI cell '{cell_id}': entering agent loop");
@@ -957,11 +1003,16 @@ async fn run_ai_cell(
     // E2: the run is over (success, error, or timeout) — unregister the cell
     // so the Stop button stops targeting it. Must happen before the match
     // below because every arm of it is a terminal exit path. Guarded by cell
-    // id: a newer overlapping run may have replaced this registration, and
-    // wiping it would silently make that run uncancellable (D3).
+    // id AND scope id: a newer overlapping run of the same cell may have
+    // replaced this registration, and wiping it would silently make that run
+    // uncancellable (D3).
     if let Some(mut s) = state.notebook_sessions.get_mut(session_key) {
-        clear_active_ai_cell_if_same(&mut s.active_ai_cell, &cell_id);
+        clear_active_ai_cell_if_same(&mut s.active_ai_cell, &cell_id, &result_scope_id);
     }
+    // The run is over: its retained results must not page out under a later
+    // run. Outside the `if is_acp` below so rig cells clear too — this point
+    // precedes every `return` below it.
+    state.result_store.clear_scope(&result_scope_id);
 
     // Same reasoning as the per-run session key: the run is over, so the ACP
     // session goes with it. Dropping here (before every `return` below) also
@@ -1169,15 +1220,32 @@ pub async fn notebook_cancel_cell(
             }
             Ok(())
         }
-        CancelTarget::AiCell { cell_id, token } => {
+        CancelTarget::AiCell {
+            cell_id,
+            token,
+            scope_id,
+        } => {
             token.cancel();
             log::info!("notebook_cancel_cell: cancelled AI cell '{cell_id}'");
+            // §6A.6/D2.5: mark every in-flight query of this cell RUN. Queued
+            // ones bail before sending; the one executing gets the DB-native
+            // cancel — exactly as ai_chat's Stop does.
+            let executing = state.result_store.cancel_scope(&scope_id);
+            if !executing.is_empty() {
+                if let Some(client) = state.client_handle().await {
+                    for (query_id, conn_id) in executing {
+                        if let Err(e) = client.cancel(conn_id, query_id).await {
+                            log::warn!("cancel in-flight query {query_id:?} failed: {e}");
+                        }
+                    }
+                }
+            }
             if let Some(mut s) = state.notebook_sessions.get_mut(&session_key) {
                 // D3: clear only the registration that was actually cancelled —
-                // a newer overlapping run may have replaced it since the cancel
-                // target was resolved, and wiping it would make that run
-                // uncancellable.
-                clear_active_ai_cell_if_same(&mut s.active_ai_cell, &cell_id);
+                // a newer overlapping run (same cell, new scope) may have
+                // replaced it since the cancel target was resolved, and wiping
+                // it would make that run uncancellable.
+                clear_active_ai_cell_if_same(&mut s.active_ai_cell, &cell_id, &scope_id);
             }
             Ok(())
         }
@@ -1450,12 +1518,12 @@ mod notebook_open_tests {
         // A SQL query is running: it wins.
         let qid = QueryId(Uuid::new_v4());
         assert!(matches!(
-            resolve_cancel_target(Some(qid), &Some(("c1".into(), cancel.clone()))),
+            resolve_cancel_target(Some(qid), &Some(("c1".into(), cancel.clone(), "s1".into()))),
             CancelTarget::Query(got) if got == qid
         ));
         // Only an AI cell is running: the token comes back.
         assert!(matches!(
-            resolve_cancel_target(None, &Some(("c1".into(), cancel.clone()))),
+            resolve_cancel_target(None, &Some(("c1".into(), cancel.clone(), "s1".into()))),
             CancelTarget::AiCell { ref cell_id, .. } if cell_id == "c1"
         ));
         // Nothing running.
@@ -1473,22 +1541,55 @@ mod notebook_open_tests {
         use super::clear_active_ai_cell_if_same;
 
         let token = tokio_util::sync::CancellationToken::new();
-        let mut active = Some(("cell_a".to_string(), token.clone()));
+        let mut active = Some(("cell_a".to_string(), token.clone(), "scope-a".to_string()));
         // A different cell's completion: the newer registration survives.
-        clear_active_ai_cell_if_same(&mut active, "cell_b");
+        clear_active_ai_cell_if_same(&mut active, "cell_b", "scope-b");
         assert!(
             active.is_some(),
             "a different cell's run must not wipe this registration"
         );
         // This cell's own completion: cleared.
-        clear_active_ai_cell_if_same(&mut active, "cell_a");
+        clear_active_ai_cell_if_same(&mut active, "cell_a", "scope-a");
         assert!(
             active.is_none(),
             "this cell's own run clears its registration"
         );
         // No registration: no-op, no panic.
-        clear_active_ai_cell_if_same(&mut active, "cell_a");
+        clear_active_ai_cell_if_same(&mut active, "cell_a", "scope-a");
         assert!(active.is_none());
+    }
+
+    #[test]
+    fn same_cell_overlap_preserves_the_newer_run() {
+        // Same cell, two overlapping runs: run 2 overwrote `active_ai_cell`
+        // with its own scope; run 1's run-end path must not wipe run 2's
+        // registration, or Stop resolves `CancelTarget::None` and strands
+        // run 2's agent loop and its queries.
+        use super::clear_active_ai_cell_if_same;
+
+        let token_old = tokio_util::sync::CancellationToken::new();
+        let token_new = tokio_util::sync::CancellationToken::new();
+        let _ = token_old;
+        let mut active = Some((
+            "cell_a".to_string(),
+            token_new.clone(),
+            "scope-new".to_string(),
+        ));
+        // The older run finishes with its own (stale) scope id: the newer
+        // registration must survive.
+        clear_active_ai_cell_if_same(&mut active, "cell_a", "scope-old");
+        assert!(
+            active.is_some(),
+            "an older run of the same cell must not wipe the newer run's registration"
+        );
+        assert_eq!(
+            active.as_ref().map(|(_, _, s)| s.as_str()),
+            Some("scope-new"),
+            "the surviving registration must still be the newer run's"
+        );
+        // The newer run's own completion clears.
+        clear_active_ai_cell_if_same(&mut active, "cell_a", "scope-new");
+        assert!(active.is_none(), "the owning run clears its registration");
     }
 
     #[test]
@@ -1535,6 +1636,21 @@ mod acp_cell_tests {
             "the same cell id in two notebooks must not collide"
         );
         assert!(a.contains("cell-1") && a.contains("/nb/one.ln"), "{a}");
+    }
+
+    #[test]
+    fn every_cell_run_gets_its_own_result_scope() {
+        let first = cell_result_scope_id("nb1", "cell-a");
+        let second = cell_result_scope_id("nb1", "cell-a");
+        assert_ne!(
+            first, second,
+            "overlapping runs of one cell must not share or clear each other's results"
+        );
+        assert!(first.starts_with(&acp_cell_session_key("nb1", "cell-a")));
+        assert_ne!(
+            cell_result_scope_id("nb1", "cell-a"),
+            cell_result_scope_id("nb2", "cell-a")
+        );
     }
 
     #[tokio::test]
@@ -1779,5 +1895,27 @@ mod acp_cell_tests {
             status: ToolResultStatus::Completed,
         });
         assert!(s.final_sql.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn rig_cells_get_every_tool_except_the_exclusions() {
+        let names: Vec<String> = cell_rig_tools(&crate::ai::tools::neutral_tool_ctx())
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect();
+        assert!(!names.iter().any(|n| n == "export_query"), "{names:?}");
+        assert!(names.iter().any(|n| n == "run_readonly_query"), "{names:?}");
+    }
+
+    #[test]
+    fn acp_cells_exclude_the_same_list_and_chat_excludes_nothing() {
+        assert_eq!(
+            cell_acp_excluded_tools(true),
+            crate::ai::tools::NOTEBOOK_CELL_EXCLUDED_TOOLS
+        );
+        assert!(
+            cell_acp_excluded_tools(false).is_empty(),
+            "the rig branch filters its own list"
+        );
     }
 }

@@ -54,12 +54,39 @@ pub struct TableEntry {
     pub name: String,
     #[serde(default = "default_table_kind")]
     pub kind: String,
-    /// Estimated row count from the driver's catalog; 0 when unknown.
+    /// Planner row-count state. See `RowEstimate` — never flatten this to a
+    /// single integer; `None`/`Empty`/view are different answers.
     #[serde(default)]
-    pub row_count_estimate: i64,
+    pub row_estimate: RowEstimate,
     /// "PARTITIONED BY RANGE (created_at) — 84 partitions" for partitioned parents.
     #[serde(default)]
     pub partition_info: Option<String>,
+}
+
+/// How a table's cardinality is stated. Three states used to collapse into
+/// "0 = unknown" (F11): never analyzed (no statistics), analyzed-and-empty,
+/// and views, which have no table statistics at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RowEstimate {
+    Estimated(u64),
+    Empty,
+    // Derived, not a hand-written `impl Default`: clippy's `derivable_impls`
+    // fails the `-D warnings` gate on the manual form.
+    #[default]
+    NeverAnalyzed,
+    View,
+}
+
+impl RowEstimate {
+    /// The legacy single-integer view for consumers that only rank or hash
+    /// (the drift `SnapshotTable`, compact-index ordering). Never render it —
+    /// that flattening is F11.
+    pub fn as_count(self) -> i64 {
+        match self {
+            RowEstimate::Estimated(n) => n as i64,
+            _ => 0,
+        }
+    }
 }
 
 pub fn default_table_kind() -> String {
@@ -120,14 +147,21 @@ pub(crate) fn harvest_to_entries(
         let kind = object.reference.kind.as_str().to_string();
         let id = tables.len();
         table_map.insert((schema.clone(), name.clone()), id);
+        let row_estimate = if object.reference.kind == lucent_protocol::ObjectKind::View {
+            RowEstimate::View
+        } else {
+            match object.est_rows {
+                Some(0) => RowEstimate::Empty,
+                Some(n) => RowEstimate::Estimated(n),
+                None => RowEstimate::NeverAnalyzed,
+            }
+        };
         tables.push(TableEntry {
             id,
             schema,
             name,
             kind,
-            // The field is an i64 with a "0 when unknown" contract; the
-            // Option is where the real fidelity lives if this ever widens.
-            row_count_estimate: object.est_rows.unwrap_or(0) as i64,
+            row_estimate,
             partition_info: object
                 .partition
                 .as_ref()
@@ -199,6 +233,13 @@ const UNSAMPLEABLE_TYPES: &[&str] = &[
 
 /// Build the batched value-sampling query as ONE statement (the prepared-statement
 /// execution path rejects multi-statement strings — this exact bug silently emptied
+/// Worker/DB cancel texts: the client's "query was cancelled", Postgres's
+/// "canceling statement due to user request", DuckDB's "query interrupted".
+fn sampling_error_is_cancel(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("cancel") || m.contains("interrupt")
+}
+
 /// every column's sample_values). Each column contributes:
 ///   (SELECT {tid}, '{col}', val FROM (bounded scan of 1000 non-null values) GROUP BY val LIMIT 20)
 /// The inner LIMIT bounds the scan so a 100M-row table costs a 1000-row read,
@@ -567,7 +608,7 @@ pub fn snapshot_from_graph(graph: &SchemaGraph) -> CatalogSnapshot {
             schema: t.schema.clone(),
             name: t.name.clone(),
             kind: t.kind.clone(),
-            row_count_estimate: t.row_count_estimate,
+            row_count_estimate: t.row_estimate.as_count(),
             partition_info: t.partition_info.clone(),
         })
         .collect();
@@ -614,7 +655,7 @@ pub fn snapshot_from_graph(graph: &SchemaGraph) -> CatalogSnapshot {
 /// serialized `SchemaGraph` layout changes so stale blobs are dropped and
 /// re-indexed instead of failing forever on the same bytes (bincode is
 /// order-sensitive — any field removal/rename breaks old blobs deliberately).
-pub const GRAPH_FORMAT_VERSION: u32 = 2;
+pub const GRAPH_FORMAT_VERSION: u32 = 3; // v3: TableEntry.row_estimate (F11)
 
 /// Serialize a Tier-2 graph for the connection cache: `(version, graph)` so a
 /// loader can reject a blob written by an older/newer layout before
@@ -800,7 +841,7 @@ impl SchemaGraph {
                     schema: t.schema.clone(),
                     name: t.name.clone(),
                     kind: t.kind.clone(),
-                    row_count_estimate: t.row_count_estimate,
+                    row_count_estimate: t.row_estimate.as_count(),
                     partition_info: t.partition_info.clone(),
                 })
                 .collect(),
@@ -1116,105 +1157,35 @@ impl SchemaIndexer {
             if !tables_to_sample.is_empty() {
                 if let Some(sampling_conn_id) = sampling_connection_id {
                     if let Some(client) = client {
-                        let sample_total = tables_to_sample.len();
-                        let table_columns = graph_columns_by_table(graph);
-                        let chunks: Vec<&[TableEntry]> = tables_to_sample.chunks(10).collect();
-
-                        for (ci, chunk) in chunks.iter().enumerate() {
-                            let processed_so_far = (ci * 10 + chunk.len()).min(sample_total);
-                            on_progress(crate::ai::events::IndexingProgressPayload {
-                                connection_id: conn_id_str.clone(),
-                                stage: "sampling".into(),
-                                processed_tables: processed_so_far,
-                                total_tables: total,
-                                added_tables_count: delta.added.len(),
-                                modified_tables_count: delta.modified.len(),
-                                deleted_tables_count: delta.deleted.len(),
-                                unchanged_tables_count: delta.unchanged.len(),
-                                cache_hits: 0,
-                                embeddings_computed: 0,
-                                is_complete: false,
-                                elapsed_ms: start.elapsed().as_millis() as u64,
-                                detail: Some(format!(
-                                    "Sampling values for changed relations ({}/{})",
-                                    processed_so_far, sample_total
-                                )),
-                            });
-
-                            let builder = crate::sql_builder::for_driver(capabilities);
-                            let Some(sql) = build_sampling_sql(
-                                chunk,
-                                &table_columns,
-                                builder.as_ref(),
-                                &capabilities.id,
-                            ) else {
-                                continue;
-                            };
-
-                            if let Err(e) = client.execute(sampling_conn_id, "BEGIN").await {
-                                log::warn!(
-                                    "sampling chunk {ci}: BEGIN failed: {e}; skipping chunk"
-                                );
-                                break;
-                            }
-                            if let Err(e) = client
-                                .execute(sampling_conn_id, "SET LOCAL statement_timeout = 3000")
-                                .await
-                            {
-                                log::warn!(
-                                    "sampling chunk {ci}: SET LOCAL failed: {e}; rolling back"
-                                );
-                                if let Err(rb) = client.execute(sampling_conn_id, "ROLLBACK").await
-                                {
-                                    log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
-                                }
-                                break;
-                            }
-                            let query_id = QueryId(uuid::Uuid::new_v4());
-                            let result = tokio::time::timeout(
-                                Duration::from_secs(5),
-                                client.execute_with_id(query_id, sampling_conn_id, &sql, None),
-                            )
-                            .await;
-                            match result {
-                                Ok(Ok((res, _qid))) => {
-                                    if let Err(e) = client.execute(sampling_conn_id, "COMMIT").await
-                                    {
-                                        log::warn!(
-                                            "sampling chunk {ci}: COMMIT failed: {e}; rolling back"
-                                        );
-                                        if let Err(rb) =
-                                            client.execute(sampling_conn_id, "ROLLBACK").await
-                                        {
-                                            log::warn!(
-                                                "sampling chunk {ci}: ROLLBACK failed: {rb}"
-                                            );
-                                        }
-                                        break;
-                                    }
-                                    apply_sample_values(&mut tier2, &res);
-                                }
-                                Ok(Err(e)) => {
-                                    log::warn!("sampling chunk {ci} failed: {e}");
-                                    if let Err(rb) =
-                                        client.execute(sampling_conn_id, "ROLLBACK").await
-                                    {
-                                        log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
-                                    }
-                                    break;
-                                }
-                                Err(_elapsed) => {
-                                    log::warn!("sampling chunk {ci} timed out; cancelling");
-                                    let _ = client.cancel(sampling_conn_id, query_id).await;
-                                    if let Err(rb) =
-                                        client.execute(sampling_conn_id, "ROLLBACK").await
-                                    {
-                                        log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
-                                    }
-                                    break;
-                                }
-                            }
-                        }
+                        sample_tables_into(
+                            &mut tier2,
+                            &tables_to_sample,
+                            graph,
+                            client,
+                            sampling_conn_id,
+                            capabilities,
+                            |processed_so_far, total_to_sample| {
+                                on_progress(crate::ai::events::IndexingProgressPayload {
+                                    connection_id: conn_id_str.clone(),
+                                    stage: "sampling".into(),
+                                    processed_tables: processed_so_far,
+                                    total_tables: total,
+                                    added_tables_count: delta.added.len(),
+                                    modified_tables_count: delta.modified.len(),
+                                    deleted_tables_count: delta.deleted.len(),
+                                    unchanged_tables_count: delta.unchanged.len(),
+                                    cache_hits: 0,
+                                    embeddings_computed: 0,
+                                    is_complete: false,
+                                    elapsed_ms: start.elapsed().as_millis() as u64,
+                                    detail: Some(format!(
+                                        "Sampling values for changed relations ({}/{})",
+                                        processed_so_far, total_to_sample
+                                    )),
+                                });
+                            },
+                        )
+                        .await;
                     }
                 }
             }
@@ -1352,6 +1323,167 @@ impl SchemaIndexer {
     }
 }
 
+/// Sample values for the given tables into `tier2`. Shared by the normal
+/// enrich path (changed tables only) and the cache-hit reload (tables whose
+/// persisted graph lost its samples — F9). Chunk failures break out, exactly
+/// as before; `on_chunk(processed, total)` drives progress reporting.
+///
+/// Sequence-lock discipline (Task 3A): each chunk holds the connection's
+/// sequence lock across its BEGIN … COMMIT/ROLLBACK so the chunk never
+/// interleaves with a tool query's sequence on the same connection. Never
+/// call this while already holding the lock on the same connection
+/// (non-reentrant).
+#[allow(clippy::too_many_arguments)]
+async fn sample_tables_into(
+    tier2: &mut SchemaGraph,
+    tables_to_sample: &[TableEntry],
+    graph: &SchemaGraph,
+    client: &ConnectorClient,
+    sampling_conn_id: ConnectionId,
+    capabilities: &lucent_protocol::DriverCapabilities,
+    mut on_chunk: impl FnMut(usize, usize),
+) {
+    if tables_to_sample.is_empty() {
+        return;
+    }
+    let table_columns = graph_columns_by_table(graph);
+    for (ci, chunk) in tables_to_sample.chunks(10).enumerate() {
+        // One AI statement sequence at a time per connection:
+        // this chunk's BEGIN … COMMIT/ROLLBACK must not
+        // interleave with a tool query's sequence on the
+        // same connection. Held to the end of the iteration.
+        let _seq = match client.lock_sequence(sampling_conn_id, 10_000).await {
+            Ok(g) => g,
+            Err(e) => {
+                log::info!("sampling chunk {ci}: {e}; skipping");
+                continue;
+            }
+        };
+        on_chunk(
+            (ci * 10 + chunk.len()).min(tables_to_sample.len()),
+            tables_to_sample.len(),
+        );
+
+        let builder = crate::sql_builder::for_driver(capabilities);
+        let Some(sql) =
+            build_sampling_sql(chunk, &table_columns, builder.as_ref(), &capabilities.id)
+        else {
+            continue;
+        };
+
+        if let Err(e) = client.execute(sampling_conn_id, "BEGIN").await {
+            log::warn!("sampling chunk {ci}: BEGIN failed: {e}; skipping chunk");
+            break;
+        }
+        if let Err(e) = client
+            .execute(sampling_conn_id, "SET LOCAL statement_timeout = 3000")
+            .await
+        {
+            log::warn!("sampling chunk {ci}: SET LOCAL failed: {e}; rolling back");
+            if let Err(rb) = client.execute(sampling_conn_id, "ROLLBACK").await {
+                log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
+            }
+            break;
+        }
+        let query_id = QueryId(uuid::Uuid::new_v4());
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.execute_with_id(query_id, sampling_conn_id, &sql, None),
+        )
+        .await;
+        match result {
+            Ok(Ok((res, _qid))) => {
+                if let Err(e) = client.execute(sampling_conn_id, "COMMIT").await {
+                    log::warn!("sampling chunk {ci}: COMMIT failed: {e}; rolling back");
+                    if let Err(rb) = client.execute(sampling_conn_id, "ROLLBACK").await {
+                        log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
+                    }
+                    break;
+                }
+                apply_sample_values(tier2, &res);
+            }
+            Ok(Err(e)) => {
+                // A cancel reached the sampling query (a
+                // timeout cancel, or any future per-
+                // connection cancel). Skip this chunk —
+                // values refresh on the next index pass —
+                // and never surface it as a failure.
+                if sampling_error_is_cancel(&e) {
+                    log::info!(
+                        "sampling chunk {ci} cancelled; values refresh on the next index pass"
+                    );
+                } else {
+                    log::warn!("sampling chunk {ci} failed: {e}");
+                }
+                let _ = client.execute(sampling_conn_id, "ROLLBACK").await;
+                break;
+            }
+            Err(_elapsed) => {
+                log::warn!("sampling chunk {ci} timed out; cancelling");
+                let _ = client.cancel(sampling_conn_id, query_id).await;
+                if let Err(rb) = client.execute(sampling_conn_id, "ROLLBACK").await {
+                    log::warn!("sampling chunk {ci}: ROLLBACK failed: {rb}");
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// Tables with NO sampled column. The persisted graph never stores samples,
+/// so both reload paths — the cache-hit fast path and the delta path's
+/// "unchanged" tables — come back without them (F9). `all`-empty, not
+/// `any`-empty: ids and timestamps are never sampled, and `any` would
+/// re-sample nearly every table on every enrich.
+pub(crate) fn tables_missing_samples(graph: &SchemaGraph) -> Vec<TableEntry> {
+    let sampled: std::collections::HashSet<usize> = graph
+        .columns
+        .iter()
+        .filter(|c| !c.sample_values.is_empty())
+        .map(|c| c.table_id)
+        .collect();
+    graph
+        .tables
+        .iter()
+        .filter(|t| !sampled.contains(&t.id))
+        .cloned()
+        .collect()
+}
+
+/// F9: sample what a reload left empty. `None` when nothing was missing, so
+/// the caller can skip a pointless second publish.
+pub(crate) async fn restore_missing_samples(
+    graph: &SchemaGraph,
+    client: &ConnectorClient,
+    sampling_conn_id: ConnectionId,
+    capabilities: &lucent_protocol::DriverCapabilities,
+) -> Option<SchemaGraph> {
+    let missing = tables_missing_samples(graph);
+    if missing.is_empty() {
+        return None;
+    }
+    let mut restored = graph.clone();
+    sample_tables_into(
+        &mut restored,
+        &missing,
+        graph,
+        client,
+        sampling_conn_id,
+        capabilities,
+        |_, _| {},
+    )
+    .await;
+    // Tables that can never be sampled (empty, or only unsampled column
+    // types) come back empty every time; don't republish an identical graph.
+    let sampled = |g: &SchemaGraph| {
+        g.columns
+            .iter()
+            .filter(|c| !c.sample_values.is_empty())
+            .count()
+    };
+    (sampled(&restored) > sampled(graph)).then_some(restored)
+}
+
 /// Rebuild the per-table column map (name, data_type, schema, table, is_pk)
 /// from a graph — used by sampling in both the temporary shim and enrich.
 fn graph_columns_by_table(graph: &SchemaGraph) -> TableColumns {
@@ -1398,6 +1530,16 @@ mod sampling_sql_tests {
     use super::*;
     use std::collections::HashMap;
 
+    #[test]
+    fn sampling_cancellations_are_recognized() {
+        assert!(sampling_error_is_cancel("query was cancelled"));
+        assert!(sampling_error_is_cancel(
+            "QueryCancelled: canceling statement due to user request"
+        ));
+        assert!(sampling_error_is_cancel("query interrupted"));
+        assert!(!sampling_error_is_cancel("connection refused"));
+    }
+
     fn pg() -> PostgresSqlBuilder {
         PostgresSqlBuilder
     }
@@ -1408,7 +1550,7 @@ mod sampling_sql_tests {
             schema: "public".into(),
             name: "invoices".into(),
             kind: "table".into(),
-            row_count_estimate: 0,
+            row_estimate: RowEstimate::default(),
             partition_info: None,
         }];
         let mut cols = HashMap::new();
@@ -1533,7 +1675,7 @@ mod sampling_sql_tests {
             schema: "public".into(),
             name: "blobs".into(),
             kind: "table".into(),
-            row_count_estimate: 0,
+            row_estimate: RowEstimate::default(),
             partition_info: None,
         }];
         let mut cols = HashMap::new();
@@ -1558,7 +1700,7 @@ mod sampling_sql_tests {
             schema: "public".into(),
             name: "weird\"tbl".into(),
             kind: "table".into(),
-            row_count_estimate: 0,
+            row_estimate: RowEstimate::default(),
             partition_info: None,
         }];
         let mut cols = HashMap::new();
@@ -1609,10 +1751,10 @@ mod partition_tests {
             schema: "bookings".into(),
             name: "events".into(),
             kind: "table".into(),
-            row_count_estimate: 215_000,
+            row_estimate: RowEstimate::Estimated(215_000),
             partition_info: Some("PARTITIONED BY RANGE (created_at) — 84 partitions".into()),
         };
-        assert_eq!(t.row_count_estimate, 215_000);
+        assert_eq!(t.row_estimate, RowEstimate::Estimated(215_000));
         assert!(t.partition_info.is_some());
     }
 }
@@ -1672,7 +1814,7 @@ mod tests {
                     schema: c.schema.clone(),
                     name: c.table.clone(),
                     kind: "table".into(),
-                    row_count_estimate: 0,
+                    row_estimate: RowEstimate::default(),
                     partition_info: None,
                 });
             }
@@ -1935,15 +2077,34 @@ mod tests {
 
     #[test]
     fn builds_table_entries_from_summaries_preserving_estimates() {
+        let view_summary = ObjectSummary {
+            reference: ObjectRef {
+                namespace: vec!["public".into()],
+                name: "active_users".into(),
+                kind: ObjectKind::View,
+            },
+            est_rows: None,
+            comment: None,
+            partition: None,
+            is_partition_child: false,
+        };
         let (tables, _) = super::harvest_to_entries(
-            vec![summary("users", Some(4200)), summary("orders", None)],
+            vec![
+                summary("users", Some(4200)),
+                summary("orders", Some(0)),
+                summary("events", None),
+                view_summary,
+            ],
             vec![],
         );
         let users = tables.iter().find(|t| t.name == "users").unwrap();
-        assert_eq!(users.row_count_estimate, 4200);
-        // Unknown collapses to 0 for this field's existing i64 contract.
+        assert_eq!(users.row_estimate, super::RowEstimate::Estimated(4200));
         let orders = tables.iter().find(|t| t.name == "orders").unwrap();
-        assert_eq!(orders.row_count_estimate, 0);
+        assert_eq!(orders.row_estimate, super::RowEstimate::Empty);
+        let events = tables.iter().find(|t| t.name == "events").unwrap();
+        assert_eq!(events.row_estimate, super::RowEstimate::NeverAnalyzed);
+        let view = tables.iter().find(|t| t.name == "active_users").unwrap();
+        assert_eq!(view.row_estimate, super::RowEstimate::View);
     }
 
     #[test]
@@ -2238,6 +2399,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn a_v2_graph_blob_is_rejected_by_version_not_misdecoded() {
+        let blob = bincode::serialize(&(2u32, test_graph_and_snapshot().0)).unwrap();
+        let e = decode_persisted_graph(&blob).unwrap_err();
+        assert!(e.contains("v2") || e.contains("corrupt"), "{e}");
+    }
+
     #[tokio::test]
     async fn enrich_persists_sample_values_but_never_at_rest() {
         let dir =
@@ -2306,6 +2474,114 @@ mod tests {
             "cache-hit connections load the persisted graph with empty sample_values"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "integration-tests")]
+    #[tokio::test]
+    async fn cache_hit_reload_restores_sample_values() {
+        use crate::ai::integration_test::{seed_sql, setup_with_port, worker_client};
+        let (port, _c, raw) = setup_with_port("cache_hit_samples").await;
+        raw.batch_execute(seed_sql()).await.unwrap();
+        let (client, conn_id, mut supervisor) = worker_client(port).await;
+
+        let dir = std::env::temp_dir().join(format!("lucent-cachehit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = PersistentVectorCache::open_at(dir.join("embeddings_v1.db")).unwrap();
+        let caps = client.server_info.as_ref().unwrap().capabilities.clone();
+        let (graph, snapshot) = SchemaGraph::from_catalog(conn_id, &client, &caps)
+            .await
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let embedder = SingleFlightEmbedder::new(Arc::new(CountingEmbed2 {
+            calls: calls.clone(),
+        }));
+
+        // First pass: samples fetched live; the persisted blob wipes them.
+        let first = SchemaIndexer::enrich(
+            conn_id,
+            &snapshot,
+            &graph,
+            None,
+            Some(&client),
+            Some(conn_id),
+            &embedder,
+            &cache,
+            "cache-hit-key",
+            true,
+            &caps,
+            &|_p| {},
+        )
+        .await
+        .unwrap();
+        assert!(
+            first.columns.iter().any(|c| !c.sample_values.is_empty()),
+            "first pass must sample live values"
+        );
+
+        // Second pass: the cache-hit reload. The fast path stays instant and
+        // returns the wiped graph — that is the F9 precondition, pinned here.
+        let second = SchemaIndexer::enrich(
+            conn_id,
+            &snapshot,
+            &graph,
+            None,
+            Some(&client),
+            Some(conn_id),
+            &embedder,
+            &cache,
+            "cache-hit-key",
+            true,
+            &caps,
+            &|_p| {},
+        )
+        .await
+        .unwrap();
+        assert!(
+            second.columns.iter().all(|c| c.sample_values.is_empty()),
+            "the persisted graph never stores samples (privacy) — precondition"
+        );
+
+        // The restore the indexer runs right after publishing `second`.
+        let restored = restore_missing_samples(&second, &client, conn_id, &caps)
+            .await
+            .expect("every table was missing samples");
+        assert!(
+            restored.columns.iter().any(|c| !c.sample_values.is_empty()),
+            "F9: a reload must get its sample values back"
+        );
+        assert!(
+            restore_missing_samples(&restored, &client, conn_id, &caps)
+                .await
+                .is_none(),
+            "nothing left to restore → None (the indexer then skips the second swap)"
+        );
+
+        let _ = supervisor.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tables_missing_samples_needs_every_column_empty() {
+        // `any` empty would re-sample nearly every table on every enrich:
+        // ids and timestamps are never sampled.
+        let mut g = test_graph_and_snapshot().0;
+        for c in &mut g.columns {
+            c.sample_values.clear();
+        }
+        let all = tables_missing_samples(&g).len();
+        assert_eq!(all, g.tables.len(), "no samples anywhere → every table");
+        let first_table = g.tables[0].id;
+        let col = g
+            .columns
+            .iter_mut()
+            .find(|c| c.table_id == first_table)
+            .unwrap();
+        col.sample_values = vec!["x".into()];
+        assert_eq!(
+            tables_missing_samples(&g).len(),
+            all - 1,
+            "one sampled column exempts its table"
+        );
     }
 
     #[test]
@@ -2454,7 +2730,7 @@ mod tests {
                     schema: "public".into(),
                     name: "users".into(),
                     kind: "table".into(),
-                    row_count_estimate: 100,
+                    row_estimate: RowEstimate::Estimated(100),
                     partition_info: None,
                 },
                 TableEntry {
@@ -2462,7 +2738,7 @@ mod tests {
                     schema: "public".into(),
                     name: "products".into(),
                     kind: "table".into(),
-                    row_count_estimate: 50,
+                    row_estimate: RowEstimate::Estimated(50),
                     partition_info: None,
                 },
             ],
@@ -2511,7 +2787,7 @@ mod tests {
                     schema: "public".into(),
                     name: "users".into(),
                     kind: "table".into(),
-                    row_count_estimate: 100,
+                    row_estimate: RowEstimate::Estimated(100),
                     partition_info: None,
                 },
                 TableEntry {
@@ -2519,7 +2795,7 @@ mod tests {
                     schema: "public".into(),
                     name: "products".into(),
                     kind: "table".into(),
-                    row_count_estimate: 50,
+                    row_estimate: RowEstimate::Estimated(50),
                     partition_info: None,
                 },
             ],
@@ -2665,7 +2941,7 @@ mod tests {
             schema: "public".into(),
             name: "users".into(),
             kind: "table".into(),
-            row_count_estimate: 0,
+            row_estimate: RowEstimate::default(),
             partition_info: None,
         }];
         let columns = vec![
@@ -2794,7 +3070,7 @@ mod tests {
                 schema: "public".into(),
                 name: name.clone(),
                 kind: "table".into(),
-                row_count_estimate: 0,
+                row_estimate: RowEstimate::default(),
                 partition_info: None,
             });
             columns.push(ColumnEntry {
@@ -2830,7 +3106,7 @@ mod tests {
                     schema: t.schema.clone(),
                     name: t.name.clone(),
                     kind: t.kind.clone(),
-                    row_count_estimate: t.row_count_estimate,
+                    row_count_estimate: t.row_estimate.as_count(),
                     partition_info: t.partition_info.clone(),
                 })
                 .collect(),

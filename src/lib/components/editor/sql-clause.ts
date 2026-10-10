@@ -1,5 +1,6 @@
 import { completeFromList, ifNotIn } from '@codemirror/autocomplete';
 import type {
+  Completion,
   CompletionContext,
   CompletionSource,
 } from '@codemirror/autocomplete';
@@ -243,16 +244,18 @@ export const CLAUSE_KEYWORDS: Record<SqlClause, string[]> = {
  * parser — good enough to gate keyword suggestions.
  */
 export function classifyClause(textBeforeCursor: string): SqlClause {
-  const tokens = textBeforeCursor
-    .toLowerCase()
-    .replace(/[^a-z\s]/g, ' ')
-    .split(/\s+/)
-    .filter(Boolean);
+  // Optimization: scan words directly with a global regex instead of chaining
+  // toLowerCase/replace/split/filter, which allocated a lowercased copy of the
+  // text, a replaced copy, and an array of tokens on every autocomplete
+  // evaluation (i.e. every keystroke).
+  const wordRegex = /[a-zA-Z]+/g;
   let clause: SqlClause = 'statement-start';
   let inCase = false;
   let afterCase: SqlClause = 'statement-start';
   let prev = '';
-  for (const t of tokens) {
+  let match: RegExpExecArray | null;
+  while ((match = wordRegex.exec(textBeforeCursor)) !== null) {
+    const t = match[0].toLowerCase();
     if (inCase) {
       if (t === 'when') clause = 'case-when';
       else if (t === 'then') clause = 'case-then';
@@ -347,15 +350,27 @@ export function clauseKeywordSource(dialect: SQLDialect): CompletionSource {
     'null',
     'unknown',
   ]);
+
+  // Pre-compute the completion options per clause once per dialect instead of
+  // filtering and mapping the keyword list inside the per-keystroke closure.
+  const clauseOptions = new Map<SqlClause, Completion[]>();
+  for (const [clause, keywords] of Object.entries(CLAUSE_KEYWORDS) as [
+    SqlClause,
+    string[],
+  ][]) {
+    const options = keywords
+      .filter((k) => dialectWords.has(k))
+      .map((label) => ({ label, type: 'keyword' as const, boost: -1 }));
+    clauseOptions.set(clause, options);
+  }
+
   return ifNotIn(
     ['QuotedIdentifier', 'String', 'LineComment', 'BlockComment', '.'],
     (context: CompletionContext) => {
       const clause = classifyClause(
         context.state.doc.sliceString(0, context.pos),
       );
-      const options = (CLAUSE_KEYWORDS[clause] ?? [])
-        .filter((k) => dialectWords.has(k))
-        .map((label) => ({ label, type: 'keyword' as const, boost: -1 }));
+      const options = clauseOptions.get(clause) ?? [];
       return completeFromList(options)(context);
     },
   );

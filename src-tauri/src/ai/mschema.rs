@@ -36,11 +36,16 @@ pub fn estimate_tokens(text: &str) -> usize {
 /// table has been analyzed — so a freshly loaded database reports every table
 /// as empty. Rendering that as "~0 rows" invites the model to answer "this
 /// table has no data"; saying the count is unknown sends it to `count(*)`.
-fn row_count_phrase(estimate: i64) -> String {
-    if estimate <= 0 {
-        "row count unknown (not analyzed — use count(*) if it matters)".to_string()
-    } else {
-        format!("~{estimate} rows")
+fn row_count_phrase(est: crate::ai::schema_graph::RowEstimate) -> String {
+    use crate::ai::schema_graph::RowEstimate;
+    match est {
+        RowEstimate::Estimated(n) => format!("~{n} rows"),
+        // Still an estimate (stats can lag a fresh load): say so (P7).
+        RowEstimate::Empty => "~0 rows (statistics say empty — count(*) to confirm)".to_string(),
+        RowEstimate::NeverAnalyzed => {
+            "row count unknown (never analyzed — use count(*) if it matters)".to_string()
+        }
+        RowEstimate::View => "row count unknown (view)".to_string(),
     }
 }
 
@@ -49,7 +54,7 @@ fn header(t: &crate::ai::schema_graph::TableEntry) -> String {
         "# Table: {}.{} — {}",
         t.schema,
         t.name,
-        row_count_phrase(t.row_count_estimate)
+        row_count_phrase(t.row_estimate)
     );
     if let Some(p) = &t.partition_info {
         h.push_str(&format!(" [{p}]"));
@@ -165,12 +170,8 @@ pub fn render_compact_index(graph: &SchemaGraph) -> String {
             "{}.{} — {}, {} cols",
             t.schema,
             t.name,
-            // The index form stays terse — the full phrase is for table headers.
-            if t.row_count_estimate <= 0 {
-                "rows unknown".to_string()
-            } else {
-                format!("~{} rows", t.row_count_estimate)
-            },
+            // Both tiers render through the same phrase so they never disagree.
+            row_count_phrase(t.row_estimate),
             col_ids.len()
         );
         if !keys.is_empty() {
@@ -271,7 +272,7 @@ mod tests {
                     schema: "bookings".into(),
                     name: "flights".into(),
                     kind: "table".into(),
-                    row_count_estimate: 214_867,
+                    row_estimate: crate::ai::schema_graph::RowEstimate::Estimated(214_867),
                     partition_info: None,
                 },
                 TableEntry {
@@ -279,7 +280,7 @@ mod tests {
                     schema: "bookings".into(),
                     name: "routes".into(),
                     kind: "table".into(),
-                    row_count_estimate: 710,
+                    row_estimate: crate::ai::schema_graph::RowEstimate::Estimated(710),
                     partition_info: None,
                 },
             ],
@@ -328,17 +329,32 @@ mod tests {
     }
 
     #[test]
-    fn unanalyzed_tables_report_an_unknown_count_not_zero() {
-        // Planner row estimates (and their equivalents) read 0 until the table is
-        // analyzed, so a freshly loaded database reports every table as empty.
-        // "~0 rows" reads as a fact and invites "this table has no data";
-        // naming it unknown sends the model to count(*) instead.
+    fn row_estimate_states_render_distinctly() {
+        assert_eq!(
+            row_count_phrase(crate::ai::schema_graph::RowEstimate::Estimated(4200)),
+            "~4200 rows"
+        );
+        assert_eq!(
+            row_count_phrase(crate::ai::schema_graph::RowEstimate::Empty),
+            "~0 rows (statistics say empty — count(*) to confirm)"
+        );
+        assert!(
+            row_count_phrase(crate::ai::schema_graph::RowEstimate::NeverAnalyzed)
+                .contains("never analyzed")
+        );
+        assert!(row_count_phrase(crate::ai::schema_graph::RowEstimate::View).contains("view"));
+    }
+
+    #[test]
+    fn never_analyzed_tables_say_so_not_empty() {
+        // Planner row estimates read None until the table is analyzed.
+        // That must render as unknown, never as "~0 rows".
         let mut g = small_graph();
-        g.tables[0].row_count_estimate = 0;
+        g.tables[0].row_estimate = crate::ai::schema_graph::RowEstimate::NeverAnalyzed;
         let out = render_m_schema(&g);
         assert!(
-            out.contains("row count unknown"),
-            "an unanalyzed table must not be described as empty: {out}"
+            out.contains("never analyzed"),
+            "a never-analyzed table must say so: {out}"
         );
         assert!(!out.contains("~0 rows"), "{out}");
         assert!(
@@ -347,6 +363,17 @@ mod tests {
         );
         // A real estimate still reads as an estimate.
         assert!(render_m_schema(&small_graph()).contains("~214867 rows"));
+    }
+
+    #[test]
+    fn analyzed_empty_tables_say_statistics_say_empty() {
+        let mut g = small_graph();
+        g.tables[0].row_estimate = crate::ai::schema_graph::RowEstimate::Empty;
+        let out = render_m_schema(&g);
+        assert!(
+            out.contains("statistics say empty"),
+            "an analyzed-but-empty table must be distinguished from unknown: {out}"
+        );
     }
 
     #[test]
@@ -401,7 +428,7 @@ mod tests {
                 schema: "bookings".into(),
                 name: "wide".into(),
                 kind: "table".into(),
-                row_count_estimate: 10,
+                row_estimate: crate::ai::schema_graph::RowEstimate::Estimated(10),
                 partition_info: None,
             }],
             columns,
@@ -457,7 +484,7 @@ mod tests {
                 schema: "public".into(),
                 name: format!("table_number_{t}"),
                 kind: "table".into(),
-                row_count_estimate: 100,
+                row_estimate: crate::ai::schema_graph::RowEstimate::Estimated(100),
                 partition_info: None,
             });
             for c in 0..12 {
@@ -504,7 +531,7 @@ mod tests {
                 schema: "bookings".into(),
                 name: "routes".into(),
                 kind: "table".into(),
-                row_count_estimate: 710,
+                row_estimate: crate::ai::schema_graph::RowEstimate::Estimated(710),
                 partition_info: None,
             }],
             vec![col(

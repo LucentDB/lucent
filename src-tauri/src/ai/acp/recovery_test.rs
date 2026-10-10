@@ -97,6 +97,7 @@ fn tool_ctx() -> AiToolContext {
         embedder: Arc::new(AsyncMutex::new(None)),
         reranker: Arc::new(AsyncMutex::new(None)),
         memory_manager: crate::ai::tools::test_memory_manager(),
+        result_scope: crate::ai::result_store::ResultScope::isolated("test"),
     }
 }
 

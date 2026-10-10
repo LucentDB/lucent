@@ -9,13 +9,14 @@
 
 #![cfg(feature = "integration-tests")]
 
+use crate::ai::agent::CachedQuery;
 #[allow(unused_imports)]
 use crate::ai::provider::LlmProvider;
 use std::time::Duration;
 use testcontainers::runners::AsyncRunner;
 use tokio_postgres::NoTls;
 
-fn seed_sql() -> &'static str {
+pub(crate) fn seed_sql() -> &'static str {
     "CREATE TABLE IF NOT EXISTS public.organizations (
         id SERIAL PRIMARY KEY, name TEXT, slug TEXT UNIQUE, is_active BOOLEAN DEFAULT true,
         plan TEXT DEFAULT 'free', created_at TIMESTAMP DEFAULT NOW(), settings JSONB DEFAULT '{}'
@@ -52,7 +53,7 @@ async fn setup(name: &str) -> (impl Drop, tokio_postgres::Client) {
 
 /// As `setup`, but also returns the container's host port so tests can drive
 /// the worker seam (`pg_config(port)` + `ConnectorClient`).
-async fn setup_with_port(name: &str) -> (u16, impl Drop, tokio_postgres::Client) {
+pub(crate) async fn setup_with_port(name: &str) -> (u16, impl Drop, tokio_postgres::Client) {
     eprintln!("[{name}] Starting Postgres...");
     let c = testcontainers_modules::postgres::Postgres::default()
         .start()
@@ -85,7 +86,7 @@ async fn setup_with_port(name: &str) -> (u16, impl Drop, tokio_postgres::Client)
 /// the connection id and the supervisor (caller must hold the supervisor and
 /// shut it down). This is the exact seam the AI tools and the schema index now
 /// consume — catalog questions go over this socket, not raw SQL.
-async fn worker_client(
+pub(crate) async fn worker_client(
     port: u16,
 ) -> (
     crate::client::ConnectorClient,
@@ -356,6 +357,7 @@ async fn e2e_llm_tool_awareness() {
         embedder: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         reranker: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         memory_manager: crate::ai::tools::test_memory_manager(),
+        result_scope: crate::ai::result_store::ResultScope::isolated("test"),
     };
     let tools = crate::ai::tools::all_tools(ctx);
 
@@ -607,7 +609,13 @@ async fn execute_staged_dml_runs_the_approved_sql_and_reports_real_rows() {
             staged_sql: "UPDATE dml_target SET v = 'x' WHERE id >= 2".into(),
             staged_at: Instant::now(),
         };
-        c.query_cache.insert("SELECT 1".into(), "stale".into());
+        c.query_cache.insert(
+            "SELECT 1".into(),
+            CachedQuery {
+                result_id: "r_0000000000000000".into(),
+                summary: "stale".into(),
+            },
+        );
     }
 
     // Mirror execute_dml: take the staged SQL (PausedForDml → Idle), then run
@@ -642,5 +650,382 @@ async fn execute_staged_dml_runs_the_approved_sql_and_reports_real_rows() {
     assert_eq!(check.rows[0][0], serde_json::json!(2));
 
     client.shutdown().await.expect("shutdown");
+    let _ = supervisor.shutdown().await;
+}
+
+/// Review Focus #1: parallel tool calls share one backend. Every one of them
+/// must run inside its own read-only scope — before Task 3A some landed after a
+/// sibling's ROLLBACK and ran in autocommit (`transaction_read_only = off`).
+#[tokio::test]
+async fn parallel_tool_queries_all_run_read_only() {
+    let (port, _c, _raw) = setup_with_port("parallel_readonly").await;
+    let (client, conn_id, mut supervisor) = worker_client(port).await;
+    let ctx = crate::ai::tools::live_tool_ctx(client.clone(), conn_id);
+    let tasks: Vec<_> = (0..16)
+        .map(|_| {
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                crate::ai::tools::execute::RunReadonlyQuery::new(ctx.clone())
+                    .call(
+                        serde_json::json!({"sql": "SELECT current_setting('transaction_read_only') AS ro"}),
+                        &ctx,
+                    )
+                    .await
+            })
+        })
+        .collect();
+    for t in tasks {
+        let out = t.await.unwrap().expect("query runs");
+        let crate::ai::tools::ToolOutput::QueryResult { rows, .. } = out else {
+            panic!("query result")
+        };
+        assert_eq!(
+            rows[0][0],
+            serde_json::json!("on"),
+            "a parallel query escaped its read-only scope"
+        );
+    }
+    let _ = supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn worker_ms_is_present_and_bounded_by_total() {
+    let (port, _c, _raw) = setup_with_port("worker_ms").await;
+    let (client, conn_id, mut supervisor) = worker_client(port).await;
+    let start = std::time::Instant::now();
+    let res = client
+        .execute(conn_id, "SELECT count(*) FROM generate_series(1, 100000)")
+        .await
+        .unwrap();
+    let total = start.elapsed().as_millis() as u64;
+    let worker = res.worker_ms.expect("final batch carries worker_ms");
+    assert!(worker <= total + 5, "worker {worker} vs total {total}");
+    let _ = supervisor.shutdown().await;
+}
+
+/// D2.5 on a real Postgres: Stop during two parallel tool calls on one
+/// connection. Asserts the SERVER is idle afterwards — the futures alone
+/// returning errors proves nothing (see the task note).
+#[tokio::test]
+async fn stop_cancels_the_running_query_and_the_queued_one_never_runs() {
+    let (port, _c, raw) = setup_with_port("cancel_scope").await;
+    let (client, conn_id, mut supervisor) = worker_client(port).await;
+    let ctx = crate::ai::tools::live_tool_ctx(client.clone(), conn_id);
+    let (store, scope_id) = (
+        ctx.result_scope.store.clone(),
+        ctx.result_scope.scope_id.clone(),
+    );
+    let run = |ctx: crate::ai::tools::AiToolContext| {
+        tokio::spawn(async move {
+            crate::ai::tools::execute::RunReadonlyQuery::new(ctx.clone())
+                .call(serde_json::json!({"sql": "SELECT pg_sleep(30)"}), &ctx)
+                .await
+        })
+    };
+    let first = run(ctx.clone());
+    let second = run(ctx.clone());
+
+    // One executes; the other waits on the sequence lock (Phase 0 Task 3A).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while store.executing_count(&scope_id) != 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no query started executing"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await; // let pg_sleep reach the server
+
+    let start = std::time::Instant::now();
+    for (query_id, cid) in store.cancel_scope(&scope_id) {
+        client
+            .cancel(cid, query_id)
+            .await
+            .expect("cancel request written");
+    }
+    for task in [first, second] {
+        let out = task
+            .await
+            .unwrap()
+            .expect("a cancelled query is not a tool error");
+        let crate::ai::tools::ToolOutput::Text { content } = out else {
+            panic!("cancelled → text")
+        };
+        assert_eq!(content, crate::ai::result_store::CANCELLED_BY_USER);
+    }
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+
+    // The server is idle: the queued pg_sleep never ran.
+    let sleeping: i64 = raw
+        .query_one(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE query LIKE '%pg_sleep(30)%' AND state = 'active' AND pid <> pg_backend_pid()",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        sleeping, 0,
+        "a cancelled tool call is still running on the server"
+    );
+    let probe = client
+        .execute(conn_id, "SELECT 1")
+        .await
+        .expect("connection free at once");
+    assert_eq!(probe.rows.len(), 1);
+    let _ = supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_501_row_result_says_more_rows_exist_and_500_does_not() {
+    let (port, _c, _raw) = setup_with_port("probe_501").await;
+    let (client, conn_id, mut supervisor) = worker_client(port).await;
+    let ctx = crate::ai::tools::live_tool_ctx(client, conn_id); // default row_limit = 500
+    let summary = |n: u32| {
+        let ctx = ctx.clone();
+        async move {
+            let out = crate::ai::tools::execute::RunReadonlyQuery::new(ctx.clone())
+                .call(
+                    serde_json::json!({"sql": format!("SELECT g FROM generate_series(1, {n}) g")}),
+                    &ctx,
+                )
+                .await
+                .unwrap();
+            let crate::ai::tools::ToolOutput::QueryResult {
+                text_summary,
+                row_count,
+                ..
+            } = out
+            else {
+                panic!()
+            };
+            (text_summary, row_count)
+        }
+    };
+    let (exact, rows) = summary(500).await;
+    assert_eq!(rows, 500);
+    assert!(exact.contains("rows=\"500\" complete=\"true\""), "{exact}");
+    assert!(!exact.contains("More rows exist"), "{exact}");
+    let (over, rows) = summary(501).await;
+    assert_eq!(rows, 500, "the probe row is never retained");
+    assert!(over.contains("rows=\"500+\" complete=\"false\""), "{over}");
+    assert!(
+        over.contains("More rows exist beyond the 500-row limit"),
+        "{over}"
+    );
+    let _ = supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn inspect_connection_reports_identity_and_extensions() {
+    let (port, _c, raw) = setup_with_port("inspect_conn").await;
+    raw.batch_execute(seed_sql()).await.unwrap();
+    let (client, conn_id, mut supervisor) = worker_client(port).await;
+    let ctx = crate::ai::tools::live_tool_ctx(client, conn_id);
+    let out = crate::ai::tools::inspect_connection::InspectConnection::new(ctx.clone())
+        .call(serde_json::json!({}), &ctx)
+        .await
+        .unwrap();
+    let crate::ai::tools::ToolOutput::Text { content } = out else {
+        panic!("text output")
+    };
+    assert!(content.contains("user=postgres"), "{content}");
+    assert!(content.contains("search_path="), "{content}");
+    assert!(content.contains("extensions: "), "{content}");
+    assert!(
+        !content.contains("unavailable"),
+        "a superuser can read every section: {content}"
+    );
+    let _ = supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn export_csv_and_json_round_trip_seeded_rows() {
+    use crate::ai::tools::{export::ExportQuery, live_tool_ctx as live_ctx, ToolError, ToolOutput};
+    let (port, _c, raw) = setup_with_port("export_csv").await;
+    raw.batch_execute(seed_sql()).await.unwrap();
+    let (client, conn_id, mut supervisor) = worker_client(port).await;
+    let ctx = live_ctx(client.clone(), conn_id);
+    let dir = tempfile::tempdir().unwrap();
+
+    let csv_path = dir.path().join("orgs.csv");
+    let out = ExportQuery::new(ctx.clone())
+        .call(
+            serde_json::json!({
+                "sql": "SELECT name, slug, plan FROM public.organizations ORDER BY name",
+                "path": csv_path.to_str().unwrap()
+            }),
+            &ctx,
+        )
+        .await
+        .expect("export runs");
+    let ToolOutput::Text { content } = out else {
+        panic!("text")
+    };
+    assert!(content.contains("Exported 3 rows"), "{content}");
+    let file = std::fs::read_to_string(&csv_path).unwrap();
+    let mut lines = file.lines();
+    assert_eq!(lines.next().unwrap(), "name,slug,plan");
+    assert_eq!(lines.count(), 3);
+    assert!(file.contains("Acme Corporation"), "{file}");
+
+    let json_path = dir.path().join("orgs.json");
+    ExportQuery::new(ctx.clone())
+        .call(
+            serde_json::json!({
+                "sql": "SELECT name, slug, plan FROM public.organizations ORDER BY name",
+                "path": json_path.to_str().unwrap()
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 3);
+    let _ = supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn export_truncation_boundaries() {
+    use crate::ai::tools::{export::ExportQuery, live_tool_ctx as live_ctx, ToolError, ToolOutput};
+    let (port, _c, _raw) = setup_with_port("export_truncation").await;
+    let (client, conn_id, mut supervisor) = worker_client(port).await;
+    let ctx = live_ctx(client.clone(), conn_id);
+    let dir = tempfile::tempdir().unwrap();
+
+    // Exactly 10,000 rows: NOT truncated.
+    let at_cap = dir.path().join("at_cap.csv");
+    let out = ExportQuery::new(ctx.clone())
+        .call(
+            serde_json::json!({
+                "sql": "SELECT g FROM generate_series(1, 10000) g",
+                "path": at_cap.to_str().unwrap()
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let ToolOutput::Text { content } = out else {
+        panic!()
+    };
+    assert!(!content.contains("first 10,000 rows"), "{content}");
+    assert_eq!(
+        std::fs::read_to_string(&at_cap).unwrap().lines().count(),
+        10_001
+    ); // header + 10,000
+
+    // 10,001 rows: truncated to 10,000 + the Q1 copy.
+    let over = dir.path().join("over.csv");
+    let out = ExportQuery::new(ctx.clone())
+        .call(
+            serde_json::json!({
+                "sql": "SELECT g FROM generate_series(1, 10001) g",
+                "path": over.to_str().unwrap()
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let ToolOutput::Text { content } = out else {
+        panic!()
+    };
+    assert!(
+        content.contains("the file contains the first 10,000 rows"),
+        "{content}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&over).unwrap().lines().count(),
+        10_001
+    );
+    let _ = supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn export_zero_rows_still_writes_the_file() {
+    use crate::ai::tools::{export::ExportQuery, live_tool_ctx as live_ctx, ToolError, ToolOutput};
+    let (port, _c, raw) = setup_with_port("export_zero").await;
+    raw.batch_execute(seed_sql()).await.unwrap(); // a fresh container has no organizations table
+    let (client, conn_id, mut supervisor) = worker_client(port).await;
+    let ctx = live_ctx(client.clone(), conn_id);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("empty.csv");
+    let out = ExportQuery::new(ctx.clone())
+        .call(
+            serde_json::json!({
+                "sql": "SELECT name FROM public.organizations WHERE false",
+                "path": path.to_str().unwrap()
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let ToolOutput::Text { content } = out else {
+        panic!()
+    };
+    assert!(content.contains("Exported 0 rows"), "{content}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "name\n");
+    let _ = supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn export_guard_rejects_dml_and_creates_no_file() {
+    use crate::ai::tools::{export::ExportQuery, live_tool_ctx as live_ctx, ToolError, ToolOutput};
+    let (port, _c, _raw) = setup_with_port("export_guard").await;
+    let (client, conn_id, mut supervisor) = worker_client(port).await;
+    let ctx = live_ctx(client.clone(), conn_id);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nope.csv");
+    // Spec §6.6: DELETE / UPDATE.
+    for sql in [
+        "DELETE FROM public.organizations",
+        "UPDATE public.organizations SET plan = 'x'",
+    ] {
+        let err = ExportQuery::new(ctx.clone())
+            .call(
+                serde_json::json!({ "sql": sql, "path": path.to_str().unwrap() }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::SqlValidation(_)), "{sql}: {err:?}");
+        assert!(!path.exists(), "{sql}: no file may be created");
+    }
+    let _ = supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn export_leaves_no_open_transaction() {
+    use crate::ai::tools::{export::ExportQuery, live_tool_ctx as live_ctx, ToolError, ToolOutput};
+    let (port, _c, _raw) = setup_with_port("export_txn").await;
+    let (client, conn_id, mut supervisor) = worker_client(port).await;
+    let ctx = live_ctx(client.clone(), conn_id);
+    let dir = tempfile::tempdir().unwrap();
+    ExportQuery::new(ctx.clone())
+        .call(
+            serde_json::json!({
+                "sql": "SELECT 1",
+                "path": dir.path().join("one.csv").to_str().unwrap()
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    // The read-only scope was rolled back. `SELECT 1` would also succeed
+    // inside a leaked READ ONLY transaction, so ask the session directly.
+    let after = client
+        .execute(conn_id, "SHOW transaction_read_only")
+        .await
+        .expect("connection usable after export");
+    assert_eq!(
+        after.rows[0][0],
+        serde_json::json!("off"),
+        "a read-only transaction leaked"
+    );
     let _ = supervisor.shutdown().await;
 }

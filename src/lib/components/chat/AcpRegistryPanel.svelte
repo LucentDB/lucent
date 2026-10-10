@@ -45,14 +45,14 @@
             {#if agent.dbTools === 'supported'}
               <span
                 class="acp-badge acp-badge-tools"
-                title="Verified: this agent connects to Lucent's database tools (search_schema, get_objects_info, run_readonly_query, preview_dml) via ACP session MCP servers."
+                title="Verified: this agent connects to Lucent's database tools (search_schema, get_objects_info, run_readonly_query, preview_dml, export_query) via ACP session MCP servers."
               >
                 DB tools ✓
               </span>
             {:else if agent.dbTools === 'unsupported'}
               <span
                 class="acp-badge acp-badge-tools-cli"
-                title="This agent silently ignores the MCP servers Lucent passes in session/new, so Lucent hands it the same four database tools as a CLI helper in its workspace instead. Same database, same guardrails — it just runs them as shell commands."
+                title="This agent silently ignores the MCP servers Lucent passes in session/new, so Lucent hands it the same database tools as a CLI helper in its workspace instead. Same database, same guardrails — it just runs them as shell commands."
               >
                 DB tools via CLI
               </span>

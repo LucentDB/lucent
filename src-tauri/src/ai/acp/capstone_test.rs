@@ -234,6 +234,7 @@ async fn capstone_tool_roundtrip_and_dml_approval() {
         embedder: Arc::new(Mutex::new(None)),
         reranker: Arc::new(Mutex::new(None)),
         memory_manager: crate::ai::tools::test_memory_manager(),
+        result_scope: crate::ai::result_store::ResultScope::isolated("test"),
     };
     let schemas = mcp_server::lucent_tools_schema(ctx.clone());
     let executor: Arc<dyn ToolExecutor> = Arc::new(ContextToolExecutor::new(ctx));
@@ -464,6 +465,105 @@ async fn capstone_tool_roundtrip_and_dml_approval() {
     let _ = supervisor.shutdown().await;
 }
 
+const SLOW_DUCKDB_SQL: &str = "SELECT count(*) FROM range(1000000) a, range(1000000) b";
+
+#[tokio::test]
+async fn interrupt_engine_query_is_bounded_by_the_client_deadline() {
+    let (mut supervisor, client, conn_id) = duckdb_worker().await;
+    let caps = client
+        .server_info
+        .as_ref()
+        .map(|s| s.capabilities.clone())
+        .expect("capabilities");
+    assert_eq!(
+        caps.statement_timeout,
+        lucent_protocol::TimeoutSupport::Interrupt,
+        "DuckDB declares Interrupt — the deadline path is the one under test"
+    );
+
+    let start = std::time::Instant::now();
+    let res = crate::ai::tools::bounded::execute_bounded(
+        &client,
+        conn_id,
+        SLOW_DUCKDB_SQL,
+        &caps,
+        1_000,
+        None,
+        None,
+    )
+    .await;
+    let err = res.expect_err("a 10^12-row cross join must hit the 1s deadline");
+    assert!(
+        err.contains("1000ms AI query deadline"),
+        "the error must be the client deadline firing, not an engine failure: {err}"
+    );
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed >= std::time::Duration::from_millis(750),
+        "the deadline must actually fire (~1s worth of waiting), not return early: {elapsed:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "the deadline must bound the call, not wait for the query"
+    );
+    // The interrupt must not wedge the connection.
+    let after = client
+        .execute(conn_id, "SELECT 1")
+        .await
+        .expect("connection usable after the deadline");
+    assert_eq!(after.rows.len(), 1);
+    let _ = supervisor.shutdown().await;
+}
+
+/// Review Focus #2: two parallel AI queries on one DuckDB connection. Before
+/// Task 3A the worker's last-writer-wins in-flight map made the slow query's
+/// deadline cancel a no-op. Each query here takes its own read-only session,
+/// exactly as `run_readonly_query` does.
+#[tokio::test]
+async fn deadline_bounds_the_query_it_was_armed_for_under_parallel_calls() {
+    let (mut supervisor, client, conn_id) = duckdb_worker().await;
+    let caps = client
+        .server_info
+        .as_ref()
+        .map(|s| s.capabilities.clone())
+        .unwrap();
+    let run = |sql: &'static str, timeout_ms: u64| {
+        let (client, caps) = (client.clone(), caps.clone());
+        tokio::spawn(async move {
+            let ro = crate::readonly::ReadOnlySession::begin(&client, conn_id, &caps, timeout_ms)
+                .await
+                .unwrap();
+            let r = crate::ai::tools::bounded::execute_bounded(
+                &client, conn_id, sql, &caps, timeout_ms, None, None,
+            )
+            .await;
+            ro.close().await;
+            r
+        })
+    };
+    let start = std::time::Instant::now();
+    let slow = run(SLOW_DUCKDB_SQL, 1_000);
+    let fast = run("SELECT 42", 10_000);
+    let slow_err = slow
+        .await
+        .unwrap()
+        .expect_err("the slow query must hit ITS deadline");
+    assert!(
+        slow_err.contains("1000ms AI query deadline"),
+        "the slow query must fail on its own deadline, not another cause: {slow_err}"
+    );
+    assert_eq!(
+        fast.await.unwrap().unwrap().rows[0][0],
+        serde_json::json!(42)
+    );
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
+    let _ = supervisor.shutdown().await;
+}
+
 /// Locates the compiled stub-agent binary (same walk as the other acp test
 /// helpers; `CARGO_BIN_EXE_*` is only set for integration tests).
 fn stub_binary() -> String {
@@ -522,6 +622,7 @@ async fn agent_spawning_mcp_binary_marks_bridge_connected() {
         embedder: Arc::new(Mutex::new(None)),
         reranker: Arc::new(Mutex::new(None)),
         memory_manager: crate::ai::tools::test_memory_manager(),
+        result_scope: crate::ai::result_store::ResultScope::isolated("test"),
     };
 
     let acp = crate::ai::acp::AcpState::new();
@@ -591,6 +692,7 @@ async fn tools_gate_claims_tools_when_the_bridge_connects() {
             embedder: Arc::new(Mutex::new(None)),
             reranker: Arc::new(Mutex::new(None)),
             memory_manager: crate::ai::tools::test_memory_manager(),
+            result_scope: crate::ai::result_store::ResultScope::isolated("test"),
         },
     );
     let sink = Arc::new(crate::ai::agent::CollectorSink(std::sync::Mutex::new(
@@ -634,4 +736,234 @@ async fn tools_gate_claims_tools_when_the_bridge_connects() {
             .any(|e| matches!(e, crate::ai::events::AiEvent::Notice { .. })),
         "no no-tools notice when the bridge connected: {events:?}"
     );
+}
+
+#[tokio::test]
+async fn capstone_export_query_round_trips_over_the_bridge_and_the_cli() {
+    let (mut supervisor, client, conn_id) = duckdb_worker().await;
+    let ctx = crate::ai::tools::live_tool_ctx(client.clone(), conn_id);
+    let dir = tempfile::tempdir().unwrap();
+    let token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+
+    let start_bridge = |name: &str, executor: Arc<dyn ToolExecutor>| {
+        let path = dir.path().join(format!("{name}.sock"));
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let task = tokio::spawn(bridge::serve(
+            listener,
+            token.clone(),
+            executor,
+            Arc::new(RecordingSink::new()),
+            Arc::new(BridgeHandle::new(name)),
+        ));
+        (path, task)
+    };
+    let (cell_sock, cell_task) = start_bridge(
+        "cell",
+        Arc::new(ContextToolExecutor::new_filtered(
+            ctx.clone(),
+            crate::ai::tools::NOTEBOOK_CELL_EXCLUDED_TOOLS,
+        )),
+    );
+    let (chat_sock, chat_task) =
+        start_bridge("chat", Arc::new(ContextToolExecutor::new(ctx.clone())));
+
+    // Notebook-cell seam: refused, with the reason (P5).
+    let mut cell = bridge::BridgeClient::connect(&cell_sock, &token)
+        .await
+        .unwrap();
+    let err = cell
+        .call("export_query", serde_json::json!({"sql": "SELECT 1", "path": dir.path().join("x.csv").to_str().unwrap()}))
+        .await
+        .unwrap_err();
+    assert!(err.contains("notebook cells cannot write files"), "{err}");
+    assert!(!dir.path().join("x.csv").exists());
+
+    // Chat seam: exports through the bridge.
+    let mut chat = bridge::BridgeClient::connect(&chat_sock, &token)
+        .await
+        .unwrap();
+    let out = chat
+        .call(
+            "export_query",
+            serde_json::json!({
+                "sql": "SELECT 1 AS one",
+                "path": dir.path().join("one.csv").to_str().unwrap()
+            }),
+        )
+        .await
+        .expect("chat-scope export succeeds");
+    assert!(out.to_string().contains("Exported 1 rows"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("one.csv")).unwrap(),
+        "one\n1\n"
+    );
+
+    // The real CLI binary's direct-name form (A5) — schema-derived since
+    // Phase 0 Task 14, so this pins that a new tool needs no CLI edit.
+    // `tokio::process`, not `std::process`: `#[tokio::test]` runs on ONE
+    // thread, and a blocking `output()` would starve the `bridge::serve` task
+    // the CLI is waiting on — the test would hang.
+    let cli_args: Vec<String> = vec![
+        "--socket".into(),
+        chat_sock.to_string_lossy().into_owned(),
+        "--token".into(),
+        token.clone(),
+        "export_query".into(),
+        serde_json::json!({ "sql": "SELECT 1", "path": dir.path().join("cli.csv").to_str().unwrap() }).to_string(),
+    ];
+    let cli = tokio::process::Command::new(crate::ai::acp::bridge_binary_path().unwrap())
+        .args(&cli_args)
+        .output()
+        .await
+        .expect("run the CLI");
+    assert!(
+        cli.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    assert!(dir.path().join("cli.csv").exists());
+
+    cell_task.abort();
+    chat_task.abort();
+    let _ = supervisor.shutdown().await;
+}
+
+/// The `<result …>…</result>` block with its random id normalized.
+fn result_block(text: &str) -> String {
+    let start = text.find("<result").expect("a result block");
+    let end = text.find("</result>").expect("closed") + "</result>".len();
+    let block = &text[start..end];
+    match block.find(" id=\"r_") {
+        Some(i) => format!("{}{}", &block[..i], &block[i + " id=\"r_".len() + 16 + 1..]),
+        None => block.to_string(),
+    }
+}
+
+#[tokio::test]
+async fn rig_and_bridge_render_identical_result_blocks() {
+    let (mut supervisor, client, conn_id) = duckdb_worker().await;
+    client
+        .execute(
+            conn_id,
+            "CREATE TABLE r AS SELECT g AS id FROM range(26) t(g)",
+        )
+        .await
+        .unwrap();
+    let ctx = crate::ai::tools::live_tool_ctx(client.clone(), conn_id);
+    let args = serde_json::json!({"sql": "SELECT id FROM r ORDER BY id"});
+
+    // Rig surface: the tool's text after the agent loop's post-processing.
+    let rig = crate::ai::tools::execute::RunReadonlyQuery::new(ctx.clone())
+        .call(args.clone(), &ctx)
+        .await
+        .unwrap();
+    let crate::ai::tools::ToolOutput::QueryResult { text_summary, .. } = rig else {
+        panic!("query result")
+    };
+    let rig_text = crate::ai::agent::model_text_for_tool("run_readonly_query", text_summary);
+
+    // ACP surface: what the bridge puts on the wire.
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("b.sock");
+    let token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let serve = tokio::spawn(bridge::serve(
+        tokio::net::UnixListener::bind(&sock).unwrap(),
+        token.clone(),
+        Arc::new(ContextToolExecutor::new(ctx.clone())),
+        Arc::new(RecordingSink::new()),
+        Arc::new(BridgeHandle::new("conv-identity")),
+    ));
+    let mut bc = bridge::BridgeClient::connect(&sock, &token).await.unwrap();
+    let wire = bc.call("run_readonly_query", args).await.unwrap();
+    let bridge_text = wire["text"].as_str().expect("text").to_string();
+
+    assert_eq!(
+        result_block(&rig_text),
+        result_block(&bridge_text),
+        "same rows, same block on both surfaces"
+    );
+    assert!(
+        rig_text.contains("rows=\"26\" complete=\"true\" shown=\"1-26\""),
+        "{rig_text}"
+    );
+    serve.abort();
+    let _ = supervisor.shutdown().await;
+}
+
+#[tokio::test]
+async fn fetch_rows_round_trips_through_the_cli() {
+    let (mut supervisor, client, conn_id) = duckdb_worker().await;
+    client
+        .execute(
+            conn_id,
+            "CREATE TABLE w AS SELECT g AS id, repeat('x', 400) AS pad FROM range(60) t(g)",
+        )
+        .await
+        .unwrap();
+    let ctx = crate::ai::tools::live_tool_ctx(client.clone(), conn_id);
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("b.sock");
+    let token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let serve = tokio::spawn(bridge::serve(
+        tokio::net::UnixListener::bind(&sock).unwrap(),
+        token.clone(),
+        Arc::new(ContextToolExecutor::new(ctx.clone())),
+        Arc::new(RecordingSink::new()),
+        Arc::new(BridgeHandle::new("conv-cli")),
+    ));
+    let mut bc = bridge::BridgeClient::connect(&sock, &token).await.unwrap();
+    let first = bc
+        .call(
+            "run_readonly_query",
+            serde_json::json!({"sql": "SELECT id, pad FROM w ORDER BY id"}),
+        )
+        .await
+        .unwrap();
+    let text = first["text"].as_str().unwrap().to_string();
+    assert!(
+        text.contains("Next page: fetch_rows"),
+        "wide rows must not fit one budget: {text}"
+    );
+    let id_at = text.find("result_id: \"").unwrap() + "result_id: \"".len();
+    let id = &text[id_at..id_at + 18];
+
+    // `tokio::process`: a blocking `std::process` call would starve the
+    // single-thread test runtime that serves the bridge — the test would hang.
+    let cli_args: Vec<String> = vec![
+        "--socket".into(),
+        sock.to_string_lossy().into_owned(),
+        "--token".into(),
+        token.clone(),
+        "fetch_rows".into(),
+        serde_json::json!({"result_id": id, "offset": 50, "columns": ["id"]}).to_string(),
+    ];
+    let out = tokio::process::Command::new(crate::ai::acp::bridge_binary_path().unwrap())
+        .args(&cli_args)
+        .output()
+        .await
+        .expect("run the CLI");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("shown=\\\"51-60\\\"") || stdout.contains("shown=\"51-60\""),
+        "{stdout}"
+    );
+    serve.abort();
+    let _ = supervisor.shutdown().await;
 }

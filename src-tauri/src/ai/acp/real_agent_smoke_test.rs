@@ -284,6 +284,7 @@ async fn real_agent_smoke_opencode() {
         embedder: Arc::new(Mutex::new(None)),
         reranker: Arc::new(Mutex::new(None)),
         memory_manager: crate::ai::tools::test_memory_manager(),
+        result_scope: crate::ai::result_store::ResultScope::isolated("test"),
     };
 
     let acp_cfg = AcpAgentConfig {

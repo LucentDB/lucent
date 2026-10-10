@@ -135,6 +135,18 @@ npm install          # install frontend + Tauri CLI deps
 npm run tauri dev    # launch the desktop app in dev mode
 ```
 
+`tauri dev` rebuilds only the app package. The driver workers
+(`lucent-driver-postgres`, `lucent-driver-duckdb`) and the MCP bridge are
+separate workspace packages sharing `lucent-protocol`, and the handshake rejects
+a worker built from a different protocol version with a `protocol version
+mismatch` error. Rebuild them explicitly with `npm run build:workers:debug`
+(from the checkout you run dev from) after changing `crates/lucent-protocol` /
+`PROTOCOL_VERSION`; the error names that command. Debug builds never copy the
+staged release sidecars into the target directory, so a rebuild cannot be
+silently undone — only `tauri build` bundles sidecars. When devving a git
+worktree that shares this checkout's `target/` directory, run the rebuild from
+the worktree.
+
 Then: **Connect** → add your Postgres connection (SSH tunnels supported) → open
 **AI Settings** (`~/.lucent/ai-config.json`) and pick a provider.
 
@@ -198,10 +210,11 @@ The database driver workers (`lucent-driver-postgres`, `lucent-driver-duckdb`)
 and the ACP bridge binary (`lucent-db-tools-mcp`) ship inside the bundle as Tauri
 sidecars. `scripts/stage-sidecars.mjs` builds and stages them under the **target**
 triple — not the host triple, which would ship an arm64 bridge in an Intel bundle
-— and `tauri build` runs it automatically via `beforeBuildCommand`. Fresh-checkout
-dev and test runs (`cargo test`, `cargo check`) bypass the sidecar check in
-`build.rs` when the binaries have not been staged yet, keeping development fast
-and clean.
+— and `tauri build` runs it automatically via `beforeBuildCommand`. Debug and
+test builds bypass the sidecar check in `build.rs` entirely — they never copy or
+bundle sidecars, so `target/debug` always holds the workers `cargo build`
+produced. Release builds skip it only when a sidecar for the target triple has
+not been staged.
 
 To build a release bundle locally:
 

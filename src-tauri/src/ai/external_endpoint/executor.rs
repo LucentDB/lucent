@@ -1,6 +1,6 @@
+use lucent_protocol::{ConnectionId, DriverCapabilities};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use lucent_protocol::{ConnectionId, DriverCapabilities};
 
 use crate::ai::acp::bridge::ToolExecutor;
 use crate::ai::embed::Embedder;
@@ -20,6 +20,9 @@ pub struct ExternalEndpointContext {
     pub inode_tracker: Arc<Mutex<Option<InodeTracker>>>,
     pub reopen_lock: Arc<Mutex<()>>,
     pub memory_manager: Arc<crate::ai::memory::MemoryManager>,
+    /// Process-wide result store (§6A.3), shared with chat and notebook
+    /// cells — the global byte cap spans every surface.
+    pub result_store: Arc<crate::ai::result_store::ResultStore>,
 }
 
 pub struct DynamicContextToolExecutor {
@@ -36,7 +39,8 @@ pub async fn run_connector_canary(
     client: &ConnectorClient,
     conn_id: ConnectionId,
 ) -> Result<(), String> {
-    let temp_canary = std::env::temp_dir().join(format!("lucent-canary-{}.csv", std::process::id()));
+    let temp_canary =
+        std::env::temp_dir().join(format!("lucent-canary-{}.csv", std::process::id()));
     std::fs::write(&temp_canary, b"id,val\n1,canary\n")
         .map_err(|e| format!("Failed to create canary file: {e}"))?;
 
@@ -120,6 +124,9 @@ impl ToolExecutor for DynamicContextToolExecutor {
                             *conn_guard = Some(new_id);
                             *self.context.capabilities.lock().await =
                                 Some(server_info.capabilities.clone());
+                            // Rows from the previous file must not page out
+                            // under the new one.
+                            self.context.result_store.clear_scope("external");
 
                             // Run connector-level canary probe
                             let canary_res = run_connector_canary(client, new_id).await;
@@ -162,11 +169,17 @@ impl ToolExecutor for DynamicContextToolExecutor {
                 .get("port")
                 .and_then(|s| s.parse::<u16>().ok())
                 .unwrap_or(0);
-            let database = profile.params.get("database").map(|s| s.as_str()).unwrap_or("");
+            let database = profile
+                .params
+                .get("database")
+                .map(|s| s.as_str())
+                .unwrap_or("");
             Some(format!("{host}:{port}/{database}"))
         };
-        let mut config = crate::ai::config::AiConfig::default();
-        config.ai_query_timeout_secs = 15;
+        let config = crate::ai::config::AiConfig {
+            ai_query_timeout_secs: 15,
+            ..Default::default()
+        };
         let tool_ctx = AiToolContext {
             db: Arc::clone(&self.context.client),
             connection_id: conn_id,
@@ -177,11 +190,20 @@ impl ToolExecutor for DynamicContextToolExecutor {
             embedder: Arc::clone(&self.context.embedder),
             reranker: Arc::new(Mutex::new(None)),
             memory_manager: Arc::clone(&self.context.memory_manager),
+            result_scope: crate::ai::result_store::ResultScope {
+                scope_id: "external".into(),
+                store: Arc::clone(&self.context.result_store),
+            },
         };
 
         match tool {
             "run_readonly_query" => {
                 crate::ai::tools::execute::RunReadonlyQuery::new(tool_ctx.clone())
+                    .call(args, &tool_ctx)
+                    .await
+            }
+            "fetch_rows" => {
+                crate::ai::tools::fetch_rows::FetchRows::new(tool_ctx.clone())
                     .call(args, &tool_ctx)
                     .await
             }
@@ -248,10 +270,41 @@ mod tests {
             active_profile: Arc::new(Mutex::new(profile)),
             inode_tracker: Arc::new(Mutex::new(None)),
             reopen_lock: Arc::new(Mutex::new(())),
-            memory_manager: Arc::new(
-                crate::ai::memory::MemoryManager::open_in_memory().unwrap(),
-            ),
+            memory_manager: Arc::new(crate::ai::memory::MemoryManager::open_in_memory().unwrap()),
+            result_store: Arc::new(crate::ai::result_store::ResultStore::new()),
         })
+    }
+
+    #[tokio::test]
+    async fn executor_dispatches_fetch_rows_from_the_shared_scope() {
+        let context = create_mock_external_context(true);
+        // Seed a result in the shared external scope the executor will use.
+        let store = context.result_store.clone();
+        // One column: with zero columns the projection is empty and the
+        // page carries no cells, so there would be nothing to assert on.
+        let columns = vec![crate::ai::events::ColumnMeta {
+            name: "n".into(),
+            data_type: "int4".into(),
+        }];
+        let id = store
+            .store(
+                "external",
+                columns,
+                vec![vec![serde_json::json!(42)]],
+                "SELECT 42",
+                true,
+            )
+            .unwrap();
+        let executor = DynamicContextToolExecutor::new(context);
+        let out = executor
+            .call(
+                "fetch_rows",
+                serde_json::json!({"result_id": id, "offset": 0}),
+            )
+            .await
+            .expect("fetch_rows dispatches");
+        let text = serde_json::to_string(&out).unwrap();
+        assert!(text.contains("42"), "{text}");
     }
 
     #[tokio::test]
@@ -259,14 +312,40 @@ mod tests {
         let context = create_mock_external_context(false);
         let executor = DynamicContextToolExecutor::new(context);
 
-        let err = executor.call("run_readonly_query", serde_json::json!({"sql": "SELECT 1"})).await.unwrap_err();
+        let err = executor
+            .call("run_readonly_query", serde_json::json!({"sql": "SELECT 1"}))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("disabled"));
 
         let context_enabled = create_mock_external_context(true);
         let executor_enabled = DynamicContextToolExecutor::new(context_enabled);
 
-        let err = executor_enabled.call("preview_dml", serde_json::json!({"sql": "DELETE FROM t"})).await.unwrap_err();
-        assert!(err.to_string().contains("not allowed in external agent mode"));
+        let err = executor_enabled
+            .call("preview_dml", serde_json::json!({"sql": "DELETE FROM t"}))
+            .await
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("not allowed in external agent mode"));
+    }
+
+    #[tokio::test]
+    async fn executor_rejects_export_query() {
+        let context = create_mock_external_context(true);
+        let executor = DynamicContextToolExecutor::new(context);
+        let err = executor
+            .call(
+                "export_query",
+                serde_json::json!({"sql": "SELECT 1", "path": "/tmp/x.csv"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("not available in external agent mode"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
@@ -275,7 +354,10 @@ mod tests {
         let executor = DynamicContextToolExecutor::new(context);
 
         let err = executor
-            .call("search_query_history", serde_json::json!({"query": "SELECT"}))
+            .call(
+                "search_query_history",
+                serde_json::json!({"query": "SELECT"}),
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Query history search is disabled"));
@@ -359,30 +441,43 @@ mod tests {
             inode_tracker: Arc::new(Mutex::new(None)),
             reopen_lock: Arc::new(Mutex::new(())),
             memory_manager: mem_mgr,
+            result_store: Arc::new(crate::ai::result_store::ResultStore::new()),
         });
 
         let executor = DynamicContextToolExecutor::new(context);
 
         // Search for golden query
         let golden_res = executor
-            .call("search_query_history", serde_json::json!({"query": "monthly active users"}))
+            .call(
+                "search_query_history",
+                serde_json::json!({"query": "monthly active users"}),
+            )
             .await
             .unwrap();
         let golden_text = match golden_res {
             ToolOutput::Text { content } => content,
             _ => panic!("expected Text output"),
         };
-        assert!(golden_text.contains("monthly_users"), "golden query not found: {golden_text}");
+        assert!(
+            golden_text.contains("monthly_users"),
+            "golden query not found: {golden_text}"
+        );
 
         // Search for human history
         let history_res = executor
-            .call("search_query_history", serde_json::json!({"query": "orders_archive"}))
+            .call(
+                "search_query_history",
+                serde_json::json!({"query": "orders_archive"}),
+            )
             .await
             .unwrap();
         let history_text = match history_res {
             ToolOutput::Text { content } => content,
             _ => panic!("expected Text output"),
         };
-        assert!(history_text.contains("orders_archive"), "history entry not found: {history_text}");
+        assert!(
+            history_text.contains("orders_archive"),
+            "history entry not found: {history_text}"
+        );
     }
 }

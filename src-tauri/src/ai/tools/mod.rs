@@ -1,4 +1,8 @@
+pub mod bounded;
 pub mod execute;
+pub mod export;
+pub mod fetch_rows;
+pub mod inspect_connection;
 pub mod memory;
 pub mod objects;
 pub mod preflight;
@@ -34,6 +38,9 @@ pub struct AiToolContext {
     /// this handle — opening a fresh connection per call re-runs the DDL batch
     /// and bypasses the app's in-memory fallback (B-C2).
     pub memory_manager: Arc<crate::ai::memory::MemoryManager>,
+    /// Result-handle scope: the id this surface's results are fenced to, plus
+    /// the process store handle. Assigned by each surface (§6A.3).
+    pub result_scope: crate::ai::result_store::ResultScope,
 }
 
 impl Clone for AiToolContext {
@@ -48,6 +55,7 @@ impl Clone for AiToolContext {
             embedder: Arc::clone(&self.embedder),
             reranker: Arc::clone(&self.reranker),
             memory_manager: Arc::clone(&self.memory_manager),
+            result_scope: self.result_scope.clone(),
         }
     }
 }
@@ -59,6 +67,108 @@ pub fn test_memory_manager() -> Arc<crate::ai::memory::MemoryManager> {
     Arc::new(crate::ai::memory::MemoryManager::open_in_memory().expect("in-memory memory db opens"))
 }
 
+/// A neutral tool context for schema/description queries (no connection).
+/// Production-safe: `name()`/`description()`/`parameters()` never touch the
+/// in-memory memory db this carries.
+pub fn neutral_tool_ctx() -> AiToolContext {
+    AiToolContext {
+        db: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        connection_id: None,
+        memory_connection_key: None,
+        capabilities: None,
+        config: crate::ai::config::AiConfig::default(),
+        schema_graph: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        embedder: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        reranker: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        memory_manager: std::sync::Arc::new(
+            crate::ai::memory::MemoryManager::open_in_memory()
+                .expect("in-memory memory db for the neutral tool context"),
+        ),
+        result_scope: crate::ai::result_store::ResultScope::isolated("neutral"),
+    }
+}
+
+/// `{"query": string, "mode"?: "semantic"|"keyword"|"hybrid"}` — the argument
+/// shape at a glance (`?` = optional), derived from the JSON schema.
+fn compact_args(schema: &serde_json::Value) -> String {
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    let Some(props) = schema["properties"].as_object() else {
+        return "{}".into();
+    };
+    let fields: Vec<String> = props
+        .iter()
+        .map(|(name, spec)| {
+            let ty = match spec["enum"].as_array() {
+                Some(values) => values
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|v| format!("\"{v}\""))
+                    .collect::<Vec<_>>()
+                    .join("|"),
+                None => spec["type"].as_str().unwrap_or("value").to_string(),
+            };
+            let optional = if required.contains(&name.as_str()) {
+                ""
+            } else {
+                "?"
+            };
+            format!("\"{name}\"{optional}: {ty}")
+        })
+        .collect();
+    format!("{{{}}}", fields.join(", "))
+}
+
+/// The first sentence of a tool description — the prompt's map entry.
+fn first_sentence(text: &str) -> &str {
+    text.find(". ").map_or(text, |i| &text[..=i])
+}
+
+/// The prompt's tool section, generated from `LucentToolEnum` — the single
+/// source of truth (P1, F12). Compact on purpose (see the size test): full
+/// descriptions and schemas already reach the model natively. Cached: the
+/// schemas are static, and rebuilding per prompt would rebuild the neutral
+/// context on every turn.
+pub fn tool_docs_section() -> &'static str {
+    static DOCS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DOCS.get_or_init(|| {
+        let tools = all_tools(neutral_tool_ctx());
+        let mut out = String::from("AVAILABLE TOOLS:\n");
+        for (i, t) in tools.iter().enumerate() {
+            let description = t.description().replace('\n', " ");
+            out.push_str(&format!(
+                "\n{}. {} — {}\n   Args: {}\n",
+                i + 1,
+                t.name(),
+                first_sentence(&description),
+                compact_args(&t.parameters())
+            ));
+        }
+        out
+    })
+}
+
+/// A tool context bound to a live worker connection — the one literal the
+/// integration/capstone tests share.
+#[cfg(test)]
+pub fn live_tool_ctx(client: ConnectorClient, conn_id: ConnectionId) -> AiToolContext {
+    let capabilities = client.server_info.as_ref().map(|s| s.capabilities.clone());
+    AiToolContext {
+        db: Arc::new(Mutex::new(Some(client))),
+        connection_id: Some(conn_id),
+        memory_connection_key: None,
+        capabilities,
+        config: crate::ai::config::AiConfig::default(),
+        schema_graph: Arc::new(Mutex::new(None)),
+        embedder: Arc::new(Mutex::new(None)),
+        reranker: Arc::new(Mutex::new(None)),
+        memory_manager: test_memory_manager(),
+        result_scope: crate::ai::result_store::ResultScope::isolated("test"),
+    }
+}
+
 #[derive(Clone)]
 pub enum LucentToolEnum {
     GetObjectsInfo(objects::GetObjectsInfo),
@@ -68,6 +178,10 @@ pub enum LucentToolEnum {
     SaveMemory(memory::SaveMemory),
     SearchQueryHistory(memory::SearchQueryHistory),
     GetPreflightContext(preflight::GetPreflightContext),
+    ListMemories(memory::ListMemories),
+    InspectConnection(inspect_connection::InspectConnection),
+    ExportQuery(export::ExportQuery),
+    FetchRows(fetch_rows::FetchRows),
 }
 
 impl LucentToolEnum {
@@ -80,6 +194,10 @@ impl LucentToolEnum {
             LucentToolEnum::SaveMemory(_) => "save_memory",
             LucentToolEnum::SearchQueryHistory(_) => "search_query_history",
             LucentToolEnum::GetPreflightContext(_) => "get_preflight_context",
+            LucentToolEnum::ListMemories(_) => "list_memories",
+            LucentToolEnum::InspectConnection(_) => "inspect_connection",
+            LucentToolEnum::ExportQuery(_) => "export_query",
+            LucentToolEnum::FetchRows(_) => "fetch_rows",
         }
     }
 
@@ -92,6 +210,10 @@ impl LucentToolEnum {
             LucentToolEnum::SaveMemory(t) => t.description(),
             LucentToolEnum::SearchQueryHistory(t) => t.description(),
             LucentToolEnum::GetPreflightContext(t) => t.description(),
+            LucentToolEnum::ListMemories(t) => t.description(),
+            LucentToolEnum::InspectConnection(t) => t.description(),
+            LucentToolEnum::ExportQuery(t) => t.description(),
+            LucentToolEnum::FetchRows(t) => t.description(),
         }
     }
 
@@ -104,6 +226,10 @@ impl LucentToolEnum {
             LucentToolEnum::SaveMemory(t) => t.parameters(),
             LucentToolEnum::SearchQueryHistory(t) => t.parameters(),
             LucentToolEnum::GetPreflightContext(t) => t.parameters(),
+            LucentToolEnum::ListMemories(t) => t.parameters(),
+            LucentToolEnum::InspectConnection(t) => t.parameters(),
+            LucentToolEnum::ExportQuery(t) => t.parameters(),
+            LucentToolEnum::FetchRows(t) => t.parameters(),
         }
     }
 
@@ -120,6 +246,10 @@ impl LucentToolEnum {
             LucentToolEnum::SaveMemory(t) => t.call(args, ctx).await,
             LucentToolEnum::SearchQueryHistory(t) => t.call(args, ctx).await,
             LucentToolEnum::GetPreflightContext(t) => t.call(args, ctx).await,
+            LucentToolEnum::ListMemories(t) => t.call(args, ctx).await,
+            LucentToolEnum::InspectConnection(t) => t.call(args, ctx).await,
+            LucentToolEnum::ExportQuery(t) => t.call(args, ctx).await,
+            LucentToolEnum::FetchRows(t) => t.call(args, ctx).await,
         }
     }
 }
@@ -151,6 +281,11 @@ pub enum ToolOutput {
         sql: String,
         execution_time_ms: u64,
         truncated: bool,
+        /// Handle into the surface's result scope (§6A.3); `None` when the
+        /// result was too large to retain.
+        result_id: Option<String>,
+        /// Rows actually rendered into the model-visible block (§5.10).
+        rendered_rows: usize,
     },
     DmlPreview {
         sql: String,
@@ -161,6 +296,19 @@ pub enum ToolOutput {
     },
 }
 
+/// Tools notebook AI cells never get (ledger D1: cells do not write files).
+/// The ONE list both notebook seams read — the rig tool list and the ACP
+/// bridge executor — so they cannot drift.
+pub const NOTEBOOK_CELL_EXCLUDED_TOOLS: &[&str] = &["export_query"];
+
+/// `all_tools` minus a surface's exclusions.
+pub fn tools_excluding(ctx: AiToolContext, excluded: &[&str]) -> Vec<LucentToolEnum> {
+    all_tools(ctx)
+        .into_iter()
+        .filter(|t| !excluded.contains(&t.name()))
+        .collect()
+}
+
 pub fn all_tools(ctx: AiToolContext) -> Vec<LucentToolEnum> {
     vec![
         LucentToolEnum::SearchSchema(search_schema::SearchSchema::new(ctx.clone())),
@@ -169,6 +317,10 @@ pub fn all_tools(ctx: AiToolContext) -> Vec<LucentToolEnum> {
         LucentToolEnum::PreviewDml(execute::PreviewDml::new(ctx.clone())),
         LucentToolEnum::SaveMemory(memory::SaveMemory::new(ctx.clone())),
         LucentToolEnum::SearchQueryHistory(memory::SearchQueryHistory::new(ctx.clone())),
-        LucentToolEnum::GetPreflightContext(preflight::GetPreflightContext::new(ctx)),
+        LucentToolEnum::GetPreflightContext(preflight::GetPreflightContext::new(ctx.clone())),
+        LucentToolEnum::ListMemories(memory::ListMemories::new(ctx.clone())),
+        LucentToolEnum::InspectConnection(inspect_connection::InspectConnection::new(ctx.clone())),
+        LucentToolEnum::ExportQuery(export::ExportQuery::new(ctx.clone())),
+        LucentToolEnum::FetchRows(fetch_rows::FetchRows::new(ctx)),
     ]
 }

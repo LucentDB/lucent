@@ -35,6 +35,19 @@ pub fn validate_readonly(sql: &str, dialect: SqlDialect) -> Result<(), GuardErro
     validate_readonly_with_parser(sql, crate::dialect::parser_for(dialect))
 }
 
+/// True when `sql` parses as one EXPLAIN statement. Comments and case are the
+/// parser's problem, not a string prefix's. A parse failure reads as "not an
+/// EXPLAIN" — callers ask only after `validate_readonly` accepted the SQL.
+pub fn is_explain(sql: &str, dialect: SqlDialect) -> bool {
+    let Some(parser_dialect) = crate::dialect::parser_for(dialect) else {
+        return false;
+    };
+    matches!(
+        Parser::parse_sql(parser_dialect.as_ref(), sql).as_deref(),
+        Ok([Statement::Explain { .. }])
+    )
+}
+
 /// Split out so the fail-closed path is directly testable without inventing a
 /// protocol variant this build does not have.
 pub(crate) fn validate_readonly_with_parser(
@@ -127,15 +140,23 @@ fn explain_options_contain_analyze(options: &Option<Vec<UtilityOption>>) -> bool
 const FORBIDDEN_FUNCTIONS: &[&str] = &[
     "read_text",
     "read_csv",
+    "read_csv_auto",
     "read_parquet",
     "read_json",
+    "read_json_auto",
+    "read_ndjson",
+    "read_json_objects",
+    "read_ndjson_objects",
     "read_blob",
+    "read_file",
     "glob",
     "scan_parquet",
+    "parquet_scan",
     "scan_csv",
     "httpfs",
     "iceberg_scan",
     "delta_scan",
+    "st_read",
     "write_csv",
     "copy_to",
     "getenv",
@@ -275,10 +296,7 @@ fn check_expr(expr: &Expr) -> Result<(), GuardError> {
             Ok(())
         }
         Expr::Between {
-            expr,
-            low,
-            high,
-            ..
+            expr, low, high, ..
         } => {
             check_expr(expr)?;
             check_expr(low)?;
@@ -447,10 +465,11 @@ fn check_table_with_joins(twj: &TableWithJoins) -> Result<(), GuardError> {
             | JoinOperator::RightSemi(c)
             | JoinOperator::Anti(c)
             | JoinOperator::LeftAnti(c)
-            | JoinOperator::RightAnti(c) => match c {
-                JoinConstraint::On(expr) => check_expr(expr)?,
-                _ => {}
-            },
+            | JoinOperator::RightAnti(c) => {
+                if let JoinConstraint::On(expr) = c {
+                    check_expr(expr)?;
+                }
+            }
             _ => {}
         }
     }
@@ -479,13 +498,10 @@ fn check_setexpr_readonly(body: &SetExpr) -> Result<(), GuardError> {
             if let Some(selection) = &sel.selection {
                 check_expr(selection)?;
             }
-            match &sel.group_by {
-                sqlparser::ast::GroupByExpr::Expressions(exprs, _) => {
-                    for e in exprs {
-                        check_expr(e)?;
-                    }
+            if let sqlparser::ast::GroupByExpr::Expressions(exprs, _) = &sel.group_by {
+                for e in exprs {
+                    check_expr(e)?;
                 }
-                _ => {}
             }
             if let Some(having) = &sel.having {
                 check_expr(having)?;
@@ -778,6 +794,10 @@ mod tests {
             "SELECT * FROM read_text('/etc/passwd')",
             "SELECT * FROM main.read_text('/etc/passwd')",
             "SELECT * FROM duckdb.read_csv('data.csv')",
+            "SELECT * FROM read_csv_auto('/etc/passwd')",
+            "SELECT * FROM read_json_auto('/etc/passwd')",
+            "SELECT * FROM read_file('/etc/passwd')",
+            "SELECT * FROM parquet_scan('data.parquet')",
             "SELECT * FROM 'data.csv'",
             "SELECT * FROM '/etc/hosts'",
             "SELECT count(*) FROM glob('/*')",

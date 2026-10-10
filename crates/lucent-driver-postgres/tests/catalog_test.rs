@@ -3,7 +3,7 @@
 mod common;
 use common::seeded;
 
-use lucent_protocol::{CatalogRequest, CatalogResult, ForeignKey, ObjectKind, QueryId};
+use lucent_protocol::{CatalogRequest, CatalogResult, FactValue, ForeignKey, ObjectKind, QueryId};
 // ObjectRef is used fully-qualified (lucent_protocol::ObjectRef) in this file.
 use lucent_worker_host::Connector;
 use tokio::sync::mpsc;
@@ -98,6 +98,58 @@ async fn lists_objects_with_kinds_estimates_and_partition_metadata() {
     assert_eq!(partition.child_count, 1);
     assert!(!events.is_partition_child);
     assert!(by_name("events_2026").is_partition_child);
+}
+
+#[tokio::test]
+async fn connection_facts_report_identity_and_every_section_for_a_superuser() {
+    let (_c, connector, cid) = seeded().await;
+
+    let CatalogResult::ConnectionFacts(facts) = connector
+        .catalog(cid, CatalogRequest::ConnectionFacts)
+        .await
+        .expect("connection facts")
+    else {
+        panic!("expected ConnectionFacts");
+    };
+
+    let section = |n: &str| {
+        facts
+            .iter()
+            .find(|f| f.name == n)
+            .unwrap_or_else(|| panic!("missing section {n} in {facts:?}"))
+            .value
+            .clone()
+    };
+    let FactValue::Rows(identity) = section("identity") else {
+        panic!("identity must be rows");
+    };
+    let joined = identity.join("\n");
+    assert!(joined.contains("user="), "identity: {joined}");
+    assert!(joined.contains("search_path="), "identity: {joined}");
+
+    for f in &facts {
+        assert!(
+            !matches!(f.value, FactValue::Unavailable(_)),
+            "a superuser can read every section, but {} failed: {:?}",
+            f.name,
+            f.value
+        );
+    }
+
+    // The full section set, in emission order — a dropped or renamed section
+    // must fail here, not surface silently in the AI's metadata read.
+    let names: Vec<&str> = facts.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "identity",
+            "roles",
+            "extensions",
+            "available extensions",
+            "schema sizes"
+        ],
+        "section set: {names:?}"
+    );
 }
 
 #[tokio::test]

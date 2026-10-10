@@ -93,6 +93,11 @@ pub struct AiConfig {
     /// Per-connection kill-switch: connection keys where memory retrieval/injection is disabled.
     #[serde(default)]
     pub disabled_memory_connections: std::collections::HashSet<String>,
+    /// Per-turn cap on rows rendered into the model-visible `<result>` block.
+    /// Token-budgeted, not row-capped: wide and narrow rows differ ~10x
+    /// (D2.3). No Settings UI in this revision (spec §8 v0.3 #1).
+    #[serde(default = "default_preview_token_budget")]
+    pub preview_token_budget: u32,
 }
 
 impl AiConfig {
@@ -117,6 +122,9 @@ fn default_ai_query_timeout_secs() -> u64 {
 fn default_enable_ai_memory() -> bool {
     true
 }
+fn default_preview_token_budget() -> u32 {
+    1500
+}
 
 impl Default for AiConfig {
     fn default() -> Self {
@@ -136,6 +144,7 @@ impl Default for AiConfig {
             acp: None,
             enable_ai_memory: true,
             disabled_memory_connections: std::collections::HashSet::new(),
+            preview_token_budget: 1500,
         }
     }
 }
@@ -262,6 +271,17 @@ mod tests {
         for (provider, account) in expected {
             assert_eq!(keychain_account(&provider), account);
         }
+    }
+
+    #[test]
+    fn preview_token_budget_defaults_to_1500_and_survives_old_configs() {
+        assert_eq!(AiConfig::default().preview_token_budget, 1500);
+        let old_json = r#"{"provider":"openai","endpoint":null,"model":"gpt-4o","maxTokens":4096,"maxTurns":50,"rowLimit":500,"enableBlastRadiusCheck":true}"#;
+        let cfg: AiConfig = serde_json::from_str(old_json).expect("old config still parses");
+        assert_eq!(
+            cfg.preview_token_budget, 1500,
+            "missing field falls back to default"
+        );
     }
 
     #[test]

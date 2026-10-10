@@ -29,7 +29,7 @@ impl SaveMemory {
             "properties": {
                 "category": {
                     "type": "string",
-                    "enum": ["metric", "join", "quirk", "preference"],
+                    "enum": ["metric", "join", "quirk", "preference", "playbook"],
                     "description": "Category of the memory fact"
                 },
                 "key_phrase": {
@@ -296,6 +296,114 @@ impl SearchQueryHistory {
     }
 }
 
+#[derive(Clone)]
+pub struct ListMemories {
+    _ctx: AiToolContext,
+}
+
+/// Strict category parse at the `list_memories` tool boundary.
+/// `MemoryCategory::from_str` deliberately stays lenient (it hydrates legacy
+/// DB rows and serves `save_memory`), so the tool validates here instead: an
+/// unknown filter string errors naming the valid set rather than silently
+/// filtering as `Quirk`. The legacy `formatting_preference` alias is still
+/// accepted as `Preference`.
+fn parse_list_category(cat: &str) -> Result<MemoryCategory, ToolError> {
+    match cat {
+        "metric" => Ok(MemoryCategory::Metric),
+        "join" => Ok(MemoryCategory::Join),
+        "quirk" => Ok(MemoryCategory::Quirk),
+        "preference" | "formatting_preference" => Ok(MemoryCategory::Preference),
+        "playbook" => Ok(MemoryCategory::Playbook),
+        _ => {
+            let valid = [
+                MemoryCategory::Metric,
+                MemoryCategory::Join,
+                MemoryCategory::Quirk,
+                MemoryCategory::Preference,
+                MemoryCategory::Playbook,
+            ]
+            .iter()
+            .map(MemoryCategory::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+            Err(ToolError::InvalidArgs(format!(
+                "unknown category '{cat}': expected one of {valid}"
+            )))
+        }
+    }
+}
+
+impl ListMemories {
+    pub fn new(ctx: AiToolContext) -> Self {
+        Self { _ctx: ctx }
+    }
+
+    pub fn description(&self) -> String {
+        "List the database rules, metric definitions, join quirks, and user preferences \
+         Lucent has saved for this connection. Use it to reconcile duplicates or \
+         contradictions before saving a new rule or relying on an old one."
+            .into()
+    }
+
+    pub fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": ["metric", "join", "quirk", "preference", "playbook"],
+                    "description": "Optional category filter"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of rules to return (default: 20)"
+                }
+            }
+        })
+    }
+
+    pub async fn call(
+        &self,
+        args: serde_json::Value,
+        ctx: &AiToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let connection_key = ctx
+            .memory_connection_key
+            .clone()
+            .or_else(|| ctx.connection_id.map(|id| id.0.to_string()))
+            .unwrap_or_else(|| "global".into());
+        if !ctx.config.is_memory_enabled(&connection_key) {
+            return Err(ToolError::Execution(
+                "AI memory is disabled for this connection".into(),
+            ));
+        }
+
+        let limit = args["limit"].as_u64().unwrap_or(20).clamp(1, 50) as usize;
+        let mut items = ctx
+            .memory_manager
+            .list_memories(&connection_key, false)
+            .await
+            .map_err(|e| ToolError::Execution(format!("failed to list memories: {e}")))?;
+        if let Some(cat) = args["category"].as_str() {
+            let cat = parse_list_category(cat)?;
+            items.retain(|m| m.category == cat);
+        }
+        let total = items.len();
+        items.truncate(limit);
+
+        // B-I3: the same boundary tags, passive-data note and tag
+        // neutralization the prompt's memory block uses.
+        let content = match crate::ai::context::format_memory_block(&items, &[]) {
+            Some(block) => format!(
+                "Saved rules for this connection (showing {}/{total}):{block}",
+                items.len()
+            ),
+            None => "No saved rules for this connection.".to_string(),
+        };
+        Ok(ToolOutput::Text { content })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,6 +429,7 @@ mod tests {
             embedder: Arc::new(Mutex::new(None)),
             reranker: Arc::new(Mutex::new(None)),
             memory_manager: mgr,
+            result_scope: crate::ai::result_store::ResultScope::isolated("test"),
         }
     }
 
@@ -588,6 +697,182 @@ mod tests {
                 "golden query stored under the frontend key must be found: {content}"
             ),
             other => panic!("expected text output, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_memories_reads_through_ctx_manager() {
+        let mgr = Arc::new(MemoryManager::open_in_memory().unwrap());
+        let conn = ConnectionId(Uuid::nil());
+        let ctx = ctx(mgr.clone(), conn, AiConfig::default(), Some("conn-key"));
+        // Seed one memory through SaveMemory, then list it.
+        SaveMemory::new(ctx.clone())
+            .call(save_args(), &ctx)
+            .await
+            .unwrap();
+        let out = ListMemories::new(ctx.clone())
+            .call(json!({}), &ctx)
+            .await
+            .unwrap();
+        let ToolOutput::Text { content } = out else {
+            panic!("text output")
+        };
+        assert!(content.contains("active_subscribers"), "{content}");
+    }
+
+    /// B-I3: read-back is fenced exactly like prompt injection.
+    #[tokio::test]
+    async fn list_memories_renders_inside_the_memory_boundary() {
+        use crate::ai::memory::security::{MEMORY_BOUNDARY_CLOSE_TAG, MEMORY_BOUNDARY_OPEN_TAG};
+        let mgr = Arc::new(MemoryManager::open_in_memory().unwrap());
+        let ctx = ctx(
+            mgr,
+            ConnectionId(Uuid::nil()),
+            AiConfig::default(),
+            Some("conn-key"),
+        );
+        SaveMemory::new(ctx.clone())
+            .call(save_args(), &ctx)
+            .await
+            .unwrap();
+        let ToolOutput::Text { content } = ListMemories::new(ctx.clone())
+            .call(json!({}), &ctx)
+            .await
+            .unwrap()
+        else {
+            panic!("text output")
+        };
+        let open = content.find(MEMORY_BOUNDARY_OPEN_TAG).expect("open tag");
+        let close = content.find(MEMORY_BOUNDARY_CLOSE_TAG).expect("close tag");
+        let rule = content.find("active_subscribers").unwrap();
+        assert!(
+            open < rule && rule < close,
+            "the rule must sit inside the boundary: {content}"
+        );
+        assert!(
+            content.contains(crate::ai::context::MEMORY_BOUNDARY_NOTE),
+            "{content}"
+        );
+    }
+
+    /// B-I5: the kill-switch must stop `list_memories`.
+    #[tokio::test]
+    async fn list_memories_respects_the_memory_kill_switch() {
+        let mgr = Arc::new(MemoryManager::open_in_memory().unwrap());
+        let conn = ConnectionId(Uuid::nil());
+        let config = AiConfig {
+            enable_ai_memory: false,
+            ..Default::default()
+        };
+        let ctx = ctx(mgr, conn, config, Some("conn-key"));
+
+        let err = ListMemories::new(ctx.clone())
+            .call(json!({}), &ctx)
+            .await
+            .expect_err("disabled memory must refuse the list");
+        assert!(
+            matches!(err, ToolError::Execution(ref m) if m.contains("disabled")),
+            "got {err:?}"
+        );
+    }
+
+    /// Listing must use the frontend memory key when present, so rules saved
+    /// through the drawer under the same key are found instead of silently
+    /// listing an empty worker-UUID bucket.
+    #[tokio::test]
+    async fn list_memories_uses_frontend_memory_key_when_present() {
+        let mgr = Arc::new(MemoryManager::open_in_memory().unwrap());
+        let conn = ConnectionId(Uuid::nil());
+        let ctx = ctx(mgr.clone(), conn, AiConfig::default(), Some("frontend-key"));
+
+        SaveMemory::new(ctx.clone())
+            .call(save_args(), &ctx)
+            .await
+            .expect("save succeeds with memory enabled");
+
+        let out = ListMemories::new(ctx.clone())
+            .call(json!({}), &ctx)
+            .await
+            .expect("list succeeds with memory enabled");
+        let ToolOutput::Text { content } = out else {
+            panic!("text output")
+        };
+        assert!(
+            content.contains("active_subscribers"),
+            "memory stored under the frontend key must be listed: {content}"
+        );
+        assert!(
+            mgr.list_memories(&conn.0.to_string(), false)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the worker ConnectionId bucket must stay empty when the frontend key is present"
+        );
+    }
+
+    /// I1: `list_memories` must accept the `playbook` filter — `MemoryCategory`
+    /// has five variants and the drawer renders a Playbooks tab, but the tool
+    /// schema advertised only four, and the lenient parse mapped "playbook" to
+    /// `Quirk`, silently returning quirk rows instead of playbooks.
+    #[tokio::test]
+    async fn list_memories_filters_by_playbook_category() {
+        let mgr = Arc::new(MemoryManager::open_in_memory().unwrap());
+        let conn = ConnectionId(Uuid::nil());
+        let ctx = ctx(mgr.clone(), conn, AiConfig::default(), Some("conn-key"));
+
+        SaveMemory::new(ctx.clone())
+            .call(save_args(), &ctx)
+            .await
+            .unwrap();
+        SaveMemory::new(ctx.clone())
+            .call(
+                json!({
+                    "category": "playbook",
+                    "key_phrase": "deploy_checklist",
+                    "rule_text": "Run the deploy checklist before shipping"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let ToolOutput::Text { content } = ListMemories::new(ctx.clone())
+            .call(json!({ "category": "playbook" }), &ctx)
+            .await
+            .expect("playbook is a valid filter")
+        else {
+            panic!("text output")
+        };
+        assert!(
+            content.contains("deploy_checklist"),
+            "playbook memory must be listed: {content}"
+        );
+        assert!(
+            !content.contains("active_subscribers"),
+            "metric memory must be filtered out: {content}"
+        );
+    }
+
+    /// I1: an unknown category must error naming the valid set, not silently
+    /// filter as `Quirk`.
+    #[tokio::test]
+    async fn list_memories_rejects_unknown_category() {
+        let mgr = Arc::new(MemoryManager::open_in_memory().unwrap());
+        let conn = ConnectionId(Uuid::nil());
+        let ctx = ctx(mgr, conn, AiConfig::default(), Some("conn-key"));
+
+        let err = ListMemories::new(ctx.clone())
+            .call(json!({ "category": "bogus" }), &ctx)
+            .await
+            .expect_err("unknown category must be rejected");
+        match err {
+            ToolError::InvalidArgs(msg) => {
+                assert!(msg.contains("bogus"), "must name the offender: {msg}");
+                for valid in ["metric", "join", "quirk", "preference", "playbook"] {
+                    assert!(msg.contains(valid), "must name the valid set: {msg}");
+                }
+            }
+            other => panic!("expected InvalidArgs, got {other:?}"),
         }
     }
 }

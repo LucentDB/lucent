@@ -335,7 +335,7 @@ mod tests {
                 schema: "public".into(),
                 name: "orders".into(),
                 kind: "table".into(),
-                row_count_estimate: 0,
+                row_estimate: crate::ai::schema_graph::RowEstimate::default(),
                 partition_info: None,
             },
             TableEntry {
@@ -343,7 +343,7 @@ mod tests {
                 schema: "public".into(),
                 name: "users".into(),
                 kind: "table".into(),
-                row_count_estimate: 0,
+                row_estimate: crate::ai::schema_graph::RowEstimate::default(),
                 partition_info: None,
             },
         ];

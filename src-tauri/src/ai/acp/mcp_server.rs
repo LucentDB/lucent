@@ -30,26 +30,7 @@ pub fn lucent_tools_schema(ctx: AiToolContext) -> Vec<ToolSchema> {
 /// The tool schemas are static — `description()`/`parameters()` never touch
 /// the connection — so the binary builds them once from a neutral context.
 pub fn static_tool_schemas() -> Vec<ToolSchema> {
-    fn dummy_ctx() -> AiToolContext {
-        AiToolContext {
-            db: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-            connection_id: None,
-            memory_connection_key: None,
-            capabilities: None,
-            config: crate::ai::config::AiConfig::default(),
-            schema_graph: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-            embedder: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-            reranker: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-            // Schema listing never touches memory, so an isolated in-memory
-            // manager satisfies the field without opening the user's real
-            // `memory.db`. Production code — no `#[cfg(test)]` symbol.
-            memory_manager: std::sync::Arc::new(
-                crate::ai::memory::MemoryManager::open_in_memory()
-                    .expect("in-memory memory db for static tool schemas"),
-            ),
-        }
-    }
-    lucent_tools_schema(dummy_ctx())
+    lucent_tools_schema(crate::ai::tools::neutral_tool_ctx())
 }
 
 pub fn filter_external_tools(allowed_names: &[String]) -> Vec<ToolSchema> {
@@ -172,7 +153,11 @@ mod tests {
                 "preview_dml",
                 "save_memory",
                 "search_query_history",
-                "get_preflight_context"
+                "get_preflight_context",
+                "list_memories",
+                "inspect_connection",
+                "export_query",
+                "fetch_rows"
             ]
         );
         // Each schema is a JSON-schema object; search_schema requires "query".
@@ -263,19 +248,10 @@ mod tests {
             embedder: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             reranker: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             memory_manager: crate::ai::tools::test_memory_manager(),
+            result_scope: crate::ai::result_store::ResultScope::isolated("test"),
         };
         let schemas = lucent_tools_schema(ctx);
-        let direct = crate::ai::tools::all_tools(crate::ai::tools::AiToolContext {
-            db: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-            connection_id: None,
-            memory_connection_key: None,
-            capabilities: None,
-            config: crate::ai::config::AiConfig::default(),
-            schema_graph: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-            embedder: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-            reranker: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-            memory_manager: crate::ai::tools::test_memory_manager(),
-        });
+        let direct = crate::ai::tools::all_tools(crate::ai::tools::neutral_tool_ctx());
         assert_eq!(schemas.len(), direct.len());
         for (s, t) in schemas.iter().zip(direct.iter()) {
             assert_eq!(s.name, t.name());
@@ -286,7 +262,10 @@ mod tests {
 
     #[test]
     fn filter_external_tools_filters_by_descriptor_names() {
-        let allowed = vec!["run_readonly_query".to_string(), "get_preflight_context".to_string()];
+        let allowed = vec![
+            "run_readonly_query".to_string(),
+            "get_preflight_context".to_string(),
+        ];
         let filtered = filter_external_tools(&allowed);
         assert_eq!(filtered.len(), 2);
         assert!(filtered.iter().any(|t| t.name == "run_readonly_query"));

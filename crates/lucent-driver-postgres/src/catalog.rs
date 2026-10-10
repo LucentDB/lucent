@@ -10,9 +10,9 @@
 //! them into a string.
 
 use lucent_protocol::{
-    CatalogRequest, CatalogResult, ColumnDetail, ColumnPath, ForeignKey, ForeignKeyTarget,
-    LucentError, LucentErrorKind, Namespace, NamespacePath, ObjectDetail, ObjectKind,
-    ObjectProperty, ObjectRef, ObjectSummary, PartitionInfo, SearchHit,
+    CatalogRequest, CatalogResult, ColumnDetail, ColumnPath, FactSection, FactValue, ForeignKey,
+    ForeignKeyTarget, LucentError, LucentErrorKind, Namespace, NamespacePath, ObjectDetail,
+    ObjectKind, ObjectProperty, ObjectRef, ObjectSummary, PartitionInfo, SearchHit,
 };
 use tokio_postgres::Client;
 
@@ -115,6 +115,9 @@ pub async fn handle(
         CatalogRequest::GetObjectProperties { reference } => object_properties(client, &reference)
             .await
             .map(CatalogResult::Properties),
+        CatalogRequest::ConnectionFacts => Ok(CatalogResult::ConnectionFacts(
+            connection_facts(client).await,
+        )),
         // `CatalogRequest` is #[non_exhaustive]; a newer app could ask something
         // this worker does not know. Name it rather than answering wrongly.
         other => Err(LucentError::new(
@@ -122,6 +125,75 @@ pub async fn handle(
             format!("unsupported catalog request: {other:?}"),
         )),
     }
+}
+
+/// Cap per section: `pg_available_extensions` alone is ~100 rows.
+const FACT_ROW_CAP: usize = 200;
+
+/// `ConnectionFacts`: static, Lucent-authored reads. Each section degrades on
+/// its own — a role that cannot read `pg_extension` still gets its identity.
+async fn connection_facts(client: &Client) -> Vec<FactSection> {
+    const SECTIONS: &[(&str, &str)] = &[
+        (
+            "identity",
+            "SELECT 'user=' || current_user, 'database=' || current_database(), \
+                      'timezone=' || current_setting('TimeZone'), \
+                      'search_path=' || current_setting('search_path'), \
+                      'statement_timeout=' || current_setting('statement_timeout'), \
+                      'version=' || version()",
+        ),
+        (
+            "roles",
+            "SELECT rolname, CASE WHEN rolsuper THEN 'superuser' ELSE '' END \
+                   FROM pg_roles WHERE pg_has_role(current_user, oid, 'MEMBER') ORDER BY 1",
+        ),
+        (
+            "extensions",
+            "SELECT extname, extversion FROM pg_extension ORDER BY 1",
+        ),
+        (
+            "available extensions",
+            "SELECT name, default_version FROM pg_available_extensions \
+                                  WHERE installed_version IS NULL ORDER BY 1",
+        ),
+        (
+            "schema sizes",
+            "SELECT n.nspname, pg_size_pretty(SUM(pg_total_relation_size(c.oid))), \
+                          COUNT(*)::text || ' relations' \
+                          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+                          WHERE c.relkind IN ('r','m','p') \
+                            AND n.nspname NOT IN ('pg_catalog','information_schema') \
+                            AND n.nspname NOT LIKE 'pg_toast%' \
+                          GROUP BY 1 ORDER BY SUM(pg_total_relation_size(c.oid)) DESC NULLS LAST",
+        ),
+    ];
+    let mut out = Vec::with_capacity(SECTIONS.len());
+    for (name, sql) in SECTIONS {
+        let value = match client.simple_query(sql).await {
+            Ok(messages) => FactValue::Rows(
+                messages
+                    .iter()
+                    .filter_map(|m| match m {
+                        tokio_postgres::SimpleQueryMessage::Row(r) => Some(
+                            (0..r.len())
+                                .map(|i| r.get(i).unwrap_or("NULL"))
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        ),
+                        _ => None,
+                    })
+                    .take(FACT_ROW_CAP)
+                    .collect(),
+            ),
+            // Same message shape the module's other reads report.
+            Err(e) => FactValue::Unavailable(db_err(name, e).message),
+        };
+        out.push(FactSection {
+            name: (*name).to_string(),
+            value,
+        });
+    }
+    out
 }
 
 async fn list_namespaces(client: &Client) -> Result<Vec<Namespace>, LucentError> {

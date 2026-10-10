@@ -214,7 +214,7 @@ mod tests {
                     schema: c.schema.clone(),
                     name: c.table.clone(),
                     kind: "table".into(),
-                    row_count_estimate: 0,
+                    row_estimate: crate::ai::schema_graph::RowEstimate::default(),
                     partition_info: None,
                 });
             columns_by_table.entry(c.table_id).or_default().push(c.id);

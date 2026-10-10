@@ -396,7 +396,9 @@ pub struct ConversationState {
     pub created_at: Instant,
     /// run_readonly_query summaries keyed by normalized SQL — the model
     /// occasionally re-runs an identical query; serve it from here instead.
-    pub query_cache: std::collections::HashMap<String, String>,
+    /// The handle is checked for liveness on replay (D2.4): an evicted
+    /// result never replays its stale summary.
+    pub query_cache: std::collections::HashMap<String, CachedQuery>,
     /// The IPC channel the frontend created for this conversation. Kept so
     /// `execute_dml` can resume the agent on the same stream after the user
     /// approves a staged DML statement (C1). `Channel` is `Clone`; it is not
@@ -556,7 +558,9 @@ impl DatabaseAgent {
     ) -> Result<(), String> {
         let conversation_id = {
             let s = conv_state.lock().await;
-            s.conversation_id.clone().unwrap_or_else(|| s.connection_id.clone())
+            s.conversation_id
+                .clone()
+                .unwrap_or_else(|| s.connection_id.clone())
         };
 
         let agent = self
@@ -682,7 +686,9 @@ impl DatabaseAgent {
 
             // Check for duplicate queries in the conversation cache
             let cached_results: Vec<Option<String>> = {
-                let conv = conv_state.lock().await;
+                let mut conv = conv_state.lock().await;
+                let store = &self.ctx.result_scope.store;
+                let scope = self.ctx.result_scope.scope_id.clone();
                 response
                     .tool_calls
                     .iter()
@@ -690,7 +696,7 @@ impl DatabaseAgent {
                         if tc.name == "run_readonly_query" {
                             tc.args["sql"]
                                 .as_str()
-                                .and_then(|s| conv.query_cache.get(&normalize_sql(s)).cloned())
+                                .and_then(|s| lookup_cached_query(&mut conv, store, &scope, s))
                         } else {
                             None
                         }
@@ -856,6 +862,7 @@ impl DatabaseAgent {
                     row_count,
                     ref sql,
                     execution_time_ms,
+                    rendered_rows,
                     ..
                 } = output
                 {
@@ -865,6 +872,7 @@ impl DatabaseAgent {
                         row_count,
                         sql: sql.clone(),
                         execution_time_ms,
+                        rendered_rows,
                     });
                 }
 
@@ -879,23 +887,30 @@ impl DatabaseAgent {
                             description, sql, ..
                         } => format!("DML: {description}. SQL: {sql}"),
                     };
-                    truncate_tool_output(&raw)
+                    model_text_for_tool(&tc.name, raw)
                 };
 
-                // Store fresh query results in the conversation cache.
+                // Store fresh query results in the conversation cache — but
+                // only when the result was retained under a handle. Without
+                // one (too large to retain) a replay could not be checked
+                // for liveness, so the entry would serve stale rows (D2.4).
                 if tc.name == "run_readonly_query" {
                     if let (
                         Some(sql),
                         crate::ai::tools::ToolOutput::QueryResult {
-                            ref text_summary, ..
+                            ref text_summary,
+                            result_id: Some(id),
+                            ..
                         },
                     ) = (tc.args["sql"].as_str(), &output)
                     {
-                        conv_state
-                            .lock()
-                            .await
-                            .query_cache
-                            .insert(normalize_sql(sql), text_summary.clone());
+                        conv_state.lock().await.query_cache.insert(
+                            normalize_sql(sql),
+                            CachedQuery {
+                                result_id: id.clone(),
+                                summary: text_summary.clone(),
+                            },
+                        );
                     }
                 }
 
@@ -1028,6 +1043,44 @@ fn compact_history(history: Vec<Message>) -> Vec<Message> {
     out
 }
 
+/// A cached query summary plus the result handle it replays. The handle is
+/// checked for liveness on replay (D2.4): when the store evicted the result,
+/// the entry is dropped instead of serving a stale summary.
+pub struct CachedQuery {
+    pub result_id: String,
+    pub summary: String,
+}
+
+/// Serve an identical re-query from the conversation cache, but only while
+/// its result handle is still live in the scope's store. Dead entries are
+/// dropped so a re-run executes fresh instead of replaying stale rows.
+fn lookup_cached_query(
+    conv: &mut ConversationState,
+    store: &crate::ai::result_store::ResultStore,
+    scope: &str,
+    sql: &str,
+) -> Option<String> {
+    let key = normalize_sql(sql);
+    let cached = conv.query_cache.get(&key)?;
+    if store.contains(scope, &cached.result_id) {
+        Some(cached.summary.clone())
+    } else {
+        conv.query_cache.remove(&key);
+        None
+    }
+}
+
+/// The model-visible text of one tool result. The result block is budgeted
+/// by construction; cutting it again at 5000 bytes would bisect the
+/// delimited block (§6A.2 output caps).
+pub(crate) fn model_text_for_tool(name: &str, raw: String) -> String {
+    if matches!(name, "run_readonly_query" | "fetch_rows") {
+        raw
+    } else {
+        truncate_tool_output(&raw)
+    }
+}
+
 /// Cap a single tool output at 5000 bytes for the LLM context window.
 fn truncate_tool_output(raw: &str) -> String {
     if raw.len() > 5000 {
@@ -1090,7 +1143,7 @@ fn strip_sql_comments(sql: &str) -> String {
 /// Whitespace-normalize SQL for duplicate detection. Comments are stripped
 /// first (a comment-only variant defeated the cache in production); case is
 /// preserved — string literals are case-sensitive.
-fn normalize_sql(sql: &str) -> String {
+pub(crate) fn normalize_sql(sql: &str) -> String {
     strip_sql_comments(sql)
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -1263,16 +1316,72 @@ mod query_cache_tests {
     fn conversation_state_caches_and_returns_summaries() {
         let mut state = ConversationState::new("conn_1".into());
         assert!(state.query_cache.is_empty());
-        state
-            .query_cache
-            .insert(normalize_sql("SELECT 1;"), "Result: 1 rows".into());
+        state.query_cache.insert(
+            normalize_sql("SELECT 1;"),
+            CachedQuery {
+                result_id: "r_1".into(),
+                summary: "Result: 1 rows".into(),
+            },
+        );
         assert_eq!(
             state
                 .query_cache
                 .get(&normalize_sql("SELECT  1"))
-                .map(String::as_str),
+                .map(|c| c.summary.as_str()),
             Some("Result: 1 rows"),
         );
+    }
+
+    #[test]
+    fn cached_query_replays_only_while_its_result_is_live() {
+        use crate::ai::result_store::ResultStore;
+        let store = ResultStore::with_limits(1, 1 << 20, 1 << 30);
+        let mut conv = ConversationState::new("c".into());
+        let id = store
+            .store(
+                "s",
+                vec![],
+                vec![vec![serde_json::json!("a".repeat(80))]],
+                "SELECT 1",
+                true,
+            )
+            .unwrap();
+        conv.query_cache.insert(
+            normalize_sql("SELECT 1"),
+            CachedQuery {
+                result_id: id.clone(),
+                summary: "cached summary".into(),
+            },
+        );
+        assert_eq!(
+            lookup_cached_query(&mut conv, &store, "s", "SELECT 1"),
+            Some("cached summary".into())
+        );
+        // Evict by filling the 1-result scope.
+        let _ = store.store(
+            "s",
+            vec![],
+            vec![vec![serde_json::json!("b".repeat(80))]],
+            "SELECT 2",
+            true,
+        );
+        assert_eq!(
+            lookup_cached_query(&mut conv, &store, "s", "SELECT 1"),
+            None,
+            "dead handle must not replay"
+        );
+        assert!(conv.query_cache.is_empty(), "the dead entry is dropped");
+    }
+
+    #[test]
+    fn query_result_tools_bypass_the_5000_byte_cut() {
+        let long = "x".repeat(9_000);
+        assert_eq!(
+            model_text_for_tool("run_readonly_query", long.clone()),
+            long
+        );
+        assert_eq!(model_text_for_tool("fetch_rows", long.clone()), long);
+        assert!(model_text_for_tool("search_schema", long.clone()).contains("[truncated"));
     }
 }
 

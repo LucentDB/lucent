@@ -26,8 +26,9 @@ interface ToolCallLike {
 const PHRASES: Record<string, (n: number) => string> = {
   run_readonly_query: (n) => `ran ${n} ${n === 1 ? 'query' : 'queries'}`,
   get_objects_info: () => 'inspected schema',
-  search_objects: () => 'searched schema',
+  search_schema: () => 'searched schema',
   preview_dml: (n) => `previewed ${n} ${n === 1 ? 'change' : 'changes'}`,
+  fetch_rows: (n) => `fetched ${n} more ${n === 1 ? 'page' : 'pages'}`,
 };
 
 /**

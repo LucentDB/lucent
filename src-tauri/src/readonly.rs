@@ -56,6 +56,7 @@ pub struct ReadOnlySession {
     client: ConnectorClient,
     conn_id: ConnectionId,
     teardown: Vec<String>,
+    _sequence: Option<crate::sequence_lock::SequenceGuard>,
 }
 
 impl ReadOnlySession {
@@ -70,6 +71,11 @@ impl ReadOnlySession {
         capabilities: &DriverCapabilities,
         timeout_ms: u64,
     ) -> Result<Self, String> {
+        // Order this sequence against every other AI sequence on the same
+        // connection BEFORE the first setup statement — including the
+        // GuardOnly/SessionFlag case with no setup statements, whose query
+        // must still not interleave with another sequence's transaction.
+        let guard = client.lock_sequence(conn_id, timeout_ms.max(5_000)).await?;
         let setup = setup_statements(
             capabilities.readonly,
             capabilities.statement_timeout,
@@ -99,6 +105,7 @@ impl ReadOnlySession {
             } else {
                 teardown_statements(capabilities.readonly)
             },
+            _sequence: Some(guard),
         })
     }
 
@@ -115,6 +122,8 @@ impl ReadOnlySession {
         for stmt in statements {
             let _ = self.client.execute(self.conn_id, &stmt).await;
         }
+        // `self._sequence` drops here, after the teardown round trips —
+        // the next sequence cannot start before this one's ROLLBACK lands.
     }
 }
 
@@ -129,10 +138,15 @@ impl Drop for ReadOnlySession {
         let client = self.client.clone();
         let conn_id = self.conn_id;
         let statements = std::mem::take(&mut self.teardown);
+        let seq = self._sequence.take();
         tokio::spawn(async move {
             for stmt in statements {
                 let _ = client.execute(conn_id, &stmt).await;
             }
+            // Release the sequence lock only after the ROLLBACK round trip,
+            // so the next sequence cannot start before this one's teardown
+            // lands (the C7 race, closed structurally).
+            drop(seq);
         });
     }
 }
@@ -295,6 +309,7 @@ mod tests {
                         },
                         sequence: 0,
                         is_final: true,
+                        worker_ms: None,
                     },
                 )
                 .await
@@ -401,6 +416,7 @@ mod tests {
                         },
                         sequence: 0,
                         is_final: true,
+                        worker_ms: None,
                     },
                 )
                 .await

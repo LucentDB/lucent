@@ -36,6 +36,7 @@ pub struct AcpChatDriver {
     pub acp_state: AcpState,
     pub acp: AcpAgentConfig,
     pub tool_ctx: AiToolContext,
+    excluded_tools: &'static [&'static str],
 }
 
 impl AcpChatDriver {
@@ -44,7 +45,14 @@ impl AcpChatDriver {
             acp_state,
             acp,
             tool_ctx,
+            excluded_tools: &[],
         }
+    }
+
+    /// Tools this driver's sessions must not offer (notebook cells: ledger D1).
+    pub fn with_excluded_tools(mut self, excluded: &'static [&'static str]) -> Self {
+        self.excluded_tools = excluded;
+        self
     }
 
     /// One ACP turn: acquire the agent process, get-or-create the
@@ -93,16 +101,31 @@ impl AcpChatDriver {
         // and delivers the bridge config via session/new's mcpServers.
         let session = self
             .acp_state
-            .session_for(&session_key, &process, &self.tool_ctx, &sink)
+            .session_for_filtered(
+                &session_key,
+                &process,
+                &self.tool_ctx,
+                &sink,
+                self.excluded_tools,
+            )
             .await?;
         let conn = self.acp_state.ensure_connection(&process).await?;
         let mut events_rx = conn.events.subscribe();
 
         let first_prompt = session.first_prompt.swap(false, Ordering::SeqCst);
+        let (inject, memory_hash) = memory_delta(
+            &system_prompt,
+            session.last_memory_hash.load(Ordering::SeqCst),
+        );
+        session
+            .last_memory_hash
+            .store(memory_hash, Ordering::SeqCst);
         // ACP delivers the system prompt — and therefore its memory block — only
-        // on a session's first turn; a follow-up sends just the user message.
-        // Report the count only when the rules were actually delivered (F-C2).
-        let delivered_memory_count = if first_prompt {
+        // on a session's first turn; a follow-up re-attaches the block only when
+        // it changed (F13), otherwise the session already holds it.
+        // F-C2: report rules only when the session holds them — delivered now
+        // (first prompt or a changed block) or delivered earlier unchanged.
+        let delivered_memory_count = if memory_hash != 0 {
             applied_memory_count
         } else {
             0
@@ -131,7 +154,7 @@ impl AcpChatDriver {
                 tool_helper_path(&self.acp.agent_id, &session_key),
             )
         } else {
-            message
+            followup_prompt_text(inject, &message)
         };
         if let Some(content) = notice {
             sink.event(AiEvent::Notice { content });
@@ -533,14 +556,20 @@ pub fn tool_result_text(tu: &ToolCallUpdate) -> String {
 /// The first-prompt tools guidance, prepended when the agent connected
 /// Lucent's DB-tool bridge (spec D4).
 fn acp_tool_guidance() -> String {
-    "\n\nDATABASE TOOLS IN ACP (via MCP):\n\
-     You have access to Lucent's database MCP server (lucent-db-tools) providing: search_schema, get_objects_info, run_readonly_query, preview_dml.\n\
-     CRITICAL INSTRUCTIONS:\n\
-     - ALWAYS use `run_readonly_query` to query the connected database, and `search_schema` / `get_objects_info` to inspect schemas and tables.\n\
-     - NEVER attempt to inspect or open local database files (such as .duckdb, .sqlite, .db) from disk using bash or python — all database queries must go through the database tools to reach the user's active database connection.\n\
-     - If your runtime lists MCP tools, invoke `search_schema`, `get_objects_info`, `run_readonly_query`, `preview_dml` as native tool calls. If your runtime runs in a bash-only harness, invoke `./lucent-tool <tool_name> '<json_arguments>'` from your current directory.\n\
-     Both methods execute directly against the live database through Lucent."
-        .to_string()
+    let names = crate::ai::tools::all_tools(crate::ai::tools::neutral_tool_ctx())
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "\n\nDATABASE TOOLS IN ACP (via MCP):\n\
+         You have access to Lucent's database MCP server (lucent-db-tools) providing: {names}.\n\
+         CRITICAL INSTRUCTIONS:\n\
+         - ALWAYS use `run_readonly_query` to query the connected database, and `search_schema` / `get_objects_info` to inspect schemas and tables.\n\
+         - NEVER attempt to inspect or open local database files (such as .duckdb, .sqlite, .db) from disk using bash or python — all database queries must go through the database tools to reach the user's active database connection.\n\
+         - If your runtime lists MCP tools, invoke them as native tool calls. If your runtime runs in a bash-only harness, invoke `./lucent-tool <tool_name> '<json_arguments>'` from your current directory.\n\
+         Both methods execute directly against the live database through Lucent."
+    )
 }
 
 /// The fallback guidance when the agent runtime has not connected MCP over
@@ -566,6 +595,8 @@ fn acp_fallback_tool_guidance(agent_id: &str, tool_path: Option<String>) -> Stri
          - `./lucent-tool get_objects_info '{{\"objects\":[{{\"schema\":\"public\",\"kind\":\"table\",\"name\":\"orders\"}}]}}'` — columns, types, constraints.\n\
          - `./lucent-tool run_readonly_query '{{\"sql\":\"SELECT count(*) FROM public.orders\"}}'` — execute SELECT/WITH/EXPLAIN.\n\
          - `./lucent-tool preview_dml '{{\"sql\":\"UPDATE ...\"}}'` — stage one INSERT/UPDATE/DELETE for the user to approve. It never executes on its own.\n\
+         - `./lucent-tool export_query '{{\"sql\":\"SELECT ...\",\"path\":\"/absolute/path.csv\"}}'` — export a read-only query's full result to a file. Optional `\"format\":\"csv|json|sql_insert\"` (inferred from the extension otherwise); `sql_insert` requires `\"table_name\"` (an unqualified name).\n\
+         - `./lucent-tool fetch_rows '{{\"result_id\":\"r_…\",\"offset\":40}}'` — read more rows of a result you already ran (optional `\"limit\"`, `\"columns\"`, `\"cell_chars\"`). Never re-run a query to see rows you were not shown.\n\
          \n\
          SHORTHAND: a bare (non-JSON) argument is read as that tool's primary field, which avoids nesting JSON inside shell quoting:\n\
          - `./lucent-tool run_readonly_query \"SELECT count(*) FROM public.orders\"`\n\
@@ -641,6 +672,44 @@ pub fn first_prompt_text(
             "{system_prompt}{}\n\n{message}",
             acp_fallback_tool_guidance(agent_id, tool_path)
         )
+    }
+}
+
+/// The memory/golden-queries suffix of a per-turn system prompt. ACP delivers
+/// the system prompt only on a session's FIRST turn, so follow-ups re-attach
+/// this block to the user message — otherwise recall is first-turn-only
+/// (F13/P10) and rules learned mid-session never reach the model.
+fn memory_suffix(system_prompt: &str) -> Option<&str> {
+    let start = [
+        crate::ai::context::MEMORY_BREAKPOINT_HEADER,
+        crate::ai::context::GOLDEN_QUERIES_HEADER,
+    ]
+    .iter()
+    .filter_map(|m| system_prompt.find(m))
+    .min()?;
+    Some(&system_prompt[start..])
+}
+
+/// The suffix to re-attach on a follow-up (None when the session already holds
+/// an identical block, or there is none), plus the hash to record as delivered.
+/// Hash 0 means "no memory block". `DefaultHasher` is fine: the value lives
+/// only in this process's in-memory session map.
+fn memory_delta(system_prompt: &str, last_delivered: u64) -> (Option<&str>, u64) {
+    use std::hash::{Hash, Hasher};
+    let Some(suffix) = memory_suffix(system_prompt) else {
+        return (None, 0);
+    };
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    suffix.hash(&mut h);
+    let hash = h.finish().max(1);
+    let inject = (hash != last_delivered).then_some(suffix);
+    (inject, hash)
+}
+
+fn followup_prompt_text(inject: Option<&str>, message: &str) -> String {
+    match inject {
+        Some(suffix) => format!("{suffix}\n\n{message}"),
+        None => message.to_string(),
     }
 }
 
@@ -739,7 +808,7 @@ async fn wait_until(deadline: Option<tokio::time::Instant>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::ai::acp::correlator::BufferedToolResult;
     use crate::ai::agent::CollectorSink;
@@ -788,7 +857,9 @@ mod tests {
     pub(crate) struct EnvVarGuard<'a>(
         &'a str,
         Option<String>,
-        Option<std::sync::MutexGuard<'static, ()>>,
+        // Held, never read: keeping the guard alive is what serializes the
+        // env-var-mutating tests; dropping it happens after the env restore.
+        #[allow(dead_code)] Option<std::sync::MutexGuard<'static, ()>>,
     );
     impl Drop for EnvVarGuard<'_> {
         fn drop(&mut self) {
@@ -843,6 +914,7 @@ mod tests {
             embedder: Arc::new(AsyncMutex::new(None)),
             reranker: Arc::new(AsyncMutex::new(None)),
             memory_manager: crate::ai::tools::test_memory_manager(),
+            result_scope: crate::ai::result_store::ResultScope::isolated("test"),
         }
     }
 
@@ -1214,6 +1286,24 @@ mod tests {
     }
 
     #[test]
+    fn acp_native_guidance_lists_every_tool_from_the_enum() {
+        let g = acp_tool_guidance();
+        let all = crate::ai::tools::all_tools(crate::ai::tools::neutral_tool_ctx());
+        assert!(!all.is_empty());
+        for t in &all {
+            assert!(
+                g.contains(t.name()),
+                "guidance is missing tool {}",
+                t.name()
+            );
+        }
+        assert!(
+            g.contains("get_preflight_context"),
+            "the hand-written list dropped it (F12): {g}"
+        );
+    }
+
+    #[test]
     fn cli_guidance_spells_out_every_tool_argument_shape() {
         // A CLI-path agent has no `tools/list` to read the schemas from, so the
         // guidance is the only place it can learn them. Guessing costs a turn.
@@ -1223,6 +1313,8 @@ mod tests {
             r#"get_objects_info '{"objects""#,
             r#"run_readonly_query '{"sql""#,
             r#"preview_dml '{"sql""#,
+            r#"export_query '{"sql""#,
+            r#"fetch_rows '{"result_id""#,
         ] {
             assert!(g.contains(field), "missing arg shape {field}: {g}");
         }
@@ -1374,6 +1466,52 @@ mod tests {
         );
     }
 
+    fn system_with(rule: &str) -> String {
+        format!(
+            "base prompt\n{}\n- rule: {rule}",
+            crate::ai::context::MEMORY_BREAKPOINT_HEADER
+        )
+    }
+
+    #[test]
+    fn followup_turn_carries_a_changed_memory_suffix() {
+        let first = system_with("use status='paid'");
+        let (_, delivered) = memory_delta(&first, 0); // turn 1 delivered it in the system prompt
+        let next = system_with("use status IN ('paid','settled')");
+        let (inject, _) = memory_delta(&next, delivered);
+        let text = followup_prompt_text(inject, "what changed?");
+        assert!(text.contains("'settled'"), "{text}");
+        assert!(text.ends_with("what changed?"), "{text}");
+    }
+
+    #[test]
+    fn an_unchanged_memory_block_is_not_resent() {
+        let system = system_with("use status='paid'");
+        let (_, delivered) = memory_delta(&system, 0);
+        let (inject, again) = memory_delta(&system, delivered);
+        assert!(inject.is_none(), "the session already holds this block");
+        assert_eq!(again, delivered);
+        assert_eq!(followup_prompt_text(inject, "hi"), "hi");
+    }
+
+    #[test]
+    fn followup_turn_without_memories_is_the_bare_message() {
+        let (inject, hash) = memory_delta("base prompt", 0);
+        assert_eq!((inject, hash), (None, 0));
+        assert_eq!(followup_prompt_text(inject, "hi"), "hi");
+    }
+
+    #[test]
+    fn memory_suffix_starts_at_the_first_marker() {
+        let system = format!(
+            "base\n{}\ngolden\n{}",
+            crate::ai::context::GOLDEN_QUERIES_HEADER,
+            crate::ai::context::MEMORY_BREAKPOINT_HEADER
+        );
+        let suffix = memory_suffix(&system).unwrap();
+        assert!(suffix.starts_with(crate::ai::context::GOLDEN_QUERIES_HEADER));
+    }
+
     #[tokio::test]
     async fn followup_prompts_send_message_directly() {
         let _ws = hermetic_workspace();
@@ -1395,7 +1533,12 @@ mod tests {
             .chat(
                 "first msg".into(),
                 &AiConfig::default(),
-                "system preamble".into(),
+                // Turn 1 genuinely carries a memory block, so the applied
+                // count of 3 is actually delivered (F-C2 honesty).
+                format!(
+                    "system preamble\n{}\n- rule: use status='paid'",
+                    crate::ai::context::MEMORY_BREAKPOINT_HEADER
+                ),
                 conv.clone(),
                 sink.clone(),
                 tokio_util::sync::CancellationToken::new(),

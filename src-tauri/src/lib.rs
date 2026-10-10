@@ -15,6 +15,7 @@ mod query_paging;
 #[cfg(feature = "integration-tests")]
 mod query_paging_integration_test;
 mod readonly;
+pub(crate) mod sequence_lock;
 mod sql_builder;
 mod sql_quote;
 pub mod ssh;

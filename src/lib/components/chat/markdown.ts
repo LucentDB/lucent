@@ -29,7 +29,7 @@ DOMPurify.addHook('uponSanitizeElement', (node, data) => {
   if (data.tagName === 'input' && node instanceof Element) {
     const type = node.getAttribute('type')?.toLowerCase().trim();
     if (type !== 'checkbox') {
-      node.parentNode?.removeChild(node);
+      node.remove();
     }
   }
 });
@@ -48,6 +48,12 @@ const FORBIDDEN_MARKDOWN_TAGS = [
   'base',
   'meta',
   'link',
+  'option',
+  'optgroup',
+  'fieldset',
+  'legend',
+  'datalist',
+  'output',
 ];
 
 const SQL_LANGUAGES = new Set([
@@ -79,7 +85,7 @@ export function renderMarkdown(text: string): string {
     const html = typeof result === 'string' ? result : String(result);
     return DOMPurify.sanitize(html, {
       FORBID_TAGS: FORBIDDEN_MARKDOWN_TAGS,
-      FORBID_ATTR: ['autofocus'],
+      FORBID_ATTR: ['autofocus', 'style'],
       // Only safe link protocols and relative paths, so `data:`, `javascript:`,
       // `blob:`, and protocol-relative `//host` URLs are dropped.
       ALLOWED_URI_REGEXP:

@@ -7,7 +7,7 @@ use crate::error::LucentErrorKind;
 
 /// Bump whenever the wire format changes (new variants, changed fields).
 /// Worker and app must agree; the handshake rejects mismatches loudly.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConnectionId(pub Uuid);
@@ -190,6 +190,12 @@ pub enum WorkerResponse {
         shape: ResultShape,
         sequence: u32,
         is_final: bool,
+        /// Milliseconds inside the WORKER, from dispatching the statement to
+        /// its driver until the last row was forwarded. NOT database time: it
+        /// includes the worker↔DB network (e.g. an SSH tunnel), Postgres's
+        /// prepare round trip and worker backpressure (§6A.5). Set on the
+        /// final batch only; `None` on every other batch.
+        worker_ms: Option<u64>,
     },
     Error {
         kind: LucentErrorKind,
@@ -354,6 +360,7 @@ mod tests {
             },
             sequence: 0,
             is_final: true,
+            worker_ms: Some(1234),
         };
 
         let bytes = bincode::serialize(&response).unwrap();
@@ -361,15 +368,45 @@ mod tests {
 
         match decoded {
             WorkerResponse::ResultBatch {
-                shape, is_final, ..
+                shape,
+                is_final,
+                worker_ms,
+                ..
             } => match shape {
                 ResultShape::Tabular { rows, .. } => {
                     assert_eq!(rows.len(), 2);
                     assert!(is_final);
+                    assert_eq!(worker_ms, Some(1234));
                 }
                 other => panic!("expected Tabular shape, got {other:?}"),
             },
             _ => panic!("expected ResultBatch variant"),
+        }
+    }
+
+    #[test]
+    fn round_trips_a_result_batch_without_worker_ms() {
+        let response = WorkerResponse::ResultBatch {
+            query_id: QueryId(uuid::Uuid::new_v4()),
+            shape: ResultShape::Affected { rows_affected: 1 },
+            sequence: 3,
+            is_final: false,
+            worker_ms: None,
+        };
+        let bytes = bincode::serialize(&response).unwrap();
+        let decoded: WorkerResponse = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            WorkerResponse::ResultBatch {
+                worker_ms,
+                is_final,
+                sequence,
+                ..
+            } => {
+                assert_eq!(worker_ms, None);
+                assert!(!is_final);
+                assert_eq!(sequence, 3);
+            }
+            other => panic!("expected ResultBatch, got {other:?}"),
         }
     }
 
@@ -380,14 +417,19 @@ mod tests {
             shape: ResultShape::Affected { rows_affected: 14 },
             sequence: 0,
             is_final: true,
+            worker_ms: Some(7),
         };
         let bytes = bincode::serialize(&response).unwrap();
         let decoded: WorkerResponse = bincode::deserialize(&bytes).unwrap();
         match decoded {
             WorkerResponse::ResultBatch {
                 shape: ResultShape::Affected { rows_affected },
+                worker_ms,
                 ..
-            } => assert_eq!(rows_affected, 14),
+            } => {
+                assert_eq!(rows_affected, 14);
+                assert_eq!(worker_ms, Some(7));
+            }
             other => panic!("expected Affected: {other:?}"),
         }
     }
@@ -401,8 +443,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_seven() {
-        assert_eq!(PROTOCOL_VERSION, 7);
+    fn protocol_version_is_nine() {
+        assert_eq!(PROTOCOL_VERSION, 9);
     }
 
     #[test]

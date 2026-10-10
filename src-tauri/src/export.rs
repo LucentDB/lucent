@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExportFormat {
     Csv,
     Json,

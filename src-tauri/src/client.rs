@@ -42,6 +42,11 @@ pub struct ExecuteResult {
     /// truncated count; the remaining rows were never materialized.
     #[serde(default)]
     pub truncated: bool,
+    /// Milliseconds inside the worker (§6A.5), from dispatch to the last row
+    /// forwarded. `None` when the client truncated before the worker's final
+    /// batch (the worker never sent its timing).
+    #[serde(default)]
+    pub worker_ms: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -51,6 +56,7 @@ pub struct ConnectorClient {
     sync_pending: Arc<Mutex<HashMap<ConnectionId, oneshot::Sender<WorkerResponse>>>>,
     reader_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     pub server_info: Option<ServerInfo>,
+    sequence_locks: Arc<crate::sequence_lock::SequenceLocks>,
 }
 
 /// Removes the pending-map entry when the execute/catalog future is dropped
@@ -103,7 +109,7 @@ impl ConnectorClient {
         match ack {
             WorkerResponse::HandshakeAccepted => {}
             WorkerResponse::Error { kind, message, .. } => {
-                return Err(format!("{kind}: {message}"));
+                return Err(handshake_error(kind, &message));
             }
             other => return Err(format!("unexpected handshake response: {other:?}")),
         }
@@ -235,9 +241,19 @@ impl ConnectorClient {
                 sync_pending,
                 reader_handle: Arc::new(Mutex::new(Some(reader_handle))),
                 server_info: Some(server_info),
+                sequence_locks: Arc::default(),
             },
             connection_id,
         ))
+    }
+
+    /// See `sequence_lock`. Every AI statement sequence takes this first.
+    pub async fn lock_sequence(
+        &self,
+        conn_id: ConnectionId,
+        wait_ms: u64,
+    ) -> Result<crate::sequence_lock::SequenceGuard, String> {
+        self.sequence_locks.acquire(conn_id, wait_ms).await
     }
 
     /// Serialize one request and write it to the worker socket (flush included).
@@ -331,6 +347,32 @@ impl ConnectorClient {
             .await
     }
 
+    /// Execute with a client-side deadline. On expiry the worker's native
+    /// cancel is fired for exactly this query id (F16: engines that declare
+    /// `TimeoutSupport::Interrupt` have no server-side statement_timeout, so
+    /// this is the only bound). Cancellation-safe by construction: the
+    /// dropped `execute_with_id` future's `PendingGuard` (C9) removes its
+    /// pending entry, so no response can accumulate.
+    pub async fn execute_with_deadline(
+        &self,
+        query_id: QueryId,
+        connection_id: ConnectionId,
+        sql: &str,
+        max_rows: Option<usize>,
+        timeout_ms: u64,
+    ) -> Result<ExecuteResult, String> {
+        let fut = self.execute_with_id(query_id, connection_id, sql, max_rows);
+        match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), fut).await {
+            Ok(res) => res.map(|(result, _)| result),
+            Err(_) => {
+                let _ = self.cancel(connection_id, query_id).await;
+                Err(format!(
+                    "query exceeded the {timeout_ms}ms AI query deadline and was cancelled"
+                ))
+            }
+        }
+    }
+
     async fn execute_with_id_impl(
         &self,
         query_id: QueryId,
@@ -373,6 +415,7 @@ impl ConnectorClient {
         let mut all_columns: Option<Arc<Vec<ColumnMeta>>> = None;
         let mut all_rows: Vec<Vec<serde_json::Value>> = Vec::new();
         let mut truncated = false;
+        let mut worker_ms: Option<u64> = None;
 
         loop {
             let response = rx
@@ -382,7 +425,10 @@ impl ConnectorClient {
 
             match response {
                 WorkerResponse::ResultBatch {
-                    shape, is_final, ..
+                    shape,
+                    is_final,
+                    worker_ms: batch_ms,
+                    ..
                 } => match shape {
                     lucent_protocol::ResultShape::Tabular { columns, rows } => {
                         all_rows.extend(
@@ -391,6 +437,9 @@ impl ConnectorClient {
                         );
                         if all_columns.is_none() {
                             all_columns = Some(columns);
+                        }
+                        if is_final {
+                            worker_ms = batch_ms;
                         }
 
                         if let Some(cap) = max_rows {
@@ -423,6 +472,9 @@ impl ConnectorClient {
                                     row_count,
                                     rows_affected: None,
                                     truncated,
+                                    // Truncation returns before the worker's
+                                    // final batch, so no timing was received.
+                                    worker_ms: if truncated { None } else { worker_ms },
                                 },
                                 query_id,
                             ));
@@ -439,6 +491,7 @@ impl ConnectorClient {
                             row_count: 0,
                             rows_affected: Some(rows_affected),
                             truncated: false,
+                            worker_ms: batch_ms,
                         };
                         if is_final {
                             self.pending
@@ -748,6 +801,24 @@ async fn connect_stream(endpoint: &str) -> Result<ClientStream, String> {
             .map(ClientStream::Pipe)
             .map_err(|e| format!("connect to worker pipe failed: {e}"))
     }
+}
+
+/// Format a handshake `Error` reply for the caller.
+///
+/// A protocol-version mismatch is the signature of a stale worker binary:
+/// `tauri dev` does not rebuild the separate driver packages, and a staged
+/// sidecar copy can overwrite a fresh dev worker (see `build.rs`). In debug
+/// builds, append the remedy — the message itself already carries both
+/// versions, which is what a bug report about a packaged install needs.
+fn handshake_error(kind: lucent_protocol::LucentErrorKind, message: &str) -> String {
+    let mut out = format!("{kind}: {message}");
+    if cfg!(debug_assertions) && message.starts_with("protocol version mismatch") {
+        out.push_str(
+            " — rebuild the workers from the checkout you run dev from: \
+             npm run build:workers:debug",
+        );
+    }
+    out
 }
 
 /// Largest integer JavaScript can represent exactly (2^53 - 1). Beyond this the
@@ -1147,5 +1218,35 @@ mod sync_routing_tests {
             pending.lock().unwrap().is_empty(),
             "dropping the guard must remove the entry"
         );
+    }
+}
+
+#[cfg(test)]
+mod handshake_error_tests {
+    use lucent_protocol::LucentErrorKind;
+
+    use super::handshake_error;
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn a_protocol_mismatch_names_the_dev_remedy() {
+        let err = handshake_error(
+            LucentErrorKind::Protocol,
+            "protocol version mismatch: app sent Some(9), worker expects 7",
+        );
+        assert!(
+            err.starts_with("Protocol: protocol version mismatch"),
+            "the typed error must stay in front: {err}"
+        );
+        assert!(
+            err.contains("npm run build:workers:debug"),
+            "dev builds must name the remedy: {err}"
+        );
+    }
+
+    #[test]
+    fn other_handshake_errors_keep_their_exact_wording() {
+        let err = handshake_error(LucentErrorKind::Protocol, "handshake token mismatch");
+        assert_eq!(err, "Protocol: handshake token mismatch");
     }
 }

@@ -7,6 +7,48 @@ pub struct SearchSchema {
     ctx: AiToolContext,
 }
 
+/// Cosine-similarity floor for the semantic path (F3). A live session saw
+/// 0.50–0.60 "top matches" for queries with no relevant column; surfacing
+/// them taught the model to trust randomness. Applied to the RAW cosine
+/// candidates, before reranking, so the floor always means the same thing
+/// (the JINA reranker returns logits, not cosine — filtering after it would
+/// change the unit).
+const MIN_SEMANTIC_SCORE: f32 = 0.60;
+
+/// Split candidates into survivors and the best score that was dropped.
+/// Takes the max rather than trusting `first()`: `top_matches` sorts today,
+/// but this function must not silently depend on that.
+pub(crate) fn apply_semantic_floor(
+    candidates: Vec<crate::ai::retrieval::ScoredColumn>,
+) -> (Vec<crate::ai::retrieval::ScoredColumn>, Option<f32>) {
+    let best = candidates.iter().map(|c| c.score).reduce(f32::max);
+    let kept: Vec<_> = candidates
+        .into_iter()
+        .filter(|c| c.score >= MIN_SEMANTIC_SCORE)
+        .collect();
+    log::debug!("search_schema floor: best={best:?} kept={}", kept.len());
+    let best_dropped = match (kept.is_empty(), best) {
+        (true, b) => b,
+        (false, _) => None,
+    };
+    (kept, best_dropped)
+}
+
+pub(crate) fn format_no_relevant_section(best_dropped: Option<f32>) -> String {
+    match best_dropped {
+        Some(best) => format!(
+            "=== Semantic Search Results ===\n\nNo relevant columns found: the best match \
+             scored {best:.2}, below the {MIN_SEMANTIC_SCORE:.2} relevance floor. Try \
+             mode=\"keyword\" with part of an exact table or column name, or call \
+             get_objects_info.\n"
+        ),
+        None => String::from(
+            "=== Semantic Search Results ===\n\nNo semantic matches (the schema index has \
+             no embedded columns). Try mode=\"keyword\".\n",
+        ),
+    }
+}
+
 impl SearchSchema {
     pub fn new(ctx: AiToolContext) -> Self {
         Self { ctx }
@@ -68,56 +110,63 @@ impl SearchSchema {
                             CANDIDATE_POOL,
                         );
 
-                        let reranker_guard = self.ctx.reranker.lock().await;
-                        let active_reranker = reranker_guard
-                            .as_ref()
-                            .filter(|_| should_rerank(graph.columns.len()));
-                        let final_matched = if let Some(reranker) = active_reranker {
-                            let doc_texts: Vec<String> = candidates
-                                .iter()
-                                .filter_map(|sc| {
-                                    graph
-                                        .columns
-                                        .iter()
-                                        .find(|c| c.id == sc.column_id)
-                                        .map(|c| c.doc_text.clone())
-                                })
-                                .collect();
-                            match reranker.rerank(query, &doc_texts).await {
-                                Ok(ranked) => {
-                                    log::debug!(
+                        let (candidates, best_dropped) = apply_semantic_floor(candidates);
+                        if candidates.is_empty() {
+                            sections.push(format_no_relevant_section(best_dropped));
+                        } else {
+                            let reranker_guard = self.ctx.reranker.lock().await;
+                            let active_reranker = reranker_guard
+                                .as_ref()
+                                .filter(|_| should_rerank(graph.columns.len()));
+                            let final_matched = if let Some(reranker) = active_reranker {
+                                let doc_texts: Vec<String> = candidates
+                                    .iter()
+                                    .filter_map(|sc| {
+                                        graph
+                                            .columns
+                                            .iter()
+                                            .find(|c| c.id == sc.column_id)
+                                            .map(|c| c.doc_text.clone())
+                                    })
+                                    .collect();
+                                match reranker.rerank(query, &doc_texts).await {
+                                    Ok(ranked) => {
+                                        log::debug!(
                                             "search_schema: reranked {} candidates for {query:?}, top result column_id={:?}",
                                             ranked.len(),
                                             ranked.first().map(|(idx, _)| candidates[*idx].column_id),
                                         );
-                                    ranked
-                                        .into_iter()
-                                        .take(FINAL_K)
-                                        .map(|(idx, score)| crate::ai::retrieval::ScoredColumn {
-                                            column_id: candidates[idx].column_id,
-                                            score,
-                                        })
-                                        .collect()
-                                }
-                                Err(e) => {
-                                    log::warn!(
+                                        ranked
+                                            .into_iter()
+                                            .take(FINAL_K)
+                                            .map(|(idx, score)| {
+                                                crate::ai::retrieval::ScoredColumn {
+                                                    column_id: candidates[idx].column_id,
+                                                    score,
+                                                }
+                                            })
+                                            .collect()
+                                    }
+                                    Err(e) => {
+                                        log::warn!(
                                         "Reranking failed, falling back to raw cosine order: {e}"
                                     );
-                                    candidates.into_iter().take(FINAL_K).collect()
+                                        candidates.into_iter().take(FINAL_K).collect()
+                                    }
                                 }
-                            }
-                        } else {
-                            candidates.into_iter().take(FINAL_K).collect()
-                        };
-                        drop(reranker_guard);
+                            } else {
+                                candidates.into_iter().take(FINAL_K).collect()
+                            };
+                            drop(reranker_guard);
 
-                        let retrieved = crate::ai::retrieval::Retriever::cluster_from_matches(
-                            graph,
-                            final_matched,
-                            max_hops,
-                            max_cluster_tables,
-                        );
-                        sections.push(format_semantic_section(&retrieved));
+                            let retrieved = crate::ai::retrieval::Retriever::cluster_from_matches(
+                                graph,
+                                final_matched,
+                                max_hops,
+                                max_cluster_tables,
+                            );
+                            sections.push(format_semantic_section(&retrieved));
+                        }
                     }
                     Err(e) => {
                         sections.push(format!("Semantic search error: {e}"));
@@ -418,6 +467,64 @@ mod bfs_bound_scaling_tests {
 }
 
 #[cfg(test)]
+mod semantic_floor_tests {
+    use super::{apply_semantic_floor, format_no_relevant_section};
+    use crate::ai::retrieval::ScoredColumn;
+
+    #[test]
+    fn floor_drops_weak_matches_and_keeps_the_strong_ones() {
+        let cands = vec![
+            ScoredColumn {
+                column_id: 0,
+                score: 0.83,
+            },
+            ScoredColumn {
+                column_id: 1,
+                score: 0.55,
+            },
+        ];
+        let (kept, best_dropped) = apply_semantic_floor(cands);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].column_id, 0);
+        // `best_dropped` is only reported when NOTHING survived — it feeds the
+        // "nothing relevant" message. (The original test expected Some(0.55)
+        // here, which its own implementation never returns — reproduced.)
+        assert_eq!(best_dropped, None);
+    }
+
+    #[test]
+    fn floor_reports_the_best_score_when_everything_is_dropped() {
+        let cands = vec![
+            ScoredColumn {
+                column_id: 0,
+                score: 0.51,
+            },
+            ScoredColumn {
+                column_id: 1,
+                score: 0.58,
+            },
+        ];
+        let (kept, best_dropped) = apply_semantic_floor(cands);
+        assert!(kept.is_empty());
+        assert_eq!(best_dropped, Some(0.58), "the max, not the first");
+    }
+
+    #[test]
+    fn no_relevant_section_names_the_floor_and_the_recovery() {
+        let msg = format_no_relevant_section(Some(0.58));
+        assert!(msg.contains("No relevant columns found"), "{msg}");
+        assert!(msg.contains("0.58"), "{msg}");
+        assert!(msg.contains("keyword"), "{msg}");
+    }
+
+    #[test]
+    fn no_relevant_section_without_any_candidates_says_index_empty() {
+        let msg = format_no_relevant_section(None);
+        assert!(msg.contains("No semantic matches"), "{msg}");
+    }
+}
+
+#[cfg(test)]
 mod rerank_gating_tests {
     use super::should_rerank;
 
@@ -479,7 +586,7 @@ mod rerank_wiring_tests {
                 schema: "public".into(),
                 name: "t0".into(),
                 kind: "table".into(),
-                row_count_estimate: 0,
+                row_estimate: crate::ai::schema_graph::RowEstimate::default(),
                 partition_info: None,
             }],
             columns_by_table: HashMap::from([(0, (0..20).collect())]),

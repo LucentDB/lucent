@@ -10,13 +10,6 @@
     if (tool.status === 'failed') open = true;
   });
 
-  const icons: Record<string, string> = {
-    get_objects_info: 'schema',
-    search_objects: 'search',
-    run_readonly_query: 'query',
-    preview_dml: 'lock',
-  };
-
   // A tool id (`run_readonly_query`) is prettified for display; anything else
   // is shown verbatim. ACP carries no tool name — `name` is the agent's own
   // free-text title, which for a bash-first agent is the whole shell command.
@@ -101,7 +94,12 @@
   class:err={statusIcon === 'error'}
   class:stopped={statusIcon === 'stopped'}
 >
-  <button class="tcc-hdr" onclick={() => (open = !open)}>
+  <button
+    type="button"
+    class="tcc-hdr"
+    aria-expanded={open}
+    onclick={() => (open = !open)}
+  >
     <span class="tcc-icon">
       {#if statusIcon === 'spinner'}
         <svg

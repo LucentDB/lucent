@@ -24,12 +24,23 @@ pub trait ToolExecutor: Send + Sync {
 pub struct ContextToolExecutor {
     ctx: AiToolContext,
     tools: Vec<LucentToolEnum>,
+    excluded: &'static [&'static str],
 }
 
 impl ContextToolExecutor {
     pub fn new(ctx: AiToolContext) -> Self {
-        let tools = crate::ai::tools::all_tools(ctx.clone());
-        Self { ctx, tools }
+        Self::new_filtered(ctx, &[])
+    }
+
+    /// The per-conversation tool list minus a surface's exclusions. Only the
+    /// notebook ACP path passes any (ledger D1/W2); chat keeps every tool.
+    pub fn new_filtered(ctx: AiToolContext, excluded: &'static [&'static str]) -> Self {
+        let tools = crate::ai::tools::tools_excluding(ctx.clone(), excluded);
+        Self {
+            ctx,
+            tools,
+            excluded,
+        }
     }
 }
 
@@ -38,6 +49,11 @@ impl ToolExecutor for ContextToolExecutor {
     async fn call(&self, tool: &str, args: serde_json::Value) -> Result<ToolOutput, ToolError> {
         match self.tools.iter().find(|t| t.name() == tool) {
             Some(t) => t.call(args, &self.ctx).await,
+            // P5: the static MCP tools/list still advertises it — say why.
+            None if self.excluded.contains(&tool) => Err(ToolError::Execution(format!(
+                "{tool} is not available here: notebook cells cannot write files. \
+                 Ask in a chat conversation to export."
+            ))),
             None => Err(ToolError::Execution(format!("unknown tool: {tool}"))),
         }
     }
@@ -329,6 +345,8 @@ pub(crate) async fn dispatch(
             sql,
             execution_time_ms,
             truncated,
+            rendered_rows,
+            ..
         }) => {
             // Structured UI events — the frontend renders the grid from these.
             // Mirrors agent.rs: columns map data_type → "type" (the frontend's
@@ -366,6 +384,7 @@ pub(crate) async fn dispatch(
                 row_count,
                 sql,
                 execution_time_ms,
+                rendered_rows,
             });
             wire::BridgeResponse::Ok {
                 id,
@@ -468,6 +487,7 @@ mod tests {
             embedder: Arc::new(Mutex::new(None)),
             reranker: Arc::new(Mutex::new(None)),
             memory_manager: crate::ai::tools::test_memory_manager(),
+            result_scope: crate::ai::result_store::ResultScope::isolated("test"),
         }
     }
 
@@ -500,6 +520,42 @@ mod tests {
         let ex: Arc<dyn ToolExecutor> = Arc::new(ContextToolExecutor::new(test_ctx()));
         let err = ex.call("nope", serde_json::json!({})).await.unwrap_err();
         assert!(err.to_string().contains("nope"));
+    }
+
+    #[test]
+    fn filtered_executor_excludes_by_name_and_keeps_the_rest() {
+        let ctx = test_ctx();
+        let ex = ContextToolExecutor::new_filtered(
+            ctx.clone(),
+            crate::ai::tools::NOTEBOOK_CELL_EXCLUDED_TOOLS,
+        );
+        let names: Vec<&str> = ex.tools.iter().map(|t| t.name()).collect();
+        assert!(!names.contains(&"export_query"), "{names:?}");
+        assert!(names.contains(&"run_readonly_query"), "{names:?}");
+        assert_eq!(names.len(), crate::ai::tools::all_tools(ctx).len() - 1);
+    }
+
+    /// Review Focus #5: the agent still sees the tool in the static tools/list.
+    #[tokio::test]
+    async fn filtered_executor_teaches_why_an_excluded_tool_is_missing() {
+        let ex = ContextToolExecutor::new_filtered(
+            test_ctx(),
+            crate::ai::tools::NOTEBOOK_CELL_EXCLUDED_TOOLS,
+        );
+        let err = ex
+            .call("export_query", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("notebook cells cannot write files"),
+            "{err}"
+        );
+        let err = ex
+            .call("no_such_tool", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown tool"), "{err}");
     }
 
     // ── serve-loop test infrastructure ────────────────────────────────────────
@@ -639,6 +695,8 @@ mod tests {
                 sql: "select 1".into(),
                 execution_time_ms: 5,
                 truncated: false,
+                result_id: Some("r_x".into()),
+                rendered_rows: 1,
             }),
         )];
         let executor: Arc<dyn ToolExecutor> = Arc::new(ScriptedExecutor::new(script));
@@ -733,6 +791,8 @@ mod tests {
                 sql: "select 1".into(),
                 execution_time_ms: 1,
                 truncated: false,
+                result_id: Some("r_y".into()),
+                rendered_rows: 3,
             }),
         )];
         let executor: Arc<dyn ToolExecutor> = Arc::new(ScriptedExecutor::new(script));
@@ -785,6 +845,65 @@ mod tests {
                 "the bridge saw the real arguments; the agent's report had none"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn bridge_returns_the_budgeted_block_uncapped() {
+        // P2: the ACP bridge returns the budgeted block whole — longer than the
+        // rig path's old 5,000-byte cut, byte-identical to what the tool built.
+        let block = format!(
+            "<result id=\"r_x\" rows=\"1200\" complete=\"true\" shown=\"1-1200\">\n| a |\n|---|\n{}</result>",
+            "| 1 |\n".repeat(1_200)
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let (listener, path) = bind_listener(&dir);
+        let token = "tok123".to_string();
+        let script = vec![(
+            "run_readonly_query".into(),
+            serde_json::json!({"sql": "select 1"}),
+            Ok(ToolOutput::QueryResult {
+                text_summary: block.clone(),
+                columns: vec![crate::ai::events::ColumnMeta {
+                    name: "a".into(),
+                    data_type: "int4".into(),
+                }],
+                rows: vec![vec![serde_json::json!(1)]],
+                row_count: 1,
+                sql: "select 1".into(),
+                execution_time_ms: 5,
+                truncated: false,
+                result_id: Some("r_x".into()),
+                rendered_rows: 1,
+            }),
+        )];
+        let executor: Arc<dyn ToolExecutor> = Arc::new(ScriptedExecutor::new(script));
+        let task = tokio::spawn(serve(
+            listener,
+            token.clone(),
+            executor,
+            Arc::new(RecordingSink::new()),
+            Arc::new(BridgeHandle::new("conv-1")),
+        ));
+        let mut sock = tokio::net::UnixStream::connect(&path).await.unwrap();
+        wire::write_hello(&mut sock, &token).await.unwrap();
+        wire::write_request(
+            &mut sock,
+            &wire::BridgeRequest::Call {
+                id: 1,
+                tool: "run_readonly_query".into(),
+                args: serde_json::json!({"sql": "select 1"}),
+            },
+        )
+        .await
+        .unwrap();
+        let mut reader = tokio::io::BufReader::new(sock);
+        match wire::read_response(&mut reader).await.unwrap().unwrap() {
+            wire::BridgeResponse::Ok { output, .. } => {
+                assert_eq!(output["text"], serde_json::json!(block))
+            }
+            wire::BridgeResponse::Err { error, .. } => panic!("expected Ok, got Err: {error}"),
+        }
+        task.abort();
     }
 
     #[tokio::test]

@@ -115,6 +115,7 @@ fn usage() -> String {
     out
 }
 
+#[allow(clippy::type_complexity)] // resolved-endpoint tuple, mirrored by `resolve_endpoint`
 fn resolve_endpoint_with_custom_discovery(
     arg_socket: Option<String>,
     arg_token: Option<String>,
@@ -152,15 +153,28 @@ fn resolve_endpoint_with_custom_discovery(
     };
 
     if discovery_path.exists() {
-        let disc = lucent_lib::ai::external_endpoint::discovery::read_discovery_file_at(&discovery_path)
-            .map_err(|e| format!("read external endpoint discovery file {}: {e}", discovery_path.display()))?;
+        let disc =
+            lucent_lib::ai::external_endpoint::discovery::read_discovery_file_at(&discovery_path)
+                .map_err(|e| {
+                format!(
+                    "read external endpoint discovery file {}: {e}",
+                    discovery_path.display()
+                )
+            })?;
         let tools = lucent_lib::ai::acp::mcp_server::filter_external_tools(&disc.tools);
-        return Ok((disc.socket, disc.token, tools, Some(discovery_path), disc.status));
+        return Ok((
+            disc.socket,
+            disc.token,
+            tools,
+            Some(discovery_path),
+            disc.status,
+        ));
     }
 
     Err("--socket and --token required (or active Lucent external endpoint discovery file external-mcp.json)".into())
 }
 
+#[allow(clippy::type_complexity)] // resolved-endpoint tuple, mirrored by the custom-discovery form
 fn resolve_endpoint(
     arg_socket: Option<String>,
     arg_token: Option<String>,
@@ -177,6 +191,14 @@ fn resolve_endpoint(
     resolve_endpoint_with_custom_discovery(arg_socket, arg_token, None)
 }
 
+/// Every tool `tools/list` serves is accepted by the direct-name form
+/// (`lucent-db-tools-mcp <tool> '<json>'`) — no hand-kept list to drift.
+/// Takes the prebuilt schemas: `static_tool_schemas()` rebuilds every tool
+/// description + JSON schema, so callers hoist it out of loops.
+fn is_tool_name(schemas: &[mcp_server::ToolSchema], name: &str) -> bool {
+    schemas.iter().any(|t| t.name == name)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -185,6 +207,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cli_tool = None;
     let mut cli_tool_args = None;
     let mut i = 1;
+    // Built once: `is_tool_name` runs per argv element below.
+    let tool_schemas = mcp_server::static_tool_schemas();
     while i < args.len() {
         match args[i].as_str() {
             "--socket" => {
@@ -200,12 +224,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cli_tool_args = args.get(i + 2).cloned();
                 break;
             }
-            "search_schema"
-            | "get_objects_info"
-            | "run_readonly_query"
-            | "preview_dml"
-            | "save_memory"
-            | "search_query_history" => {
+            name if is_tool_name(&tool_schemas, name) => {
                 cli_tool = Some(args[i].clone());
                 cli_tool_args = args.get(i + 1).cloned();
                 break;
@@ -231,7 +250,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // CLI mode: execute a single tool call directly and exit
     if let Some(tool) = cli_tool {
         if status == lucent_lib::ai::external_endpoint::discovery::EndpointStatus::Disconnected {
-            eprintln!("Error: External agent access is disabled for the active connection profile.");
+            eprintln!(
+                "Error: External agent access is disabled for the active connection profile."
+            );
             std::process::exit(1);
         }
         let (sock_r, mut sock_w) = connect_socket(&socket).await?;
@@ -283,7 +304,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Check if profile is disconnected (inspect status as required by spec §4.1)
             let is_disconnected = if let Some(ref p) = discovery_path {
-                if let Ok(disc) = lucent_lib::ai::external_endpoint::discovery::read_discovery_file_at(p) {
+                if let Ok(disc) =
+                    lucent_lib::ai::external_endpoint::discovery::read_discovery_file_at(p)
+                {
                     disc.status == lucent_lib::ai::external_endpoint::discovery::EndpointStatus::Disconnected
                 } else {
                     status == lucent_lib::ai::external_endpoint::discovery::EndpointStatus::Disconnected
@@ -373,6 +396,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn direct_name_form_accepts_every_tool_tools_list_serves() {
+        let schemas = mcp_server::static_tool_schemas();
+        for t in &schemas {
+            assert!(
+                is_tool_name(&schemas, &t.name),
+                "{} rejected by the direct-name form",
+                t.name
+            );
+        }
+        assert!(
+            is_tool_name(&schemas, "get_preflight_context"),
+            "the gap the literal list had"
+        );
+        assert!(
+            !is_tool_name(&schemas, "help"),
+            "help stays a command, not a tool"
+        );
+    }
+
+    #[test]
     fn json_object_arguments_pass_through_unchanged() {
         let v = parse_tool_arguments("run_readonly_query", Some(r#"{"sql":"select 1"}"#));
         assert_eq!(v, serde_json::json!({"sql": "select 1"}));
@@ -435,6 +478,10 @@ mod tests {
             "get_objects_info",
             "run_readonly_query",
             "preview_dml",
+            "list_memories",
+            "inspect_connection",
+            "export_query",
+            "fetch_rows",
         ] {
             assert!(u.contains(tool), "{tool} missing from help: {u}");
         }
@@ -465,7 +512,9 @@ mod tests {
 
     #[test]
     fn resolve_endpoint_auto_discovers_from_discovery_path() {
-        use lucent_lib::ai::external_endpoint::discovery::{write_discovery_file_at, DiscoveryInfo, EndpointStatus};
+        use lucent_lib::ai::external_endpoint::discovery::{
+            write_discovery_file_at, DiscoveryInfo, EndpointStatus,
+        };
 
         let temp_dir = tempfile::tempdir().unwrap();
         let disc_path = temp_dir.path().join("external-mcp.json");
@@ -480,7 +529,8 @@ mod tests {
         };
         write_discovery_file_at(&disc_path, &disc).unwrap();
 
-        let (sock, tok, tools, disc_file, status) = resolve_endpoint_with_custom_discovery(None, None, Some(disc_path.clone())).unwrap();
+        let (sock, tok, tools, disc_file, status) =
+            resolve_endpoint_with_custom_discovery(None, None, Some(disc_path.clone())).unwrap();
         assert_eq!(sock, "/tmp/custom.sock");
         assert_eq!(tok, "tok123");
         assert_eq!(tools.len(), 2);
@@ -492,7 +542,9 @@ mod tests {
 
     #[test]
     fn resolve_endpoint_inspects_disconnected_status() {
-        use lucent_lib::ai::external_endpoint::discovery::{write_discovery_file_at, DiscoveryInfo, EndpointStatus};
+        use lucent_lib::ai::external_endpoint::discovery::{
+            write_discovery_file_at, DiscoveryInfo, EndpointStatus,
+        };
 
         let temp_dir = tempfile::tempdir().unwrap();
         let disc_path = temp_dir.path().join("external-mcp.json");

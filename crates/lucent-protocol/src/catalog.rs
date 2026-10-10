@@ -201,6 +201,9 @@ pub enum CatalogRequest {
     GetObjectProperties {
         reference: ObjectRef,
     },
+    /// Live connection facts for the AI's sanctioned metadata read
+    /// (`inspect_connection`, spec §6B.3). One reply, sections in a fixed order.
+    ConnectionFacts,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -213,6 +216,25 @@ pub enum CatalogResult {
     SearchHits(Vec<SearchHit>),
     Ddl(String),
     Properties(Vec<ObjectProperty>),
+    ConnectionFacts(Vec<FactSection>),
+}
+
+/// One section of a `ConnectionFacts` reply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FactSection {
+    /// "identity", "roles", "extensions", "available extensions", "schema sizes", …
+    pub name: String,
+    pub value: FactValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FactValue {
+    /// One rendered line per row (`user=postgres, database=demo`, `pg_trgm, 1.6`).
+    Rows(Vec<String>),
+    /// The engine has it, but this read failed (e.g. permission denied) — P7.
+    Unavailable(String),
+    /// The engine has no such concept — stated, never guessed (P12).
+    NotSupported,
 }
 
 #[cfg(test)]
@@ -320,12 +342,36 @@ mod tests {
             CatalogRequest::GetObjectProperties {
                 reference: table_ref(),
             },
+            CatalogRequest::ConnectionFacts,
         ];
         for r in requests {
             let bytes = bincode::serialize(&r).expect("serialize");
             let back: CatalogRequest = bincode::deserialize(&bytes).expect("deserialize");
             assert_eq!(format!("{r:?}"), format!("{back:?}"));
         }
+    }
+
+    #[test]
+    fn connection_facts_round_trip_through_bincode() {
+        let result = CatalogResult::ConnectionFacts(vec![
+            FactSection {
+                name: "identity".into(),
+                value: FactValue::Rows(vec!["user=postgres".into()]),
+            },
+            FactSection {
+                name: "extensions".into(),
+                value: FactValue::Unavailable("permission denied".into()),
+            },
+            FactSection {
+                name: "roles".into(),
+                value: FactValue::NotSupported,
+            },
+        ]);
+        let bytes = bincode::serialize(&result).unwrap();
+        assert_eq!(
+            bincode::deserialize::<CatalogResult>(&bytes).unwrap(),
+            result
+        );
     }
 
     #[test]
@@ -381,6 +427,20 @@ mod tests {
                 key: "Increment".into(),
                 value: "1".into(),
             }]),
+            CatalogResult::ConnectionFacts(vec![
+                FactSection {
+                    name: "identity".into(),
+                    value: FactValue::Rows(vec!["user=postgres".into()]),
+                },
+                FactSection {
+                    name: "extensions".into(),
+                    value: FactValue::Unavailable("permission denied".into()),
+                },
+                FactSection {
+                    name: "roles".into(),
+                    value: FactValue::NotSupported,
+                },
+            ]),
         ];
         for r in results {
             let bytes = bincode::serialize(&r).expect("serialize");

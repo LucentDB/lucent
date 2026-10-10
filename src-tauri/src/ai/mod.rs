@@ -14,6 +14,7 @@ pub mod preflight;
 pub mod provider;
 pub mod providers;
 pub mod rerank;
+pub mod result_store;
 pub mod retrieval;
 pub mod schema_graph;
 pub mod single_flight;

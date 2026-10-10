@@ -8,9 +8,9 @@
 
 use duckdb::Connection;
 use lucent_protocol::{
-    CatalogRequest, CatalogResult, ColumnDetail, ColumnPath, ForeignKey, ForeignKeyTarget,
-    LucentError, LucentErrorKind, Namespace, NamespacePath, ObjectDetail, ObjectKind,
-    ObjectProperty, ObjectRef, ObjectSummary, SearchHit,
+    CatalogRequest, CatalogResult, ColumnDetail, ColumnPath, FactSection, FactValue, ForeignKey,
+    ForeignKeyTarget, LucentError, LucentErrorKind, Namespace, NamespacePath, ObjectDetail,
+    ObjectKind, ObjectProperty, ObjectRef, ObjectSummary, SearchHit,
 };
 
 use crate::connection::DuckHandle;
@@ -79,8 +79,75 @@ fn dispatch(conn: &Connection, request: CatalogRequest) -> Result<CatalogResult,
         CatalogRequest::GetObjectProperties { reference } => {
             object_properties(conn, &reference).map(CatalogResult::Properties)
         }
+        CatalogRequest::ConnectionFacts => {
+            Ok(CatalogResult::ConnectionFacts(connection_facts(conn)))
+        }
         other => Err(err(format!("unsupported catalog request: {other:?}"))),
     }
+}
+
+/// `ConnectionFacts` for DuckDB: identity, extensions and schemas exist; roles,
+/// `search_path` and `statement_timeout` have no DuckDB equivalent (P12).
+/// `TimeZone` is its own section — it needs the ICU extension, and its absence
+/// must not blank the identity line.
+fn connection_facts(conn: &Connection) -> Vec<FactSection> {
+    const SECTIONS: &[(&str, &str)] = &[
+        (
+            "identity",
+            "SELECT 'database=' || current_database(), 'version=' || version()",
+        ),
+        ("timezone", "SELECT current_setting('TimeZone')"),
+        (
+            "extensions",
+            "SELECT extension_name, CASE WHEN loaded THEN 'loaded' ELSE 'installed' END \
+                        FROM duckdb_extensions() WHERE installed ORDER BY 1",
+        ),
+        (
+            "schemas",
+            "SELECT DISTINCT schema_name FROM duckdb_schemas() WHERE NOT internal ORDER BY 1",
+        ),
+    ];
+    let mut out: Vec<FactSection> = SECTIONS
+        .iter()
+        .map(|(name, sql)| FactSection {
+            name: (*name).to_string(),
+            value: match text_rows(conn, sql) {
+                Ok(rows) => FactValue::Rows(rows),
+                Err(e) => FactValue::Unavailable(e),
+            },
+        })
+        .collect();
+    for name in ["roles", "search_path", "statement_timeout"] {
+        out.push(FactSection {
+            name: name.into(),
+            value: FactValue::NotSupported,
+        });
+    }
+    out
+}
+
+/// Every column is TEXT in the queries above, so `Option<String>` reads them all.
+fn text_rows(conn: &Connection, sql: &str) -> Result<Vec<String>, String> {
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+    // Metadata only after the first step (duckdb 1.10505.0 — see connector.rs:184-190).
+    let n = rows
+        .as_ref()
+        .expect("rows borrow their statement")
+        .column_count();
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let line: Vec<String> = (0..n)
+            .map(|i| {
+                row.get::<_, Option<String>>(i)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "NULL".into())
+            })
+            .collect();
+        out.push(line.join(", "));
+    }
+    Ok(out)
 }
 
 fn list_namespaces(conn: &Connection) -> Result<Vec<Namespace>, LucentError> {

@@ -316,7 +316,7 @@ async fn test_preflight_probe_cannot_leak_statement_timeout() {
             schema: "public".into(),
             name: "big_probe_target".into(),
             kind: "view".into(),
-            row_count_estimate: 1,
+            row_estimate: lucent_lib::ai::schema_graph::RowEstimate::View,
             partition_info: None,
         }],
         columns: vec![ColumnEntry {
@@ -593,6 +593,7 @@ async fn test_get_objects_info_batches_columns_queries() {
         memory_manager: std::sync::Arc::new(
             lucent_lib::ai::memory::MemoryManager::open_in_memory().expect("in-memory memory db"),
         ),
+        result_scope: lucent_lib::ai::result_store::ResultScope::isolated("test"),
     };
     let tool = lucent_lib::ai::tools::objects::GetObjectsInfo::new(ctx.clone());
     let args = serde_json::json!({

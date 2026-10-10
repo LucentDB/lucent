@@ -15,27 +15,39 @@ use lucent_protocol::ConnectionConfig;
 
 pub mod memfail;
 
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum GradeMode {
+    #[default]
+    Numeric,
+    /// Passes when the answer states the table/result is empty (F11).
+    EmptyState,
+}
+
 pub struct EvalCase {
     pub name: &'static str,
     pub question: &'static str,
-    /// Must return one row, one column, castable to text, ≥4 digits.
+    /// Must return one row, one column, castable to text. See `grade_mode`.
     pub truth_sql: &'static str,
+    pub grade_mode: GradeMode,
 }
 
 pub fn eval_cases() -> Vec<EvalCase> {
     vec![
         EvalCase { name: "unique_passengers",
             question: "how many unique passengers are in the system?",
-            truth_sql: "SELECT COUNT(DISTINCT passenger_id)::text FROM bookings.tickets" },
+            truth_sql: "SELECT COUNT(DISTINCT passenger_id)::text FROM bookings.tickets",
+            grade_mode: GradeMode::Numeric },
         EvalCase { name: "min_segment_price",
             question: "what is the cheapest ticket segment price?",
-            truth_sql: "SELECT MIN(price)::bigint::text FROM bookings.segments" },
+            truth_sql: "SELECT MIN(price)::bigint::text FROM bookings.segments",
+            grade_mode: GradeMode::Numeric },
         EvalCase { name: "flights_77w_validity",
             question: "how many non-cancelled flights did the Boeing 777-300ER operate?",
             truth_sql: "SELECT COUNT(*)::text FROM bookings.flights f \
                         JOIN bookings.routes r ON f.route_no = r.route_no \
                           AND r.validity @> f.scheduled_departure \
-                        WHERE r.airplane_code = '77W' AND f.status != 'Cancelled'" },
+                        WHERE r.airplane_code = '77W' AND f.status != 'Cancelled'",
+            grade_mode: GradeMode::Numeric },
         EvalCase { name: "top_row_77w_boardings",
             question: "which seat row on the Boeing 777-300ER has the most boardings, and how many boardings is that?",
             truth_sql: "SELECT COUNT(*)::text FROM bookings.boarding_passes bp \
@@ -44,17 +56,21 @@ pub fn eval_cases() -> Vec<EvalCase> {
                           AND r.validity @> f.scheduled_departure \
                         WHERE r.airplane_code = '77W' \
                         GROUP BY SUBSTRING(bp.seat_no FROM '^(\\d+)')::integer \
-                        ORDER BY COUNT(*) DESC LIMIT 1" },
+                        ORDER BY COUNT(*) DESC LIMIT 1",
+            grade_mode: GradeMode::Numeric },
         EvalCase { name: "ticket_total_price",
             question: "what is the total price of all segments on ticket 0005433348362?",
             truth_sql: "SELECT SUM(price)::bigint::text FROM bookings.segments \
-                        WHERE ticket_no = '0005433348362'" },
+                        WHERE ticket_no = '0005433348362'",
+            grade_mode: GradeMode::Numeric },
         EvalCase { name: "total_cancelled",
             question: "how many flights were cancelled in total?",
-            truth_sql: "SELECT COUNT(*)::text FROM bookings.flights WHERE status = 'Cancelled'" },
+            truth_sql: "SELECT COUNT(*)::text FROM bookings.flights WHERE status = 'Cancelled'",
+            grade_mode: GradeMode::Numeric },
         EvalCase { name: "total_flights",
             question: "how many flights are in the system in total?",
-            truth_sql: "SELECT COUNT(*)::text FROM bookings.flights" },
+            truth_sql: "SELECT COUNT(*)::text FROM bookings.flights",
+            grade_mode: GradeMode::Numeric },
         EvalCase { name: "busiest_pair_passenger_trips",
             question: "how many passenger trips does the busiest airport pair have?",
             truth_sql: "SELECT COUNT(*)::text FROM bookings.segments s \
@@ -62,8 +78,58 @@ pub fn eval_cases() -> Vec<EvalCase> {
                         JOIN bookings.routes r ON r.route_no = f.route_no \
                           AND r.validity @> f.scheduled_departure \
                         GROUP BY r.departure_airport, r.arrival_airport \
-                        ORDER BY COUNT(*) DESC LIMIT 1" },
+                        ORDER BY COUNT(*) DESC LIMIT 1",
+            grade_mode: GradeMode::Numeric },
+        EvalCase { name: "multi_section_pairs_11_to_15",
+            question: "list the 15 busiest airport pairs by passenger trips, busiest first, \
+                       with their trip counts. then tell me the combined passenger trips of \
+                       the pairs ranked 11th through 15th.",
+            truth_sql: "SELECT SUM(c)::text FROM (SELECT COUNT(*) c FROM bookings.segments s \
+                        JOIN bookings.flights f ON s.flight_id = f.flight_id \
+                        JOIN bookings.routes r ON r.route_no = f.route_no \
+                          AND r.validity @> f.scheduled_departure \
+                        GROUP BY r.departure_airport, r.arrival_airport \
+                        ORDER BY c DESC OFFSET 10 LIMIT 5) t",
+            grade_mode: GradeMode::Numeric },
+        EvalCase { name: "nofk_shipments_join",
+            question: "how many shipments in evals_nofk.shipments are for a part that \
+                       exists in evals_nofk.parts?",
+            truth_sql: "SELECT COUNT(*)::text FROM evals_nofk.shipments s \
+                        JOIN evals_nofk.parts p ON p.id = s.part_id",
+            grade_mode: GradeMode::Numeric },
+        EvalCase { name: "empty_never_analyzed",
+            question: "how many rows are in the evals_empty.never_analyzed table?",
+            truth_sql: "SELECT COUNT(*)::text FROM evals_empty.never_analyzed",
+            grade_mode: GradeMode::EmptyState },
     ]
+}
+
+/// Schemas/tables the defect-class cases need, rebuilt on every run so a
+/// fixture change can never be masked by a stale copy (and the empty table is
+/// guaranteed never-ANALYZE'd): `evals_nofk` has NO declared FKs (F10),
+/// `evals_empty` has a never-analyzed table (F11). 25k generated rows is
+/// trivial to rebuild. Gated: `tokio-postgres` is an optional dependency
+/// (`evals = ["dep:tokio-postgres"]`), so an ungated fn breaks the default build.
+#[cfg(feature = "evals")]
+pub async fn ensure_eval_fixtures(client: &tokio_postgres::Client) {
+    client
+        .batch_execute(
+            "DROP SCHEMA IF EXISTS evals_nofk CASCADE;
+             CREATE SCHEMA evals_nofk;
+             CREATE TABLE evals_nofk.parts (id integer PRIMARY KEY, name text NOT NULL);
+             CREATE TABLE evals_nofk.shipments (
+                 id integer PRIMARY KEY, part_id integer NOT NULL, qty integer NOT NULL);
+             INSERT INTO evals_nofk.parts SELECT g, 'part-' || g FROM generate_series(1, 10000) g;
+             -- part_id spans 1..12000 but parts stop at 10000: 4,000 shipments
+             -- are orphans, so only a real join yields the truth (21,000).
+             INSERT INTO evals_nofk.shipments
+                 SELECT g, (g % 12000) + 1, 1 FROM generate_series(1, 25000) g;
+             DROP SCHEMA IF EXISTS evals_empty CASCADE;
+             CREATE SCHEMA evals_empty;
+             CREATE TABLE evals_empty.never_analyzed (id integer, note text);",
+        )
+        .await
+        .expect("seed eval fixtures");
 }
 
 pub fn digits(s: &str) -> String {
@@ -101,8 +167,122 @@ pub fn answer_contains_truth(answer: &str, truth: &str) -> bool {
     t.len() >= 4 && number_tokens(answer).iter().any(|n| n == &t)
 }
 
+/// Does the answer state that the table/result has no rows? Deliberately a
+/// small curated list — the grader is an eval oracle, not an NLU.
+pub fn answer_states_empty(answer: &str) -> bool {
+    const EMPTY_PHRASES: &[&str] = &[
+        "is empty",
+        "are empty",
+        "no rows",
+        "no data",
+        "no records",
+        "returns nothing",
+        "returned nothing",
+        "zero rows",
+        "0 rows",
+        "table has 0",
+    ];
+    let a = answer.to_ascii_lowercase();
+    EMPTY_PHRASES.iter().any(|p| {
+        a.match_indices(p).any(|(i, _)| {
+            // A phrase that starts with a digit must not be the tail of a
+            // larger number: "10 rows", "1,000 rows" and "2.0 rows" are not
+            // "0 rows".
+            !p.starts_with(|c: char| c.is_ascii_digit())
+                || !a[..i].ends_with(|c: char| c.is_ascii_digit() || c == ',' || c == '.')
+        })
+    })
+}
+
+/// Process columns for one eval case (§5.10). Top-level and `pub` (not inside
+/// the feature-gated `runner`) so `--lib` unit tests can pin it.
+pub struct CaseMetrics {
+    pub tool_calls: std::collections::BTreeMap<String, usize>,
+    pub redundant_requeries: usize,
+    pub rows_seen: usize,
+    pub rows_returned: usize,
+}
+
+/// A `run_readonly_query` counts as redundant ONCE: either its normalized SQL
+/// was already requested in this case (cache replays included — a replay is
+/// still a re-query attempt), or, failing that, every row it returned was
+/// already returned (row keys include the column names, so two unrelated
+/// one-row aggregates that happen to share a value do not collide).
+pub fn case_metrics(events: &[crate::ai::events::AiEvent]) -> CaseMetrics {
+    use crate::ai::events::AiEvent;
+    use std::collections::{BTreeMap, HashMap, HashSet};
+    let mut m = CaseMetrics {
+        tool_calls: BTreeMap::new(),
+        redundant_requeries: 0,
+        rows_seen: 0,
+        rows_returned: 0,
+    };
+    let mut sql_requests: HashMap<String, usize> = HashMap::new();
+    let mut seen_rows: HashSet<String> = HashSet::new();
+    for e in events {
+        match e {
+            AiEvent::ToolResult { tool, .. } => {
+                *m.tool_calls.entry(tool.clone()).or_default() += 1;
+            }
+            AiEvent::ToolCalls { tools } => {
+                for tc in tools.iter().filter(|tc| tc.name == "run_readonly_query") {
+                    if let Some(sql) = tc.args["sql"].as_str() {
+                        let n = sql_requests
+                            .entry(crate::ai::agent::normalize_sql(sql))
+                            .or_default();
+                        *n += 1;
+                        if *n > 1 {
+                            m.redundant_requeries += 1;
+                        }
+                    }
+                }
+            }
+            AiEvent::QueryResult {
+                columns,
+                rows,
+                row_count,
+                sql,
+                rendered_rows,
+                ..
+            } => {
+                m.rows_seen += *rendered_rows;
+                m.rows_returned += *row_count;
+                let exact_repeat = sql_requests
+                    .get(&crate::ai::agent::normalize_sql(sql))
+                    .is_some_and(|n| *n > 1);
+                let header = columns
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\u{1f}");
+                let keys: Vec<String> = rows
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "{header}\u{1e}{}",
+                            serde_json::to_string(r).unwrap_or_default()
+                        )
+                    })
+                    .collect();
+                if !exact_repeat && !keys.is_empty() && keys.iter().all(|k| seen_rows.contains(k)) {
+                    m.redundant_requeries += 1;
+                }
+                seen_rows.extend(keys);
+            }
+            _ => {}
+        }
+    }
+    m
+}
+
 /// Parse a libpq-style connection string into a `ConnectionConfig`.
 /// Format: `host=... port=... user=... password=... dbname=...`
+/// The only non-test caller lives in test-gated `mod runner`, so a plain
+/// `--features evals` build would flag this as dead — the `cfg_attr` keeps
+/// the lint active under `test` (where `grading_tests` always uses it) while
+/// silencing the non-test build. Moving the fn into `runner` instead would
+/// pull its 3 unit tests out of the default `--lib` tier.
+#[cfg_attr(not(test), allow(dead_code))]
 fn eval_connection_config(conn_str: &str) -> ConnectionConfig {
     let mut host = String::from("127.0.0.1");
     let mut port: u16 = 5432;
@@ -223,6 +403,76 @@ mod grading_tests {
                 case.name
             );
         }
+    }
+
+    #[test]
+    fn empty_state_accepts_empty_phrasings() {
+        for a in [
+            "The table is empty — 0 rows.",
+            "There are no rows in evals_empty.never_analyzed.",
+            "The query returns nothing; the table has no data.",
+        ] {
+            assert!(answer_states_empty(a), "{a}");
+        }
+    }
+
+    #[test]
+    fn empty_state_rejects_a_non_empty_answer() {
+        assert!(!answer_states_empty("The table holds 12,345 rows."));
+        assert!(!answer_states_empty("I could not determine the count."));
+    }
+
+    #[test]
+    fn empty_state_does_not_match_the_tail_of_a_larger_number() {
+        // "0 rows" is a substring of "10 rows" and "1,000 rows" — a plain
+        // `contains` grades both as EMPTY (review 2026-10-06).
+        for a in [
+            "There are 10 rows.",
+            "The table has 1,000 rows.",
+            "It returned 2.0 rows on average.",
+        ] {
+            assert!(!answer_states_empty(a), "{a}");
+        }
+        assert!(answer_states_empty("It has 0 rows."));
+    }
+
+    #[test]
+    fn redundant_requeries_count_each_repeat_once() {
+        use crate::ai::events::{AiEvent, ColumnMeta, ToolCallInfo};
+        use serde_json::json;
+        let call = |id: &str, sql: &str| AiEvent::ToolCalls {
+            tools: vec![ToolCallInfo {
+                id: id.into(),
+                name: "run_readonly_query".into(),
+                args: json!({ "sql": sql }),
+            }],
+        };
+        let result = |sql: &str, rows: Vec<Vec<serde_json::Value>>| AiEvent::QueryResult {
+            columns: vec![ColumnMeta {
+                name: "n".into(),
+                data_type: "int8".into(),
+            }],
+            row_count: rows.len(),
+            rendered_rows: rows.len().min(10),
+            rows,
+            sql: sql.into(),
+            execution_time_ms: 1,
+        };
+        let events = vec![
+            call("1", "SELECT n FROM t"),
+            result("SELECT n FROM t", vec![vec![json!(1)], vec![json!(2)]]),
+            // Exact repeat (whitespace differs; `normalize_sql` collapses it):
+            // counted ONCE, not again by the row-subset rule for its result.
+            call("2", "SELECT n  FROM t"),
+            result("SELECT n  FROM t", vec![vec![json!(1)], vec![json!(2)]]),
+            // Different SQL whose rows were all returned before: a row-subset repeat.
+            call("3", "SELECT n FROM t WHERE n = 1"),
+            result("SELECT n FROM t WHERE n = 1", vec![vec![json!(1)]]),
+        ];
+        let m = case_metrics(&events);
+        assert_eq!(m.redundant_requeries, 2);
+        assert_eq!(m.rows_returned, 5);
+        assert_eq!(m.rows_seen, 5);
     }
 
     // ── MemFail Taxonomy Evaluation Suite (S-2) ───────────────────────────
@@ -357,7 +607,7 @@ mod grading_tests {
                 schema: "public".into(),
                 name: "users".into(),
                 kind: "table".into(),
-                row_count_estimate: 10,
+                row_estimate: crate::ai::schema_graph::RowEstimate::Estimated(10),
                 partition_info: None,
             }],
             columns_by_table: std::collections::HashMap::from([(0, vec![0])]),
@@ -396,7 +646,7 @@ mod grading_tests {
                 schema: "public".into(),
                 name: "users".into(),
                 kind: "table".into(),
-                row_count_estimate: 10,
+                row_estimate: crate::ai::schema_graph::RowEstimate::Estimated(10),
                 partition_info: None,
             }],
             columns_by_table: std::collections::HashMap::from([(0, vec![0, 1])]),
@@ -737,6 +987,7 @@ mod runner {
         tokio::spawn(async move {
             conn.await.ok();
         });
+        ensure_eval_fixtures(&truth_client).await;
 
         // Agent channel: the same Supervisor + ConnectorClient path commands.rs uses.
         // If the worker binary is not locatable via Supervisor (e.g. under cargo test),
@@ -781,7 +1032,7 @@ mod runner {
         config.max_turns = 15;
 
         let mut report = String::from(
-            "# Eval report\n\n| case | correct | turns | tokens | duration |\n|---|---|---|---|---|\n",
+            "# Eval report\n\n| case | correct | turns | tokens | duration | tools | redundant | rows seen/returned |\n|---|---|---|---|---|---|---|---|\n",
         );
         let mut passed = 0usize;
         let cases = eval_cases();
@@ -792,21 +1043,45 @@ mod runner {
                 .await
                 .expect(case.name)
                 .get(0);
-            assert!(
-                digits(&truth).len() >= 4,
-                "{}: truth '{}' too short to grade",
-                case.name,
-                truth
-            );
+            match case.grade_mode {
+                GradeMode::Numeric => {
+                    // Warning, not a failure: the grader already requires
+                    // ≥ 4 digits (`answer_contains_truth`), and the
+                    // grandfathered `total_cancelled` case is 121 on the
+                    // canonical demo DB — aborting here would block a valid
+                    // capture. Short truths cannot grade as correct.
+                    if digits(&truth).len() < 4 {
+                        eprintln!(
+                            "warning: {}: truth '{}' is shorter than 4 digits; \
+                             this case cannot grade as correct",
+                            case.name, truth
+                        );
+                    }
+                }
+                GradeMode::EmptyState => assert_eq!(
+                    digits(&truth),
+                    "0",
+                    "{}: an EmptyState case needs an empty truth",
+                    case.name
+                ),
+            }
 
             let start = std::time::Instant::now();
             let sink = Arc::new(EvalSink(std::sync::Mutex::new(vec![])));
             let conv = Arc::new(Mutex::new(crate::ai::agent::ConversationState::new(
                 "eval".into(),
             )));
+            // An explicit OPENAI_BASE_URL/endpoint must be honored: the bare
+            // `OpenAI` arm targets api.openai.com and ignores the endpoint,
+            // while the generic OpenAI-compatible arm passes `base_url`.
+            let provider_kind = if endpoint.is_some() {
+                crate::ai::config::AiProvider::Custom
+            } else {
+                crate::ai::config::AiProvider::OpenAI
+            };
             let provider: Arc<dyn crate::ai::provider::LlmProvider> =
                 Arc::new(crate::ai::providers::rig::RigProvider::new(
-                    crate::ai::config::AiProvider::OpenAI,
+                    provider_kind,
                     api_key.clone(),
                     endpoint.clone(),
                 ));
@@ -820,6 +1095,10 @@ mod runner {
                 embedder: embedder.clone(),
                 reranker: Arc::new(Mutex::new(None)),
                 memory_manager: crate::ai::tools::test_memory_manager(),
+                result_scope: crate::ai::result_store::ResultScope::isolated(format!(
+                    "eval:{}",
+                    case.name
+                )),
             };
             let system_prompt = {
                 let g = graph.lock().await;
@@ -853,6 +1132,7 @@ mod runner {
                     _ => None,
                 })
                 .unwrap_or_default();
+            let metrics = case_metrics(&events);
             let turns = events
                 .iter()
                 .filter(|e| matches!(e, AiEvent::ToolCalls { .. }))
@@ -868,7 +1148,10 @@ mod runner {
                 })
                 .sum();
 
-            let ok = answer_contains_truth(&final_answer, &truth);
+            let ok = match case.grade_mode {
+                GradeMode::Numeric => answer_contains_truth(&final_answer, &truth),
+                GradeMode::EmptyState => answer_states_empty(&final_answer),
+            };
             if ok {
                 passed += 1;
             }
@@ -878,12 +1161,21 @@ mod runner {
                 format!("❌ (truth {truth})")
             };
             report.push_str(&format!(
-                "| {} | {} | {} | {} | {:.1}s |\n",
+                "| {} | {} | {} | {} | {:.1}s | {} | {} | {}/{} |\n",
                 case.name,
                 mark,
                 turns,
                 tokens,
                 start.elapsed().as_secs_f32(),
+                metrics
+                    .tool_calls
+                    .iter()
+                    .map(|(k, v)| format!("{k}:{v}"))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                metrics.redundant_requeries,
+                metrics.rows_seen,
+                metrics.rows_returned,
             ));
             eprintln!(
                 "[eval] {} → {}",
