@@ -3,6 +3,24 @@ use serde_json::json;
 
 use super::{AiToolContext, ToolError, ToolOutput};
 
+/// Safely format an ObjectRef as a qualified SQL identifier string using quote_identifier
+/// to prevent SQL injection or identifier formatting issues.
+pub(crate) fn qualify_object_ref(reference: &ObjectRef) -> String {
+    use crate::sql_quote::quote_identifier;
+    let non_empty_ns: Vec<String> = reference
+        .namespace
+        .iter()
+        .filter(|s| !s.is_empty())
+        .map(|s| quote_identifier(s))
+        .collect();
+
+    if non_empty_ns.is_empty() {
+        quote_identifier(&reference.name)
+    } else {
+        format!("{}.{}", non_empty_ns.join("."), quote_identifier(&reference.name))
+    }
+}
+
 /// Normalized details → the JSON shape `get_objects_info` has always returned.
 /// Kept as a pure function so the shape is testable without a database.
 pub(crate) fn details_to_json(details: &[ObjectDetail]) -> Vec<serde_json::Value> {
@@ -190,22 +208,9 @@ impl GetObjectsInfo {
         if let Some(n) = sample_rows.filter(|n| *n > 0) {
             for (result_obj, detail) in results.iter_mut().zip(details.iter()) {
                 // Sample rows are user data, not catalog data — this stays an
-                // ordinary query. Plan C moves the quoting behind SqlBuilder.
-                let qualified = if detail.reference.namespace.is_empty()
-                    || detail.reference.namespace.iter().all(|s| s.is_empty())
-                {
-                    format!("\"{}\"", detail.reference.name.replace('"', "\"\""))
-                } else {
-                    let ns = detail
-                        .reference
-                        .namespace
-                        .iter()
-                        .filter(|s| !s.is_empty())
-                        .map(|s| format!("\"{}\"", s.replace('"', "\"\"")))
-                        .collect::<Vec<_>>()
-                        .join(".");
-                    format!("{ns}.\"{}\"", detail.reference.name.replace('"', "\"\""))
-                };
+                // ordinary query. Use quote_identifier to safely construct SQL table names
+                // and prevent SQL injection or syntax issues on special characters.
+                let qualified = qualify_object_ref(&detail.reference);
                 match client
                     .execute(conn_id, &format!("SELECT * FROM {qualified} LIMIT {n}"))
                     .await
@@ -355,5 +360,34 @@ mod tests {
             requested, None,
             "omitting sample_rows must not fetch any preview rows"
         );
+    }
+
+    #[test]
+    fn qualify_object_ref_escapes_special_characters_properly() {
+        use super::qualify_object_ref;
+
+        let obj1 = ObjectRef {
+            namespace: vec!["public".into()],
+            name: "users".into(),
+            kind: ObjectKind::Table,
+        };
+        assert_eq!(qualify_object_ref(&obj1), "\"public\".\"users\"");
+
+        let obj2 = ObjectRef {
+            namespace: vec!["my\"schema".into()],
+            name: "table\"name".into(),
+            kind: ObjectKind::Table,
+        };
+        assert_eq!(
+            qualify_object_ref(&obj2),
+            "\"my\"\"schema\".\"table\"\"name\""
+        );
+
+        let obj3 = ObjectRef {
+            namespace: vec!["".into()],
+            name: "simple".into(),
+            kind: ObjectKind::Table,
+        };
+        assert_eq!(qualify_object_ref(&obj3), "\"simple\"");
     }
 }
