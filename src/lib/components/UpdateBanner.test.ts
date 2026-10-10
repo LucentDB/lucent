@@ -46,7 +46,14 @@ describe('UpdateBanner', () => {
     check.mockResolvedValue({ version: '0.2.0', downloadAndInstall });
     const { container, getByRole } = render(UpdateBanner);
     await vi.waitFor(() => expect(container.textContent).toContain('0.2.0'));
-    await fireEvent.click(getByRole('button', { name: /install/i }));
+
+    const statusEl = container.querySelector('[role="status"]');
+    expect(statusEl?.getAttribute('aria-live')).toBe('polite');
+
+    const button = getByRole('button', { name: /install/i });
+    expect(button.getAttribute('type')).toBe('button');
+
+    await fireEvent.click(button);
     await vi.waitFor(() => expect(relaunch).toHaveBeenCalled());
     expect(downloadAndInstall).toHaveBeenCalled();
   });
