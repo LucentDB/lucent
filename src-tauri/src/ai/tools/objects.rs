@@ -17,7 +17,11 @@ pub(crate) fn qualify_object_ref(reference: &ObjectRef) -> String {
     if non_empty_ns.is_empty() {
         quote_identifier(&reference.name)
     } else {
-        format!("{}.{}", non_empty_ns.join("."), quote_identifier(&reference.name))
+        format!(
+            "{}.{}",
+            non_empty_ns.join("."),
+            quote_identifier(&reference.name)
+        )
     }
 }
 
