@@ -2617,11 +2617,12 @@ pub(crate) fn load_api_key(config: &AiConfig) -> Result<String, String> {
 
     // 2. Try OPENAI_API_KEY env var
     if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-        if !key.is_empty() {
+        let trimmed = key.trim().to_string();
+        if !trimmed.is_empty() {
             log::debug!("LLM API key loaded from OPENAI_API_KEY env var");
-            return Ok(key);
+            return Ok(trimmed);
         }
-        log::warn!("OPENAI_API_KEY env var is set but empty");
+        log::warn!("OPENAI_API_KEY env var is set but blank");
     } else {
         log::debug!("OPENAI_API_KEY env var not set");
     }
@@ -2630,8 +2631,12 @@ pub(crate) fn load_api_key(config: &AiConfig) -> Result<String, String> {
     let account = keychain_account(&config.provider);
     match keyring::Entry::new(KEYCHAIN_SERVICE, account).and_then(|e| e.get_password()) {
         Ok(key) => {
-            log::debug!("LLM API key loaded from OS keychain");
-            return Ok(key);
+            let trimmed = key.trim().to_string();
+            if !trimmed.is_empty() {
+                log::debug!("LLM API key loaded from OS keychain");
+                return Ok(trimmed);
+            }
+            log::warn!("Keychain API key is blank");
         }
         Err(keyring_err) => {
             log::warn!(
@@ -3740,10 +3745,13 @@ pub async fn save_ai_settings(
     validate_custom_endpoint(&config)?;
     let config = normalize_acp_config(config);
     if let Some(key) = api_key {
-        keyring::Entry::new(KEYCHAIN_SERVICE, keychain_account(&config.provider))
-            .map_err(|e| format!("Keychain error: {e}"))?
-            .set_password(&key)
-            .map_err(|e| format!("Failed to save key: {e}"))?;
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            keyring::Entry::new(KEYCHAIN_SERVICE, keychain_account(&config.provider))
+                .map_err(|e| format!("Keychain error: {e}"))?
+                .set_password(trimmed)
+                .map_err(|e| format!("Failed to save key: {e}"))?;
+        }
     }
     crate::ai::config::save_config_to_disk(&config)
         .map_err(|e| format!("Failed to save config: {e}"))?;
@@ -3760,10 +3768,12 @@ pub async fn list_ai_models(
     endpoint: Option<String>,
 ) -> Result<Vec<crate::ai::providers::dispatch::ModelSummary>, String> {
     let key = match api_key {
-        Some(k) if !k.is_empty() => k,
+        Some(k) if !k.trim().is_empty() => k.trim().to_string(),
         _ => keyring::Entry::new(KEYCHAIN_SERVICE, keychain_account(&provider))
             .ok()
             .and_then(|entry| entry.get_password().ok())
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
             .unwrap_or_default(),
     };
     crate::ai::providers::dispatch::list_models_for(&provider, &key, &endpoint).await
@@ -4626,6 +4636,65 @@ mod api_key_cache_tests {
     #[test]
     fn miss_when_empty() {
         assert_eq!(cached_api_key(&None, &AiProvider::OpenAI), None);
+    }
+}
+
+#[cfg(test)]
+mod api_key_sanitization_tests {
+    use super::load_api_key;
+    use crate::ai::config::{AiConfig, AiProvider};
+
+    fn with_env<T>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        let prior: Vec<_> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+        for (k, v) in vars {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        let out = f();
+        for (k, prev) in prior {
+            match prev {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        out
+    }
+
+    /// `load_api_key` reads `~/.lucent/ai-key.txt` before the env var, so the
+    /// env-var arm only runs when HOME points at a directory without that
+    /// file — hence the throwaway HOME (same pattern as the ACP install tests).
+    #[test]
+    fn load_api_key_trims_env_var_and_skips_whitespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_str().unwrap();
+        let config = AiConfig {
+            provider: AiProvider::OpenAI,
+            ..AiConfig::default()
+        };
+
+        let key = with_env(
+            &[
+                ("HOME", Some(home)),
+                ("OPENAI_API_KEY", Some("  sk-test-key-1234  \n")),
+            ],
+            || load_api_key(&config),
+        );
+        assert_eq!(key.expect("env var key should load"), "sk-test-key-1234");
+
+        // A whitespace-only env var is skipped, so whatever comes back from
+        // the remaining lookup paths is never a blank key.
+        let res = with_env(
+            &[("HOME", Some(home)), ("OPENAI_API_KEY", Some("   \n\t "))],
+            || load_api_key(&config),
+        );
+        if let Ok(k) = res {
+            assert!(!k.trim().is_empty(), "returned key must not be whitespace");
+        }
     }
 }
 

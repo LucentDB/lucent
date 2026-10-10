@@ -739,7 +739,7 @@ async fn wait_until(deadline: Option<tokio::time::Instant>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::ai::acp::correlator::BufferedToolResult;
     use crate::ai::agent::CollectorSink;
@@ -788,7 +788,9 @@ mod tests {
     pub(crate) struct EnvVarGuard<'a>(
         &'a str,
         Option<String>,
-        Option<std::sync::MutexGuard<'static, ()>>,
+        // Held, never read: keeping the guard alive is what serializes the
+        // env-var-mutating tests; dropping it happens after the env restore.
+        #[allow(dead_code)] Option<std::sync::MutexGuard<'static, ()>>,
     );
     impl Drop for EnvVarGuard<'_> {
         fn drop(&mut self) {
