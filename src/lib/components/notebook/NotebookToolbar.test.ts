@@ -5,15 +5,21 @@ import NotebookToolbar from './NotebookToolbar.svelte';
 afterEach(cleanup);
 
 describe('NotebookToolbar', () => {
-  it('shows Run All button', () => {
-    render(NotebookToolbar, {
+  it('shows Run All button with appropriate tooltip', () => {
+    const { rerender } = render(NotebookToolbar, {
       props: {
         onRunAll: vi.fn(),
         onClearOutputs: vi.fn(),
         onRestartSession: vi.fn(),
       },
     });
-    expect(screen.getByText('Run All')).toBeTruthy();
+    const btn = screen
+      .getByText('Run All')
+      .closest('button') as HTMLButtonElement;
+    expect(btn.title).toBe('Run all cells');
+
+    rerender({ isRunning: true });
+    expect(btn.title).toBe('Running all cells…');
   });
 
   it('shows the current notebook interaction mode', () => {
