@@ -136,3 +136,25 @@ test('strips forbidden base, meta, and link tags from rendered markdown', () => 
   expect(out.toLowerCase()).not.toContain('<meta');
   expect(out.toLowerCase()).not.toContain('<link');
 });
+
+test('strips inline style attributes to prevent CSS injection and UI spoofing', () => {
+  const out = renderMarkdown(
+    '<p style="position:fixed;top:0;left:0;width:100%;height:100%;z-index:9999;background:red">Overlay</p>',
+  );
+  expect(out.toLowerCase()).not.toContain('style=');
+  expect(out).toContain('<p>Overlay</p>');
+});
+
+test('strips standalone non-checkbox inputs and additional form control tags', () => {
+  const payload = `
+<input value="unattached" />
+<fieldset><legend>Title</legend><option>Opt</option><datalist id="l"></datalist><output>1</output></fieldset>
+`;
+  const out = renderMarkdown(payload);
+  expect(out).not.toContain('unattached');
+  expect(out.toLowerCase()).not.toContain('<fieldset');
+  expect(out.toLowerCase()).not.toContain('<legend');
+  expect(out.toLowerCase()).not.toContain('<option');
+  expect(out.toLowerCase()).not.toContain('<datalist');
+  expect(out.toLowerCase()).not.toContain('<output');
+});
