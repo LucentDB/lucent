@@ -70,9 +70,16 @@ markdownRenderer.code = (token: Tokens.Code) => {
   return `<pre><code class="language-${normalizedLanguage}">${highlightSqlHtml(text)}</code></pre>\n`;
 };
 
+/** Maximum allowed length for markdown input to prevent CPU DoS / ReDoS (500k chars). */
+const MAX_MARKDOWN_LENGTH = 500_000;
+
 export function renderMarkdown(text: string): string {
   try {
-    const result = marked.parse(String(text ?? ''), {
+    let input = String(text ?? '');
+    if (input.length > MAX_MARKDOWN_LENGTH) {
+      input = input.slice(0, MAX_MARKDOWN_LENGTH) + '\n\n*(output truncated)*';
+    }
+    const result = marked.parse(input, {
       async: false,
       renderer: markdownRenderer,
     });

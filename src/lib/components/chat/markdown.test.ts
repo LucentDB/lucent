@@ -136,3 +136,10 @@ test('strips forbidden base, meta, and link tags from rendered markdown', () => 
   expect(out.toLowerCase()).not.toContain('<meta');
   expect(out.toLowerCase()).not.toContain('<link');
 });
+
+test('truncates excessively long input strings to avoid DoS', () => {
+  const longInput = 'a'.repeat(600_000);
+  const out = renderMarkdown(longInput);
+  expect(out).toContain('(output truncated)');
+  expect(out.length).toBeLessThan(600_000);
+});
