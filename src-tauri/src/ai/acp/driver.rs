@@ -788,7 +788,7 @@ pub(crate) mod tests {
     pub(crate) struct EnvVarGuard<'a>(
         &'a str,
         Option<String>,
-        Option<std::sync::MutexGuard<'static, ()>>,
+        #[allow(dead_code)] Option<std::sync::MutexGuard<'static, ()>>,
     );
     impl Drop for EnvVarGuard<'_> {
         fn drop(&mut self) {

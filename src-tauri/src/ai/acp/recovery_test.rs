@@ -269,6 +269,8 @@ async fn cancel_resolves_pending_permission_then_cancels() {
 #[tokio::test]
 async fn agent_crash_surfaces_stderr_tail_and_budget_blocks_restart() {
     let _ws = hermetic_workspace();
+    let _gate_guard = crate::ai::acp::driver::tests::env_var_guard("LUCENT_ACP_TOOLS_GATE_MS");
+    std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "50");
     let script = script_file(json!({
         "stopReason": "end_turn",
         "steps": [{"exit": true}]

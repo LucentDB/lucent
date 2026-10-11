@@ -170,8 +170,10 @@ impl ToolExecutor for DynamicContextToolExecutor {
                 .unwrap_or("");
             Some(format!("{host}:{port}/{database}"))
         };
-        let mut config = crate::ai::config::AiConfig::default();
-        config.ai_query_timeout_secs = 15;
+        let config = crate::ai::config::AiConfig {
+            ai_query_timeout_secs: 15,
+            ..Default::default()
+        };
         let tool_ctx = AiToolContext {
             db: Arc::clone(&self.context.client),
             connection_id: conn_id,
