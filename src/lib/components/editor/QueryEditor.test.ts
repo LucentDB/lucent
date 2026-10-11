@@ -60,3 +60,16 @@ test('uses the light surface for the CodeMirror gutter in light mode', () => {
     ),
   ).toBe(true);
 });
+
+test('has title tooltip and aria-hidden decorative icon on the run button', () => {
+  const { container } = render(QueryEditor, {
+    props: { onExecute: vi.fn() },
+  });
+  const runBtn = container.querySelector('.run-btn') as HTMLButtonElement;
+  expect(runBtn).toBeTruthy();
+  expect(runBtn.getAttribute('title')).toBe('Run query');
+
+  const runIcon = runBtn.querySelector('.run-icon');
+  expect(runIcon).toBeTruthy();
+  expect(runIcon?.getAttribute('aria-hidden')).toBe('true');
+});
