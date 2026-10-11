@@ -76,16 +76,18 @@
     }
   });
 
-  let searchQuery = $state('');
-  let searchQueryLower = $derived(searchQuery.toLowerCase());
-  let objectLabels = {
+  // Lifted static group metadata to avoid re-allocating objects and arrays on each render or component initialization
+  const OBJECT_LABELS = {
     table: 'Tables',
     view: 'Views',
     matview: 'Materialized Views',
     function: 'Functions',
     sequence: 'Sequences',
   };
-  let groupOrder = ['table', 'view', 'matview', 'function', 'sequence'];
+  const GROUP_ORDER = ['table', 'view', 'matview', 'function', 'sequence'];
+
+  let searchQuery = $state('');
+  let searchQueryLower = $derived(searchQuery.toLowerCase());
 
   async function switchConnection(id) {
     switcherOpen = false;
@@ -142,9 +144,9 @@
       if (!groups[obj.kind]) groups[obj.kind] = [];
       groups[obj.kind].push(obj);
     }
-    return groupOrder
+    return GROUP_ORDER
       .filter((k) => groups[k])
-      .map((k) => ({ kind: k, label: objectLabels[k], items: groups[k] }));
+      .map((k) => ({ kind: k, label: OBJECT_LABELS[k], items: groups[k] }));
   }
 
   async function handleRefresh(event) {
