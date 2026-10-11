@@ -144,9 +144,11 @@
       if (!groups[obj.kind]) groups[obj.kind] = [];
       groups[obj.kind].push(obj);
     }
-    return GROUP_ORDER
-      .filter((k) => groups[k])
-      .map((k) => ({ kind: k, label: OBJECT_LABELS[k], items: groups[k] }));
+    return GROUP_ORDER.filter((k) => groups[k]).map((k) => ({
+      kind: k,
+      label: OBJECT_LABELS[k],
+      items: groups[k],
+    }));
   }
 
   async function handleRefresh(event) {
