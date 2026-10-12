@@ -80,10 +80,11 @@ export function renderMarkdown(text: string): string {
     return DOMPurify.sanitize(html, {
       FORBID_TAGS: FORBIDDEN_MARKDOWN_TAGS,
       FORBID_ATTR: ['autofocus'],
-      // Only safe link protocols and relative paths, so `data:`, `javascript:`,
-      // `blob:`, and protocol-relative `//host` URLs are dropped.
+      // Only safe link protocols (http, https, mailto, tel) and relative paths,
+      // so `data:`, `javascript:`, `vbscript:`, `blob:`, `file:`, `vscode:`, and
+      // protocol-relative `//host` URLs are dropped.
       ALLOWED_URI_REGEXP:
-        /^(?:(?:(?:f|ht)tps?|mailto|tel):|(?:(?!\/\/)[^:]*?(?:[/?#]|$)))/i,
+        /^(?:(?:https?|mailto|tel):|(?!\/\/)(?:[^\/#?:][^\/#:]*)?(?:[\/?#]|$))/i,
     });
   } catch {
     return String(text ?? '')
