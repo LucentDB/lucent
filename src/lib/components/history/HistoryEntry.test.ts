@@ -1,5 +1,5 @@
-import { render, screen, cleanup } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { render, screen, cleanup, fireEvent } from '@testing-library/svelte';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import HistoryEntry from './HistoryEntry.svelte';
 import type { HistoryEntry as HistoryEntryType } from '../../stores/history.svelte';
 
@@ -50,5 +50,18 @@ describe('HistoryEntry accessibility', () => {
     expect(
       screen.getByRole('button', { name: 'Unfavorite query' }),
     ).toBeDefined();
+  });
+
+  it('shows copy confirmation state and aria-label when copy button is clicked', async () => {
+    const onCopy = vi.fn();
+    render(HistoryEntry, { entry: sampleEntry, onCopy });
+
+    const copyBtn = screen.getByRole('button', { name: 'Copy SQL' });
+    expect(copyBtn).toBeDefined();
+
+    await fireEvent.click(copyBtn);
+
+    expect(onCopy).toHaveBeenCalledWith(sampleEntry.sql);
+    expect(screen.getByRole('button', { name: 'Copied SQL' })).toBeDefined();
   });
 });

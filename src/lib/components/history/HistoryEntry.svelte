@@ -44,6 +44,18 @@
     if (hours < 24) return `${hours}h ago`;
     return d.toLocaleDateString();
   }
+
+  let copied = $state(false);
+  let copyTimeout: ReturnType<typeof setTimeout> | undefined;
+
+  function handleCopyClick() {
+    onCopy?.(entry.sql);
+    copied = true;
+    if (copyTimeout) clearTimeout(copyTimeout);
+    copyTimeout = setTimeout(() => {
+      copied = false;
+    }, 1500);
+  }
 </script>
 
 <div
@@ -102,21 +114,35 @@
     <button
       type="button"
       class="action-btn"
-      aria-label="Copy SQL"
-      title="Copy SQL"
-      onclick={() => onCopy?.(entry.sql)}
+      class:copied
+      aria-label={copied ? 'Copied SQL' : 'Copy SQL'}
+      title={copied ? 'Copied!' : 'Copy SQL'}
+      onclick={handleCopyClick}
     >
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-      >
-        <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-      </svg>
+      {#if copied}
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      {:else}
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+      {/if}
     </button>
     <button
       type="button"
@@ -241,5 +267,8 @@
   }
   .action-btn.faved {
     color: var(--warning);
+  }
+  .action-btn.copied {
+    color: var(--accent, #10b981);
   }
 </style>
