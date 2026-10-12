@@ -136,3 +136,17 @@ test('strips forbidden base, meta, and link tags from rendered markdown', () => 
   expect(out.toLowerCase()).not.toContain('<meta');
   expect(out.toLowerCase()).not.toContain('<link');
 });
+
+test('strips unsafe custom/system protocols and protocol-relative URLs in links', () => {
+  const fileLink = renderMarkdown('[file](file:///etc/passwd)');
+  expect(fileLink.toLowerCase()).not.toContain('file:///');
+
+  const vscodeLink = renderMarkdown('[vscode](vscode://file/etc)');
+  expect(vscodeLink.toLowerCase()).not.toContain('vscode://');
+
+  const protoRelLink = renderMarkdown('[proto](//attacker.com/evil)');
+  expect(protoRelLink.toLowerCase()).not.toContain('//attacker.com');
+
+  const ftpLink = renderMarkdown('[ftp](ftp://example.com)');
+  expect(ftpLink.toLowerCase()).not.toContain('ftp://');
+});
