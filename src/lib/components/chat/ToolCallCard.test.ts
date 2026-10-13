@@ -50,6 +50,18 @@ describe('ToolCallCard status model', () => {
     expect(screen.getByText('Stopped')).toBeTruthy();
   });
 
+  it('renders header button with type="button" and toggles aria-expanded', async () => {
+    render(ToolCallCard, {
+      tool: { ...base, status: 'completed', summary: '1 row' },
+    });
+    const btn = screen.getByRole('button');
+    expect(btn.getAttribute('type')).toBe('button');
+    expect(btn.getAttribute('aria-expanded')).toBe('false');
+
+    await fireEvent.click(btn);
+    expect(btn.getAttribute('aria-expanded')).toBe('true');
+  });
+
   it('renders the results chip from the query_result payload', async () => {
     render(ToolCallCard, {
       tool: {
