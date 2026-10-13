@@ -1751,7 +1751,8 @@ pub fn validate_approved(
 fn approved_paths_file() -> Result<std::path::PathBuf, CommandError> {
     if let Ok(dir) = std::env::var("LUCENT_CONFIG_DIR") {
         let path = std::path::PathBuf::from(dir).join("lucent");
-        std::fs::create_dir_all(&path).map_err(|e| CommandError::new("PathError", e.to_string()))?;
+        std::fs::create_dir_all(&path)
+            .map_err(|e| CommandError::new("PathError", e.to_string()))?;
         return Ok(path.join("approved_save_paths.json"));
     }
     let mut dir =
@@ -1777,7 +1778,7 @@ fn load_approved_paths() -> std::collections::HashSet<std::path::PathBuf> {
 
 /// Write the approved-path set back to disk. Best-effort: a persistence
 /// failure must not fail the dialog flow the user already completed.
-async fn persist_approved_paths(state: &AppState) -> Result<(), CommandError> {
+pub(crate) async fn persist_approved_paths(state: &AppState) -> Result<(), CommandError> {
     let paths = state.approved_save_paths.lock().await.clone();
     let file = approved_paths_file()?;
     let list: Vec<String> = paths
