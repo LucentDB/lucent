@@ -45,8 +45,7 @@ pub fn default_discovery_file_path() -> Result<PathBuf, String> {
 
     #[cfg(target_os = "macos")]
     {
-        let data_dir = dirs::data_dir()
-            .ok_or_else(|| "Could not determine macOS Application Support directory".to_string())?;
+        let data_dir = dirs::data_dir().ok_or_else(|| "Could not determine macOS Application Support directory".to_string())?;
         Ok(data_dir.join("Lucent").join("external-mcp.json"))
     }
 
@@ -60,8 +59,7 @@ pub fn default_discovery_file_path() -> Result<PathBuf, String> {
 
     #[cfg(target_os = "windows")]
     {
-        let data_dir = dirs::data_dir()
-            .ok_or_else(|| "Could not determine Windows APPDATA directory".to_string())?;
+        let data_dir = dirs::data_dir().ok_or_else(|| "Could not determine Windows APPDATA directory".to_string())?;
         Ok(data_dir.join("Lucent").join("external-mcp.json"))
     }
 
@@ -84,8 +82,8 @@ pub fn socket_dir_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "Could not determine Linux runtime or data directory".to_string())?;
 
     #[cfg(not(target_os = "linux"))]
-    let base =
-        dirs::data_dir().ok_or_else(|| "Could not determine user data directory".to_string())?;
+    let base = dirs::data_dir()
+        .ok_or_else(|| "Could not determine user data directory".to_string())?;
 
     let dir = base.join("lucent").join("ipc");
     Ok(dir)
@@ -94,18 +92,13 @@ pub fn socket_dir_path() -> Result<PathBuf, String> {
 /// Ensures the socket directory exists with strict 0700 permissions on Unix.
 pub fn ensure_socket_dir() -> Result<PathBuf, String> {
     let dir = socket_dir_path()?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create socket dir {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create socket dir {}: {e}", dir.display()))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
-            format!(
-                "Failed to set 0700 permissions on socket dir {}: {e}",
-                dir.display()
-            )
-        })?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("Failed to set 0700 permissions on socket dir {}: {e}", dir.display()))?;
     }
 
     Ok(dir)
@@ -123,20 +116,14 @@ pub fn write_discovery_file_at(path: &Path, info: &DiscoveryInfo) -> Result<(), 
         std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent dir: {e}"))?;
     }
 
-    let json = serde_json::to_string_pretty(info)
-        .map_err(|e| format!("Failed to serialize discovery info: {e}"))?;
+    let json = serde_json::to_string_pretty(info).map_err(|e| format!("Failed to serialize discovery info: {e}"))?;
 
     let temp_file_name = format!(
         ".{}.tmp.{}",
-        path.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("external-mcp"),
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("external-mcp"),
         uuid::Uuid::new_v4()
     );
-    let temp_path = path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(temp_file_name);
+    let temp_path = path.parent().unwrap_or_else(|| Path::new(".")).join(temp_file_name);
 
     #[cfg(unix)]
     {
@@ -148,12 +135,7 @@ pub fn write_discovery_file_at(path: &Path, info: &DiscoveryInfo) -> Result<(), 
             .truncate(true)
             .mode(0o600)
             .open(&temp_path)
-            .map_err(|e| {
-                format!(
-                    "Failed to create temp discovery file at {}: {e}",
-                    temp_path.display()
-                )
-            })?;
+            .map_err(|e| format!("Failed to create temp discovery file at {}: {e}", temp_path.display()))?;
 
         file.write_all(json.as_bytes())
             .map_err(|e| format!("Failed to write discovery json: {e}"))?;
@@ -170,10 +152,7 @@ pub fn write_discovery_file_at(path: &Path, info: &DiscoveryInfo) -> Result<(), 
     // Atomic replace
     std::fs::rename(&temp_path, path).map_err(|e| {
         let _ = std::fs::remove_file(&temp_path);
-        format!(
-            "Failed to rename temp discovery file to {}: {e}",
-            path.display()
-        )
+        format!("Failed to rename temp discovery file to {}: {e}", path.display())
     })?;
 
     #[cfg(unix)]
