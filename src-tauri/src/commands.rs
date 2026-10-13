@@ -1749,6 +1749,11 @@ pub fn validate_approved(
 /// paths the user explicitly chose in a native dialog. Only ever grows via
 /// `choose_path_via_dialog`; nothing else writes it.
 fn approved_paths_file() -> Result<std::path::PathBuf, CommandError> {
+    if let Ok(dir) = std::env::var("LUCENT_CONFIG_DIR") {
+        let path = std::path::PathBuf::from(dir).join("lucent");
+        std::fs::create_dir_all(&path).map_err(|e| CommandError::new("PathError", e.to_string()))?;
+        return Ok(path.join("approved_save_paths.json"));
+    }
     let mut dir =
         dirs::config_dir().ok_or_else(|| CommandError::new("PathError", "no config dir"))?;
     dir.push("lucent");
@@ -1783,7 +1788,13 @@ async fn persist_approved_paths(state: &AppState) -> Result<(), CommandError> {
         &file,
         serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()),
     )
-    .map_err(|e| CommandError::new("PathError", format!("cannot persist approved paths: {e}")))
+    .map_err(|e| CommandError::new("PathError", format!("cannot persist approved paths: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 /// Shared body for `choose_save_path` / `choose_export_path`: show a native

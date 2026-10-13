@@ -43,3 +43,37 @@ async fn rejects_a_path_that_was_not_dialog_approved() {
         "the error must say why the path was rejected, got: {err}"
     );
 }
+
+#[tokio::test]
+async fn persist_approved_paths_restricts_file_permissions() {
+    use super::super::commands::persist_approved_paths;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    std::env::set_var("LUCENT_CONFIG_DIR", dir.path());
+
+    let state = AppState::new();
+    let test_path = dir.path().join("test_save.sql");
+    state
+        .approved_save_paths
+        .lock()
+        .await
+        .insert(test_path.clone());
+
+    persist_approved_paths(&state).await.unwrap();
+
+    let approved_file = dir.path().join("lucent").join("approved_save_paths.json");
+    assert!(approved_file.exists());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = std::fs::metadata(&approved_file).unwrap();
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "approved_save_paths.json must have 0o600 permissions"
+        );
+    }
+
+    std::env::remove_var("LUCENT_CONFIG_DIR");
+}
