@@ -99,15 +99,22 @@ const KNOWN_ORDER = ['Today', 'Yesterday', 'This Week', 'Last Week'];
  */
 export function groupByDate(entries: HistoryEntry[]): HistoryGroup[] {
   const grouped = new Map<string, HistoryEntry[]>();
-  for (const e of entries) {
-    if (!grouped.has(e.dateGroup)) grouped.set(e.dateGroup, []);
-    grouped.get(e.dateGroup)!.push(e);
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    let list = grouped.get(e.dateGroup);
+    if (!list) {
+      list = [];
+      grouped.set(e.dateGroup, list);
+    }
+    list.push(e);
   }
 
   const groups: HistoryGroup[] = [];
-  for (const label of KNOWN_ORDER) {
-    if (grouped.has(label)) {
-      groups.push({ label, entries: grouped.get(label)! });
+  for (let i = 0; i < KNOWN_ORDER.length; i++) {
+    const label = KNOWN_ORDER[i];
+    const list = grouped.get(label);
+    if (list) {
+      groups.push({ label, entries: list });
       grouped.delete(label);
     }
   }

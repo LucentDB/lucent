@@ -78,14 +78,20 @@
 
   let searchQuery = $state('');
   let searchQueryLower = $derived(searchQuery.toLowerCase());
-  let objectLabels = {
+
+  // Static label mappings and ordering moved to module scope constants to avoid re-allocation.
+  const OBJECT_LABELS = {
     table: 'Tables',
     view: 'Views',
     matview: 'Materialized Views',
     function: 'Functions',
     sequence: 'Sequences',
   };
-  let groupOrder = ['table', 'view', 'matview', 'function', 'sequence'];
+  const GROUP_ORDER = ['table', 'view', 'matview', 'function', 'sequence'];
+
+  // WeakMap cache to memoize grouped schema objects by array reference,
+  // preventing repeated grouping logic & object/array allocations on every render pass.
+  const groupCache = new WeakMap();
 
   async function switchConnection(id) {
     switcherOpen = false;
@@ -137,14 +143,25 @@
   }
 
   function groupObjects(objects) {
+    if (!objects) return [];
+    const cached = groupCache.get(objects);
+    if (cached) return cached;
+
     const groups = {};
-    for (const obj of objects) {
+    for (let i = 0; i < objects.length; i++) {
+      const obj = objects[i];
       if (!groups[obj.kind]) groups[obj.kind] = [];
       groups[obj.kind].push(obj);
     }
-    return groupOrder
-      .filter((k) => groups[k])
-      .map((k) => ({ kind: k, label: objectLabels[k], items: groups[k] }));
+    const result = [];
+    for (let i = 0; i < GROUP_ORDER.length; i++) {
+      const k = GROUP_ORDER[i];
+      if (groups[k]) {
+        result.push({ kind: k, label: OBJECT_LABELS[k] ?? k, items: groups[k] });
+      }
+    }
+    groupCache.set(objects, result);
+    return result;
   }
 
   async function handleRefresh(event) {
