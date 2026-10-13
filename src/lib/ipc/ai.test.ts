@@ -229,15 +229,12 @@ describe('handleAiEvent', () => {
     expect(invokeMock).toHaveBeenCalledWith('get_ai_usage', {
       conversationId: conv.id,
     });
-    expect(invokeMock).toHaveBeenCalledWith(
-      'save_chat_message',
-      expect.objectContaining({
-        message: expect.objectContaining({
-          id: 'm1',
-          conversation_id: conv.id,
-        }),
+    expect(invokeMock).toHaveBeenCalledWith('save_chat_message', expect.objectContaining({
+      message: expect.objectContaining({
+        id: 'm1',
+        conversation_id: conv.id,
       }),
-    );
+    }));
   });
 
   it('keeps the previous usage when the get_ai_usage fetch fails', async () => {
@@ -279,16 +276,13 @@ describe('handleAiEvent', () => {
       },
     });
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith(
-        'save_chat_message',
-        expect.objectContaining({
-          message: expect.objectContaining({
-            id: 'm1',
-            conversation_id: conv.id,
-            role: 'assistant',
-          }),
+      expect(invokeMock).toHaveBeenCalledWith('save_chat_message', expect.objectContaining({
+        message: expect.objectContaining({
+          id: 'm1',
+          conversation_id: conv.id,
+          role: 'assistant',
         }),
-      );
+      }));
     });
   });
 
