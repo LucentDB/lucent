@@ -739,7 +739,7 @@ async fn wait_until(deadline: Option<tokio::time::Instant>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::ai::acp::correlator::BufferedToolResult;
     use crate::ai::agent::CollectorSink;
@@ -798,7 +798,7 @@ mod tests {
             }
         }
     }
-    pub(crate) fn env_var_guard(name: &'static str) -> EnvVarGuard<'static> {
+    pub fn env_var_guard(name: &'static str) -> EnvVarGuard<'static> {
         let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var(name).ok();
         EnvVarGuard(name, prior, Some(lock))
