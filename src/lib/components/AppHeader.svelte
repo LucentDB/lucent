@@ -275,7 +275,7 @@
                   e.stopPropagation();
                   onCloseTab?.(tab.id);
                 }}
-                aria-label="Close tab">×</button
+                aria-label={`Close ${tabLabel(tab)}`}>×</button
               >
             </div>
           {/each}

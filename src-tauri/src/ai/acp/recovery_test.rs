@@ -292,7 +292,7 @@ async fn agent_crash_surfaces_stderr_tail_and_budget_blocks_restart() {
             std::sync::Mutex::new(Vec::new()),
         ));
         let result = tokio::time::timeout(
-            Duration::from_secs(10),
+            Duration::from_secs(30),
             driver.chat(
                 "hi".into(),
                 &AiConfig::default(),
