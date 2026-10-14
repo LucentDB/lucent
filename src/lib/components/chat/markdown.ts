@@ -38,6 +38,7 @@ const FORBIDDEN_MARKDOWN_TAGS = [
   'form',
   'script',
   'iframe',
+  'frame',
   'object',
   'embed',
   'style',

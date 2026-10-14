@@ -125,14 +125,16 @@ test('allows relative URLs and standard safe schemes', () => {
   expect(mailOut).toContain('href="mailto:test@example.com"');
 });
 
-test('strips forbidden base, meta, and link tags from rendered markdown', () => {
+test('strips forbidden base, meta, link, and frame tags from rendered markdown', () => {
   const payload = `
 <base href="https://attacker.com/" />
 <meta http-equiv="refresh" content="0;url=https://attacker.com" />
 <link rel="stylesheet" href="https://attacker.com/evil.css" />
+<frame src="https://attacker.com/frame.html" />
 `;
   const out = renderMarkdown(payload);
   expect(out.toLowerCase()).not.toContain('<base');
   expect(out.toLowerCase()).not.toContain('<meta');
   expect(out.toLowerCase()).not.toContain('<link');
+  expect(out.toLowerCase()).not.toContain('<frame');
 });
