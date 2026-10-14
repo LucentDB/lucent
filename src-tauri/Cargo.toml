@@ -37,6 +37,7 @@ dashmap = { workspace = true }
 sqlparser = "0.62"
 futures = { workspace = true }
 bincode = { workspace = true }
+bytes = "1"
 keyring = { workspace = true }
 rig-core = { workspace = true }
 
@@ -119,3 +120,7 @@ tokio-postgres = "0.7"
 # dev-dependency it only enables when building for tests — the production
 # binary keeps the lean default feature set.
 tauri = { version = "2", features = ["test"] }
+# rig-core's `test-utils` feature (MockStreamingClient, MockCompletionModel)
+# for the OpenCode-Go reasoning regression tests. Dev-only: the production
+# binary is unaffected.
+rig-core = { workspace = true, features = ["test-utils"] }

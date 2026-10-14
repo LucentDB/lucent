@@ -186,26 +186,33 @@ pub fn migrate_v1_profile(value: &serde_json::Value) -> Option<ConnectionProfile
 
 // ─── File Path ──────────────────────────────────────────────────────────────
 
-pub fn connections_file_path() -> PathBuf {
+/// Base `<config>/lucent` dir shared by `connections.json` and (debug-only)
+/// the `secrets-dev/` secret files. Honors the same overrides in the same
+/// order: thread-local test dir → `$LUCENT_CONFIG_DIR` → OS config dir.
+fn config_base_dir() -> PathBuf {
     #[cfg(test)]
     {
         let override_path = TEST_CONFIG_DIR.with(|cell| cell.borrow().clone());
         if let Some(dir) = override_path {
             let path = dir.join("lucent");
             std::fs::create_dir_all(&path).ok();
-            return path.join("connections.json");
+            return path;
         }
     }
     if let Ok(dir) = std::env::var("LUCENT_CONFIG_DIR") {
         let path = PathBuf::from(dir).join("lucent");
         std::fs::create_dir_all(&path).ok();
-        return path.join("connections.json");
+        return path;
     }
     let base = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("lucent");
     std::fs::create_dir_all(&base).ok();
-    base.join("connections.json")
+    base
+}
+
+pub fn connections_file_path() -> PathBuf {
+    config_base_dir().join("connections.json")
 }
 
 // ─── Read / Write ───────────────────────────────────────────────────────────
@@ -335,7 +342,10 @@ impl std::fmt::Display for KeychainError {
             }
             KeychainError::NoStorageAccess => write!(
                 f,
-                "Cannot access system keychain — app may need signing or keychain access permission"
+                "Cannot access system keychain — on a dev build this usually means \
+                 the ad-hoc code signature changed after a rebuild, so macOS withholds \
+                 the stored password. Re-save the password, or click “Always Allow” \
+                 on both keychain prompts if they appear."
             ),
             KeychainError::Other(msg) => write!(f, "{msg}"),
         }
@@ -344,9 +354,177 @@ impl std::fmt::Display for KeychainError {
 
 impl std::error::Error for KeychainError {}
 
-pub fn get_password(profile_id: &str) -> Result<String, KeychainError> {
-    let entry = Entry::new(KEYCHAIN_SERVICE, profile_id)
-        .map_err(|e| KeychainError::Other(e.to_string()))?;
+// ─── Debug-only zero-prompt secret files ──────────────────────────────────────
+//
+// `keyring` uses the legacy SecKeychain API, and dev binaries are ad-hoc
+// signed with a fresh CDHash on every rebuild — so macOS can never persist an
+// "Always Allow" grant and EVERY keychain read raises two SecurityAgent
+// prompts. In `cfg(debug_assertions)` builds connection/SSH secrets therefore
+// resolve file-first from a 0600 file under `<config>/lucent/secrets-dev/`;
+// writes go to that file and the keychain is never deleted from. A file miss
+// falls back to the keychain once, and a successful fallback read is persisted
+// to the file so later launches never touch the keychain. Release builds stay
+// keychain-only and behave exactly as before.
+
+/// Filename-safe form of a service/account pair. Services are fixed constants;
+/// accounts are profile/tunnel ids (UUIDs), but user-influenced values must
+/// never become path separators. Debug-only: release builds never touch files.
+#[cfg(debug_assertions)]
+fn dev_secret_filename(service: &str, account: &str) -> String {
+    fn safe(s: &str) -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
+    format!("{}--{}", safe(service), safe(account))
+}
+
+#[cfg(debug_assertions)]
+fn dev_secret_path(service: &str, account: &str) -> std::path::PathBuf {
+    config_base_dir()
+        .join("secrets-dev")
+        .join(dev_secret_filename(service, account))
+}
+
+/// File hit, if any. Returns `None` on missing/unreadable files. Logs only
+/// the service and account — never the secret.
+#[cfg(debug_assertions)]
+fn read_dev_secret(service: &str, account: &str) -> Option<String> {
+    let path = dev_secret_path(service, account);
+    match std::fs::read_to_string(&path) {
+        Ok(secret) => {
+            log::debug!("dev secret file hit service={service} account={account}");
+            Some(secret)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            log::debug!("dev secret file miss service={service} account={account}");
+            None
+        }
+        Err(e) => {
+            log::warn!("dev secret file unreadable service={service} account={account}: {e}");
+            None
+        }
+    }
+}
+
+/// Persist a secret to its 0600 dev file (best-effort for callers).
+#[cfg(debug_assertions)]
+fn write_dev_secret(service: &str, account: &str, secret: &str) -> Result<(), String> {
+    let path = dev_secret_path(service, account);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, secret).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    log::debug!("dev secret file wrote service={service} account={account}");
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn remove_dev_secret(service: &str, account: &str) {
+    let path = dev_secret_path(service, account);
+    match std::fs::remove_file(&path) {
+        Ok(()) => log::debug!("dev secret file removed service={service} account={account}"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            log::warn!("dev secret file not removed service={service} account={account}: {e}")
+        }
+    }
+}
+
+/// Test seam: resolve a secret file-first (debug) then via `keychain_read`.
+///
+/// The closure lets tests count reads and inject failures without touching
+/// the real keychain. On a successful keychain fallback read in debug builds
+/// the secret is persisted to the dev file (copy, never move — the keychain
+/// item is left untouched) so later launches never touch the keychain.
+pub(crate) fn resolve_secret_with(
+    service: &str,
+    account: &str,
+    keychain_read: impl FnOnce() -> Result<String, KeychainError>,
+) -> Result<String, KeychainError> {
+    #[cfg(debug_assertions)]
+    {
+        if let Some(hit) = read_dev_secret(service, account) {
+            return Ok(hit);
+        }
+        log::debug!("keychain fallback read service={service} account={account}");
+        match keychain_read() {
+            Ok(secret) => {
+                if let Err(e) = write_dev_secret(service, account, &secret) {
+                    log::warn!(
+                        "keychain fallback succeeded but dev file persist failed \
+                         service={service} account={account}: {e}"
+                    );
+                }
+                Ok(secret)
+            }
+            Err(e) => {
+                log::debug!("keychain fallback failed service={service} account={account}: {e}");
+                Err(e)
+            }
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (service, account);
+        keychain_read()
+    }
+}
+
+/// Test seam for writes. Debug builds write the dev file only (the keychain
+/// write's embedded find is what prompts); release builds write the keychain.
+pub(crate) fn store_secret_with(
+    service: &str,
+    account: &str,
+    secret: &str,
+    keychain_write: impl FnOnce() -> Result<(), KeychainError>,
+) -> Result<(), KeychainError> {
+    #[cfg(debug_assertions)]
+    {
+        let _ = keychain_write;
+        write_dev_secret(service, account, secret).map_err(KeychainError::Other)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (service, account, secret);
+        keychain_write()
+    }
+}
+
+/// Test seam for deletes. Debug builds remove the dev file only and NEVER
+/// delete keychain items; release builds delete the keychain item.
+pub(crate) fn delete_secret_with(
+    service: &str,
+    account: &str,
+    keychain_delete: impl FnOnce() -> Result<(), KeychainError>,
+) -> Result<(), KeychainError> {
+    #[cfg(debug_assertions)]
+    {
+        let _ = keychain_delete;
+        remove_dev_secret(service, account);
+        Ok(())
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (service, account);
+        keychain_delete()
+    }
+}
+
+fn keychain_get(service: &str, account: &str) -> Result<String, KeychainError> {
+    log::debug!("keychain read service={service} account={account}");
+    let entry = Entry::new(service, account).map_err(|e| KeychainError::Other(e.to_string()))?;
     match entry.get_password() {
         Ok(pw) => Ok(pw),
         Err(keyring::Error::NoEntry) => Err(KeychainError::NotFound),
@@ -355,52 +533,60 @@ pub fn get_password(profile_id: &str) -> Result<String, KeychainError> {
     }
 }
 
-pub fn set_password(profile_id: &str, password: &str) -> Result<(), KeychainError> {
-    let entry = Entry::new(KEYCHAIN_SERVICE, profile_id)
-        .map_err(|e| KeychainError::Other(e.to_string()))?;
-    entry
-        .set_password(password)
-        .map_err(|e| KeychainError::Other(e.to_string()))
-}
-
-pub fn delete_password(profile_id: &str) -> Result<(), KeychainError> {
-    let entry = Entry::new(KEYCHAIN_SERVICE, profile_id)
-        .map_err(|e| KeychainError::Other(e.to_string()))?;
-    match entry.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(KeychainError::Other(e.to_string())),
-    }
-}
-
-/// SSH secret helpers
-pub fn get_ssh_secret(tunnel_id: &str) -> Result<String, KeychainError> {
-    let entry = Entry::new(KEYCHAIN_SSH_SERVICE, tunnel_id)
-        .map_err(|e| KeychainError::Other(e.to_string()))?;
-    match entry.get_password() {
-        Ok(pw) => Ok(pw),
-        Err(keyring::Error::NoEntry) => Err(KeychainError::NotFound),
-        Err(keyring::Error::NoStorageAccess(_)) => Err(KeychainError::NoStorageAccess),
-        Err(e) => Err(KeychainError::Other(e.to_string())),
-    }
-}
-
-pub fn set_ssh_secret(tunnel_id: &str, secret: &str) -> Result<(), KeychainError> {
-    let entry = Entry::new(KEYCHAIN_SSH_SERVICE, tunnel_id)
-        .map_err(|e| KeychainError::Other(e.to_string()))?;
+fn keychain_set(service: &str, account: &str, secret: &str) -> Result<(), KeychainError> {
+    log::debug!("keychain write service={service} account={account}");
+    let entry = Entry::new(service, account).map_err(|e| KeychainError::Other(e.to_string()))?;
     entry
         .set_password(secret)
         .map_err(|e| KeychainError::Other(e.to_string()))
 }
 
-pub fn delete_ssh_secret(tunnel_id: &str) -> Result<(), KeychainError> {
-    let entry = Entry::new(KEYCHAIN_SSH_SERVICE, tunnel_id)
-        .map_err(|e| KeychainError::Other(e.to_string()))?;
+fn keychain_delete(service: &str, account: &str) -> Result<(), KeychainError> {
+    log::debug!("keychain delete service={service} account={account}");
+    let entry = Entry::new(service, account).map_err(|e| KeychainError::Other(e.to_string()))?;
     match entry.delete_credential() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(KeychainError::Other(e.to_string())),
     }
+}
+
+pub fn get_password(profile_id: &str) -> Result<String, KeychainError> {
+    resolve_secret_with(KEYCHAIN_SERVICE, profile_id, || {
+        keychain_get(KEYCHAIN_SERVICE, profile_id)
+    })
+}
+
+pub fn set_password(profile_id: &str, password: &str) -> Result<(), KeychainError> {
+    store_secret_with(KEYCHAIN_SERVICE, profile_id, password, || {
+        keychain_set(KEYCHAIN_SERVICE, profile_id, password)
+    })
+}
+
+pub fn delete_password(profile_id: &str) -> Result<(), KeychainError> {
+    delete_secret_with(KEYCHAIN_SERVICE, profile_id, || {
+        keychain_delete(KEYCHAIN_SERVICE, profile_id)
+    })
+}
+
+/// SSH secret helpers (same file-first treatment; currently no production
+/// readers — the tunnel path is unwired — so this is latent-proofing).
+pub fn get_ssh_secret(tunnel_id: &str) -> Result<String, KeychainError> {
+    resolve_secret_with(KEYCHAIN_SSH_SERVICE, tunnel_id, || {
+        keychain_get(KEYCHAIN_SSH_SERVICE, tunnel_id)
+    })
+}
+
+pub fn set_ssh_secret(tunnel_id: &str, secret: &str) -> Result<(), KeychainError> {
+    store_secret_with(KEYCHAIN_SSH_SERVICE, tunnel_id, secret, || {
+        keychain_set(KEYCHAIN_SSH_SERVICE, tunnel_id, secret)
+    })
+}
+
+pub fn delete_ssh_secret(tunnel_id: &str) -> Result<(), KeychainError> {
+    delete_secret_with(KEYCHAIN_SSH_SERVICE, tunnel_id, || {
+        keychain_delete(KEYCHAIN_SSH_SERVICE, tunnel_id)
+    })
 }
 
 // ─── Repository ─────────────────────────────────────────────────────────────

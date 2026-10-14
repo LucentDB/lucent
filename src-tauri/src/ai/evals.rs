@@ -809,6 +809,7 @@ mod runner {
                     crate::ai::config::AiProvider::OpenAI,
                     api_key.clone(),
                     endpoint.clone(),
+                    None,
                 ));
             let tool_ctx = crate::ai::tools::AiToolContext {
                 db: db.clone(),

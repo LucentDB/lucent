@@ -812,3 +812,196 @@ fn test_connections_file_permissions_unix() {
         "connections.json should have 0o600 permissions on Unix"
     );
 }
+
+// ─── Debug-only zero-prompt secret files ──────────────────────────────────────
+//
+// Every test here uses injected closures for the keychain leg, so none of
+// them touches the real keychain on any OS. The temp config dir override
+// keeps the dev files isolated per test.
+#[cfg(debug_assertions)]
+mod dev_secret_file_tests {
+    use super::super::super::connections::{
+        delete_secret_with, resolve_secret_with, store_secret_with, KeychainError,
+    };
+    use super::with_temp_config_dir;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn counting_ok<'a>(
+        counter: &'a Arc<AtomicUsize>,
+        value: &'a str,
+    ) -> impl FnOnce() -> Result<String, KeychainError> + 'a {
+        let value = value.to_string();
+        move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            // Widen any race window: a real keychain read stalls, a fake one
+            // must not complete synchronously or races hide.
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            Ok(value.clone())
+        }
+    }
+
+    #[test]
+    fn file_hit_returns_the_secret_without_calling_the_keychain() {
+        let (_dir, _config_path) = with_temp_config_dir();
+        store_secret_with("svc-a", "acct-1", "file-secret", || {
+            panic!("store must not touch the keychain in debug")
+        })
+        .expect("dev file store must succeed");
+
+        let out = resolve_secret_with("svc-a", "acct-1", || {
+            panic!("a file hit must never reach the keychain")
+        })
+        .expect("file hit must resolve");
+        assert_eq!(out, "file-secret");
+    }
+
+    #[test]
+    fn file_miss_falls_back_once_then_persists_so_later_reads_skip_the_keychain() {
+        let (_dir, _config_path) = with_temp_config_dir();
+        let reads = Arc::new(AtomicUsize::new(0));
+
+        let out = resolve_secret_with("svc-a", "acct-migrate", counting_ok(&reads, "migrated"))
+            .expect("fallback read must resolve");
+        assert_eq!(out, "migrated");
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+
+        // The fallback success was persisted: this resolve must not call the
+        // keychain at all.
+        let out2 = resolve_secret_with("svc-a", "acct-migrate", || {
+            panic!("persisted fallback must serve later reads from the file")
+        })
+        .expect("persisted secret must resolve");
+        assert_eq!(out2, "migrated");
+        assert_eq!(reads.load(Ordering::SeqCst), 1, "no second keychain read");
+    }
+
+    #[test]
+    fn keychain_failure_propagates_and_persists_nothing() {
+        let (_dir, _config_path) = with_temp_config_dir();
+        let reads = Arc::new(AtomicUsize::new(0));
+
+        let err = resolve_secret_with("svc-a", "acct-missing", || {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Err(KeychainError::NotFound)
+        });
+        assert!(matches!(err, Err(KeychainError::NotFound)));
+
+        // A failure must not poison later reads: the keychain is consulted again.
+        let err2 = resolve_secret_with("svc-a", "acct-missing", || {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Err(KeychainError::NotFound)
+        });
+        assert!(matches!(err2, Err(KeychainError::NotFound)));
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn delete_removes_the_file_and_never_touches_the_keychain() {
+        let (_dir, _config_path) = with_temp_config_dir();
+        store_secret_with("svc-a", "acct-del", "bye", || {
+            panic!("store must not touch the keychain in debug")
+        })
+        .unwrap();
+        delete_secret_with("svc-a", "acct-del", || {
+            panic!("debug delete must never delete keychain items")
+        })
+        .expect("debug delete must succeed");
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let err = resolve_secret_with("svc-a", "acct-del", || {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Err(KeychainError::NotFound)
+        });
+        assert!(matches!(err, Err(KeychainError::NotFound)));
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "the file must be gone, so the keychain is consulted again"
+        );
+    }
+
+    #[test]
+    fn hostile_accounts_cannot_escape_the_dev_dir() {
+        let (_dir, config_path) = with_temp_config_dir();
+        store_secret_with("svc-a", "../../escape-attempt", "x", || {
+            panic!("store must not touch the keychain in debug")
+        })
+        .unwrap();
+        // The only thing that may exist outside the config dir is nothing:
+        // every dev file lives under secrets-dev/.
+        let dev_dir = config_path.join("secrets-dev");
+        assert!(dev_dir.is_dir());
+        let names: Vec<String> = std::fs::read_dir(&dev_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 1, "exactly one dev file, inside secrets-dev/");
+        assert!(
+            !names[0].contains('/') && !names[0].contains('\\') && !names[0].contains('\0'),
+            "filename must contain no path separators, got {:?}",
+            names[0]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dev_secret_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, config_path) = with_temp_config_dir();
+        store_secret_with("svc-a", "acct-perm", "shh", || {
+            panic!("store must not touch the keychain in debug")
+        })
+        .unwrap();
+        let names: Vec<std::path::PathBuf> = std::fs::read_dir(config_path.join("secrets-dev"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(names.len(), 1);
+        let mode = std::fs::metadata(&names[0]).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "dev secret files must be 0600");
+    }
+}
+
+/// Release builds stay keychain-only: the seams pass straight through to the
+/// injected keychain leg with no file involvement. The closures are fakes, so
+/// this touches no real keychain anywhere.
+#[cfg(not(debug_assertions))]
+mod release_secret_passthrough_tests {
+    use super::super::super::connections::{
+        delete_secret_with, resolve_secret_with, store_secret_with, KeychainError,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn release_resolve_delegates_to_the_keychain_leg() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let out = resolve_secret_with("svc", "acct", || {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Ok("k".to_string())
+        })
+        .unwrap();
+        assert_eq!(out, "k");
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn release_store_and_delete_delegate_to_the_keychain_legs() {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let deletes = Arc::new(AtomicUsize::new(0));
+        store_secret_with("svc", "acct", "v", || {
+            writes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+        delete_secret_with("svc", "acct", || {
+            deletes.fetch_add(1, Ordering::SeqCst);
+            Ok::<(), KeychainError>(())
+        })
+        .unwrap();
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        assert_eq!(deletes.load(Ordering::SeqCst), 1);
+    }
+}

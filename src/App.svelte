@@ -61,6 +61,7 @@
     updateLast,
     pauseForPermission,
     resumeFromPermission,
+    setRunPhase,
     createNewTab as createNewChatTab,
     closeTab as closeChatTab,
     switchTab as switchChatTab,
@@ -68,8 +69,10 @@
     persistConversationMessage,
   } from './lib/stores/chat.svelte.ts';
   import {
-    createAiSession,
+    aiSessionFor,
+    releaseAiSession,
     sendMessage,
+    cancelRun,
     executeDml,
     respondAgentPermission,
     rejectPendingDml,
@@ -209,7 +212,6 @@
   let tabs = $state([]);
   let activeTabId = $state(null);
   let activeConnectionId = $state('');
-  let session = $state(null);
 
   // source view state
   let currentObject = $state(null);
@@ -316,7 +318,6 @@
 
   onDestroy(() => {
     resizeCleanup?.();
-    if (session?.cleanup) session.cleanup();
     unlistenMenu?.();
   });
 
@@ -325,6 +326,11 @@
       createNewChatTab(activeConnectionId);
     }
     const convId = chat.activeConversationId;
+
+    // Per-conversation gating: refuse while THIS conversation has a live
+    // turn (running or stopping). Other tabs are unaffected (parallel chats).
+    const conv = chat.conversations.find((c) => c.id === convId);
+    if (conv && conv.runPhase !== 'idle') return;
 
     const userMessageId = crypto.randomUUID();
     const assistantMessageId = crypto.randomUUID();
@@ -344,9 +350,13 @@
       createdAt: Date.now(),
     });
 
-    const aiSession = createAiSession(convId);
-    session = aiSession;
-    await aiSession.setupListeners({
+    // One listener set per conversation (the registry), released when the
+    // tab closes — but a fresh Channel per send: Tauri Channels are
+    // single-use (the Rust side drops its handle when the next turn starts,
+    // which unregisters a reused channel's callback and strands its index
+    // counter).
+    const { createChannel, ensureListeners } = aiSessionFor(convId);
+    await ensureListeners({
       onDmlApproval: (p) => {
         const conv = chat.conversations.find((c) => c.id === p.conversation_id);
         if (!conv) return;
@@ -385,13 +395,46 @@
 
     await sendMessage(
       message,
-      aiSession.channel,
+      createChannel(),
       convId,
       activeConnectionId,
       connections.activeProfileId,
       userMessageId,
       assistantMessageId,
     );
+  }
+
+  async function handleAiStop(convId) {
+    const conv = chat.conversations.find((c) => c.id === convId);
+    if (!conv || conv.runPhase === 'idle') return;
+    // A turn parked on a DML approval stops via the same action as the DML
+    // card's Cancel (the backend clears the staged SQL); otherwise cancel
+    // the live turn. `stopping` clears on the terminal Done/error event —
+    // never here, so a racing send can't slip in while the agent unwinds.
+    if (conv.isPaused && conv.pausedDml) {
+      setRunPhase(convId, 'stopping');
+      try {
+        await rejectPendingDml(convId);
+      } catch (e) {
+        conv.error = formatError(e);
+      } finally {
+        setRunPhase(convId, 'idle');
+      }
+      return;
+    }
+    setRunPhase(convId, 'stopping');
+    try {
+      await cancelRun(convId);
+    } catch (e) {
+      conv.error = formatError(e);
+      setRunPhase(convId, 'idle');
+    }
+    // Do NOT clear 'stopping' here — the terminal Done/error event does it.
+  }
+
+  function handleCloseChatTab(convId) {
+    releaseAiSession(convId);
+    closeChatTab(convId);
   }
 
   async function handleAllowPermission() {
@@ -1239,6 +1282,7 @@
             <div class="chat-wrap" style="width:{chatWidth}px">
               <ChatPanel
                 onSend={handleAiSend}
+                onStop={handleAiStop}
                 onRunDml={handleRunDml}
                 onCancelDml={handleCancelDml}
                 onAllowPermission={handleAllowPermission}
@@ -1256,7 +1300,7 @@
                   switchChatTab(id);
                   showChatPanel = true;
                 }}
-                onCloseConv={closeChatTab}
+                onCloseConv={handleCloseChatTab}
               />
             </div>
           {/if}
@@ -1265,6 +1309,7 @@
           <div class="chat-full">
             <ChatPanel
               onSend={handleAiSend}
+              onStop={handleAiStop}
               onRunDml={handleRunDml}
               onCancelDml={handleCancelDml}
               onAllowPermission={handleAllowPermission}
@@ -1275,7 +1320,7 @@
               onOpenSettings={() => (showAiSettings = true)}
               onNewChat={() => createNewChatTab(activeConnectionId)}
               onSwitchConv={switchChatTab}
-              onCloseConv={closeChatTab}
+              onCloseConv={handleCloseChatTab}
               onClose={goToQuery}
             />
           </div>

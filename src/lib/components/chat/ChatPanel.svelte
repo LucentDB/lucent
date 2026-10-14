@@ -75,6 +75,7 @@
 
   let {
     onSend,
+    onStop,
     onRunDml,
     onCancelDml,
     onAllowPermission,
@@ -89,6 +90,7 @@
     onOpenSettings,
   }: {
     onSend: (m: string) => void;
+    onStop?: (convId: string) => void;
     onRunDml: () => void;
     onCancelDml: () => void;
     onAllowPermission?: () => void;
@@ -446,11 +448,12 @@
       </div>
 
       <div class="input-area">
-        <ChatInput onSend={handleSend} />
+        <ChatInput onSend={handleSend} {onStop} conversationId={conv?.id} />
       </div>
     {:else}
       <ChatLanding
         onSend={handleSend}
+        {onStop}
         {connected}
         {database}
         {connectionName}

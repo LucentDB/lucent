@@ -102,6 +102,31 @@ export function renderMarkdown(text: string): string {
 }
 
 /**
+ * Splits streaming content into a stable markdown prefix + a plain-text tail.
+ * Only splits on safe boundaries — never inside a fenced code block
+ * (odd ``` count), otherwise at the last blank line (a complete block
+ * boundary) — so the prefix never ends with a dangling open tag. The tail
+ * renders as text, keeping the marked + DOMPurify pipeline off the per-token
+ * path; only apply while a turn is streaming (completed messages render
+ * whole).
+ */
+export function splitStablePrefix(content: string): {
+  stable: string;
+  tail: string;
+} {
+  const fences = (content.match(/```/g) ?? []).length;
+  if (fences % 2 === 1) {
+    const lastFence = content.lastIndexOf('```');
+    return { stable: content.slice(0, lastFence), tail: content.slice(lastFence) };
+  }
+  const blankLine = content.lastIndexOf('\n\n');
+  if (blankLine > 0) {
+    return { stable: content.slice(0, blankLine), tail: content.slice(blankLine) };
+  }
+  return { stable: content, tail: '' };
+}
+
+/**
  * Matches a GFM task marker only at the start of a list item, so a literal "[x]"
  * in prose is never mistaken for a checkbox. Kept in source order, which is the
  * order `marked` emits the corresponding inputs.

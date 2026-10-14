@@ -15,7 +15,13 @@ export interface TokenUsage {
   completionTokens: number;
   /** Prompt tokens served from the provider's prefix cache (0 = no cache hit). */
   cachedPromptTokens: number;
+  /** Cache-creation (write) tokens for this turn (0 when unreported). */
+  cachedWritePromptTokens?: number;
 }
+
+/** Per-conversation run phase: the Stop button and parallel chats each key
+ *  off this, not the global `isStreaming`. */
+export type RunPhase = 'idle' | 'running' | 'stopping';
 
 /** Explicit lifecycle status of a tool call (spec D7). `stopped` is set
  *  when the turn ends cancelled before the call resolved. */
@@ -92,6 +98,9 @@ export interface Conversation {
   usage: TokenUsage | null;
   /** Turn-level error for THIS conversation (ai:error), rendered in ChatPanel. */
   error: string | null;
+  /** Per-conversation run phase (`running` while a turn streams, `stopping`
+   *  after Stop is clicked until the terminal event resolves it). */
+  runPhase: RunPhase;
   createdAt: number;
 }
 
@@ -100,6 +109,10 @@ function createChatStore() {
   let activeConversationId = $state<string | null>(null);
   let isStreaming = $state(false);
   let error = $state<string | null>(null);
+
+  function syncGlobalStreaming() {
+    isStreaming = conversations.some((c) => c.runPhase !== 'idle');
+  }
 
   return {
     get conversations() {
@@ -126,10 +139,29 @@ function createChatStore() {
     set error(v) {
       error = v;
     },
+    /** Recompute the global summary from per-conversation phases. */
+    syncGlobalStreaming,
   };
 }
 
 export const chat = createChatStore();
+
+/** True when the conversation has a turn in flight (running or stopping). */
+export function isConvRunning(id: string | null | undefined): boolean {
+  if (!id) return false;
+  return chat.conversations.find((c) => c.id === id)?.runPhase !== 'idle';
+}
+
+/** True when ANY conversation has a turn in flight (for the tab-strip dot). */
+export function anyRunning(): boolean {
+  return chat.conversations.some((c) => c.runPhase !== 'idle');
+}
+
+export function setRunPhase(convId: string, phase: RunPhase): void {
+  const conv = chat.conversations.find((c) => c.id === convId);
+  if (conv) conv.runPhase = phase;
+  chat.syncGlobalStreaming();
+}
 
 export function createConversation(connectionId: string): Conversation {
   return {
@@ -143,6 +175,7 @@ export function createConversation(connectionId: string): Conversation {
     dmlError: null,
     usage: null,
     error: null,
+    runPhase: 'idle',
     createdAt: Date.now(),
   };
 }
@@ -177,9 +210,19 @@ export function createNewTab(connectionId: string): Conversation {
   return conv;
 }
 
+// Hook for per-conversation cleanup owned elsewhere (the AI session
+// registry in `ipc/ai.ts` — importing it here would be circular). Fired by
+// `closeTab`, so single AND batch closes release the tab's listeners.
+let tabClosedHook: ((convId: string) => void) | null = null;
+
+export function setTabClosedHook(fn: (convId: string) => void) {
+  tabClosedHook = fn;
+}
+
 export function closeTab(convId: string) {
   const idx = chat.conversations.findIndex((c) => c.id === convId);
   if (idx === -1) return;
+  tabClosedHook?.(convId);
   chat.conversations = chat.conversations.filter((c) => c.id !== convId);
   if (chat.activeConversationId === convId) {
     chat.activeConversationId =
@@ -371,6 +414,7 @@ export async function hydrateConversations(connectionId?: string) {
       dmlError: null,
       usage: null,
       error: null,
+      runPhase: 'idle',
       createdAt: c.created_at * 1000,
     }));
     await Promise.all(
@@ -404,7 +448,9 @@ export async function openConversation(
 ): Promise<Conversation | undefined> {
   const existing = chat.conversations.find((c) => c.id === convId);
   if (existing) {
-    if (!chat.isStreaming || chat.activeConversationId !== convId) {
+    // Per-conversation: only skip the reload when THIS conversation has a
+    // live turn (its messages are being appended to right now).
+    if (!isConvRunning(existing.id)) {
       try {
         const persisted = await loadChatConversation(convId);
         if (persisted && persisted.length > 0) {
@@ -419,13 +465,13 @@ export async function openConversation(
     return existing;
   }
   try {
-    const persisted = await loadChatConversation(convId);
-    const convs = await listChatConversations();
-    const meta = convs.find((c) => c.id === convId);
-    const conv: Conversation = {
+    // Optimistic: show the tab immediately so opening feels instant, then
+    // hydrate its messages in the background (same pattern as the
+    // existing-tab branch above).
+    const stub: Conversation = {
       id: convId,
-      connectionId: meta?.connection_id ?? '',
-      messages: persisted.map(adaptPersistedMessage),
+      connectionId: '',
+      messages: [],
       isPaused: false,
       pausedDml: null,
       pendingPermission: null,
@@ -433,12 +479,28 @@ export async function openConversation(
       dmlError: null,
       usage: null,
       error: null,
-      createdAt: meta?.created_at ? meta.created_at * 1000 : Date.now(),
+      runPhase: 'idle',
+      createdAt: Date.now(),
     };
-    chat.conversations = [...chat.conversations, conv];
-    chat.activeConversationId = conv.id;
+    chat.conversations = [...chat.conversations, stub];
+    chat.activeConversationId = stub.id;
     persistOpenChatTabs();
-    return conv;
+    try {
+      const [persisted, convs] = await Promise.all([
+        loadChatConversation(convId),
+        listChatConversations(),
+      ]);
+      const meta = convs.find((c) => c.id === convId);
+      const target = chat.conversations.find((c) => c.id === convId);
+      if (target) {
+        if (meta?.connection_id) target.connectionId = meta.connection_id;
+        if (meta?.created_at) target.createdAt = meta.created_at * 1000;
+        if (persisted.length) target.messages = persisted.map(adaptPersistedMessage);
+      }
+    } catch (e) {
+      console.error('Failed to hydrate conversation:', e);
+    }
+    return chat.conversations.find((c) => c.id === convId);
   } catch (e) {
     console.error('Failed to open conversation:', e);
   }

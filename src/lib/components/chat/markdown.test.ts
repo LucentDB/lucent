@@ -158,3 +158,26 @@ test('strips standalone non-checkbox inputs and additional form control tags', (
   expect(out.toLowerCase()).not.toContain('<datalist');
   expect(out.toLowerCase()).not.toContain('<output');
 });
+
+test('splitStablePrefix never splits inside a fenced code block', async () => {
+  const { splitStablePrefix } = await import('./markdown');
+  const content = 'Intro paragraph.\n\n```sql\nSELECT *\nFROM users\n';
+  const { stable, tail } = splitStablePrefix(content);
+  expect(stable).toBe('Intro paragraph.\n\n');
+  expect(tail).toBe('```sql\nSELECT *\nFROM users\n');
+});
+
+test('splitStablePrefix cuts at the last blank line otherwise', async () => {
+  const { splitStablePrefix } = await import('./markdown');
+  const content = 'First block.\n\nSecond block so far';
+  const { stable, tail } = splitStablePrefix(content);
+  expect(stable).toBe('First block.');
+  expect(tail).toBe('\n\nSecond block so far');
+});
+
+test('splitStablePrefix returns the whole text when there is no boundary', async () => {
+  const { splitStablePrefix } = await import('./markdown');
+  const { stable, tail } = splitStablePrefix('one short line');
+  expect(stable).toBe('one short line');
+  expect(tail).toBe('');
+});

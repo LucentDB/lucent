@@ -78,6 +78,12 @@ pub struct AiConfig {
     /// Per-query statement_timeout for AI read-only queries, seconds. 0 disables.
     #[serde(default = "default_ai_query_timeout_secs")]
     pub ai_query_timeout_secs: u64,
+    /// Total wall-clock cap for one agent turn, seconds. 0 disables the cap.
+    /// Covers the whole driver.chat future (process acquire, session setup,
+    /// the prompt turn, parked permission waits). Generous by design — the
+    /// ACP driver's idle watchdog is the finer-grained protection.
+    #[serde(default = "default_agent_turn_timeout_secs")]
+    pub agent_turn_timeout_secs: u64,
     /// Per-provider "last model picked in Settings" — a pure UX convenience
     /// for re-populating the model picker when the provider dropdown changes.
     /// NOT consulted at agent-run time; `provider` + `model` above remain the
@@ -114,6 +120,9 @@ fn default_sample_column_values() -> bool {
 fn default_ai_query_timeout_secs() -> u64 {
     60
 }
+fn default_agent_turn_timeout_secs() -> u64 {
+    1800
+}
 fn default_enable_ai_memory() -> bool {
     true
 }
@@ -132,6 +141,7 @@ impl Default for AiConfig {
             enable_semantic_index: true,
             sample_column_values: true,
             ai_query_timeout_secs: 60,
+            agent_turn_timeout_secs: 1800,
             provider_models: HashMap::new(),
             acp: None,
             enable_ai_memory: true,
@@ -229,6 +239,21 @@ mod tests {
         let cfg: AiConfig = serde_json::from_str(old_json).expect("old config still parses");
         assert_eq!(
             cfg.ai_query_timeout_secs, 60,
+            "missing field falls back to default"
+        );
+    }
+
+    #[test]
+    fn agent_turn_timeout_defaults_to_1800s_and_survives_old_configs() {
+        assert_eq!(AiConfig::default().agent_turn_timeout_secs, 1800);
+        let old_json = r#"{
+            "provider": "openai", "endpoint": null, "model": "gpt-4o",
+            "maxTokens": 4096, "maxTurns": 50, "rowLimit": 500,
+            "sendResultsToAi": true, "enableBlastRadiusCheck": true
+        }"#;
+        let cfg: AiConfig = serde_json::from_str(old_json).expect("old config still parses");
+        assert_eq!(
+            cfg.agent_turn_timeout_secs, 1800,
             "missing field falls back to default"
         );
     }

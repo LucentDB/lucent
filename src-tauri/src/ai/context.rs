@@ -541,21 +541,16 @@ impl SchemaCache {
 
     pub fn get(&self, conn_id: &str) -> Option<SchemaTree> {
         let g = self.inner.lock().ok()?;
-        if let Some(e) = g.get(conn_id) {
-            let valid = e.fetched_at.elapsed() < self.ttl;
-            if !valid {
-                log::debug!("Schema cache expired for {conn_id}");
-            }
-            if valid {
-                return Some(e.tree.clone());
-            }
+        let e = g.get(conn_id)?;
+        if e.fetched_at.elapsed() >= self.ttl {
+            log::debug!("Schema cache expired for {conn_id}");
+            return None;
         }
-        // Fallback: if exact key lookup missed (e.g. profile ID vs URI key),
-        // use the most recent valid active entry if any exists.
-        g.values()
-            .filter(|e| e.fetched_at.elapsed() < self.ttl)
-            .max_by_key(|e| e.fetched_at)
-            .map(|e| e.tree.clone())
+        // Strict keying only: a key miss returns None so the caller renders
+        // from the live graph. Never serve another connection's schema — a
+        // profile-id/URI key mismatch used to silently swap the schema under
+        // a live conversation (and its cacheable system prompt with it).
+        Some(e.tree.clone())
     }
 
     pub fn set(&self, conn_id: String, tree: SchemaTree) {
@@ -1268,12 +1263,13 @@ mod tests {
     }
 
     #[test]
-    fn schema_cache_fallback_resolves_active_entry_on_key_mismatch() {
+    fn schema_cache_never_serves_another_connections_schema() {
         let cache = SchemaCache::new(3600);
         cache.set("postgres://localhost:5432/orders".into(), small());
         // Exact hit
         assert!(cache.get("postgres://localhost:5432/orders").is_some());
-        // Mismatched profile ID or UUID still resolves the active valid cache entry
-        assert!(cache.get("profile-uuid-1234").is_some());
+        // A mismatched key (profile id vs URI) must MISS, not resolve another
+        // connection's schema: callers render from the live graph instead.
+        assert!(cache.get("profile-uuid-1234").is_none());
     }
 }

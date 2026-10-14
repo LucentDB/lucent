@@ -24,12 +24,14 @@
 
   let {
     onSend,
+    onStop,
     connected = false,
     database = null,
     connectionName = null,
     onOpenSettings,
   }: {
     onSend: (msg: string) => void;
+    onStop?: (convId: string) => void;
     /**
      * Whether a database connection is live. Passed in rather than read from
      * the connections store because inline connections leave `activeProfileId`
@@ -128,6 +130,7 @@
     <div class="composer" style="--i: 2">
       <ChatInput
         {onSend}
+        {onStop}
         docked={false}
         disabled={!connected}
         placeholder={connected
