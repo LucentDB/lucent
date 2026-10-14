@@ -3152,6 +3152,7 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn ai_chat(
     state: State<'_, AppState>,
@@ -3185,6 +3186,7 @@ pub async fn ai_chat(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ai_chat_impl(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
