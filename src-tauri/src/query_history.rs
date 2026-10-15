@@ -108,6 +108,12 @@ fn append_entry_at(path: &std::path::Path, entry: QueryHistoryEntry) -> Result<(
         .open(path)
         .map_err(|e| format!("history file open: {e}"))?;
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+
     // Exclusive lock before touching the file
     fs2::FileExt::lock_exclusive(&file).map_err(|e| format!("history file lock: {e}"))?;
 
@@ -320,6 +326,12 @@ fn rewrite_all(entries: &[QueryHistoryEntry]) -> Result<(), String> {
         .truncate(false)
         .open(&path)
         .map_err(|e| e.to_string())?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
     // Lock BEFORE truncating — a concurrent append_entry holds the exclusive
     // lock while rewriting; truncating first would clobber its in-flight write.
     fs2::FileExt::lock_exclusive(&file).map_err(|e| e.to_string())?;

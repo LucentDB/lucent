@@ -158,15 +158,29 @@ async fn full_turn_through_run_agent_turn_with_stub_agent() {
 
     // Verify that TauriSink persisted the assistant response and thinking to memory_manager
     // with the real conversation_id
-    let persisted_msgs = state.memory_manager.list_messages(&conv_id).await.unwrap();
-    assert_eq!(persisted_msgs.len(), 1, "Assistant message must be persisted for conv_id");
+    let mut persisted_msgs = Vec::new();
+    for _ in 0..20 {
+        persisted_msgs = state.memory_manager.list_messages(&conv_id).await.unwrap();
+        if !persisted_msgs.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        persisted_msgs.len(),
+        1,
+        "Assistant message must be persisted for conv_id"
+    );
     assert_eq!(persisted_msgs[0].role, "assistant");
     assert_eq!(persisted_msgs[0].content, "Hello");
     assert!(persisted_msgs[0].session_json.is_some());
     let session_val: serde_json::Value =
         serde_json::from_str(persisted_msgs[0].session_json.as_ref().unwrap()).unwrap();
     let segments = session_val["segments"].as_array().unwrap();
-    let thinking_seg = segments.iter().find(|s| s["type"] == "thinking").expect("thinking segment present");
+    let thinking_seg = segments
+        .iter()
+        .find(|s| s["type"] == "thinking")
+        .expect("thinking segment present");
     assert_eq!(thinking_seg["content"], "thinking…");
 
     // The turn released the conversation claim — follow-up messages can
