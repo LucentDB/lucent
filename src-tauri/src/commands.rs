@@ -1783,7 +1783,13 @@ async fn persist_approved_paths(state: &AppState) -> Result<(), CommandError> {
         &file,
         serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()),
     )
-    .map_err(|e| CommandError::new("PathError", format!("cannot persist approved paths: {e}")))
+    .map_err(|e| CommandError::new("PathError", format!("cannot persist approved paths: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 /// Shared body for `choose_save_path` / `choose_export_path`: show a native
