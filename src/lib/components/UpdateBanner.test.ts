@@ -42,11 +42,25 @@ describe('UpdateBanner', () => {
   });
 
   it('installs and relaunches when the user accepts', async () => {
-    const downloadAndInstall = vi.fn().mockResolvedValue(undefined);
+    let resolveInstall: () => void = () => {};
+    const downloadAndInstall = vi.fn().mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveInstall = resolve;
+        }),
+    );
     check.mockResolvedValue({ version: '0.2.0', downloadAndInstall });
     const { container, getByRole } = render(UpdateBanner);
     await vi.waitFor(() => expect(container.textContent).toContain('0.2.0'));
-    await fireEvent.click(getByRole('button', { name: /install/i }));
+
+    const btn = getByRole('button', { name: /install/i }) as HTMLButtonElement;
+    expect(btn.type).toBe('button');
+    expect(btn.getAttribute('aria-busy')).toBe('false');
+
+    await fireEvent.click(btn);
+    expect(btn.getAttribute('aria-busy')).toBe('true');
+
+    resolveInstall();
     await vi.waitFor(() => expect(relaunch).toHaveBeenCalled());
     expect(downloadAndInstall).toHaveBeenCalled();
   });
