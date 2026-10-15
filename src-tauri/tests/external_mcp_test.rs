@@ -35,7 +35,12 @@ fn test_binary_path(name: &str) -> PathBuf {
 async fn setup_test_endpoint_with_file(
     db_path: &std::path::Path,
     discovery_path: &std::path::Path,
-) -> (ExternalEndpointManager, Arc<ExternalEndpointContext>, Supervisor, ConnectorClient) {
+) -> (
+    ExternalEndpointManager,
+    Arc<ExternalEndpointContext>,
+    Supervisor,
+    ConnectorClient,
+) {
     let mut supervisor = Supervisor::for_driver("duckdb", new_log_buffer());
     supervisor
         .ensure_running()
@@ -118,14 +123,13 @@ async fn setup_test_endpoint_with_file(
         active_profile: Arc::new(tokio::sync::Mutex::new(Some(profile))),
         inode_tracker: Arc::new(tokio::sync::Mutex::new(Some(inode_tracker))),
         reopen_lock: Arc::new(tokio::sync::Mutex::new(())),
-        memory_manager: Arc::new(
-            lucent_lib::ai::memory::MemoryManager::open_in_memory().unwrap(),
-        ),
+        memory_manager: Arc::new(lucent_lib::ai::memory::MemoryManager::open_in_memory().unwrap()),
     });
 
-    let manager = ExternalEndpointManager::start(context.clone(), Some(discovery_path.to_path_buf()))
-        .await
-        .expect("start ExternalEndpointManager");
+    let manager =
+        ExternalEndpointManager::start(context.clone(), Some(discovery_path.to_path_buf()))
+            .await
+            .expect("start ExternalEndpointManager");
 
     (manager, context, supervisor, client)
 }
@@ -143,7 +147,10 @@ async fn external_mcp_auto_discovers_and_handles_rename_swap() {
 
     // Verify discovery file written and status is Connected
     let disc = read_discovery_file_at(&discovery_path).unwrap();
-    assert_eq!(disc.status, lucent_lib::ai::external_endpoint::discovery::EndpointStatus::Connected);
+    assert_eq!(
+        disc.status,
+        lucent_lib::ai::external_endpoint::discovery::EndpointStatus::Connected
+    );
 
     // 3. Spawn real compiled lucent-db-tools-mcp binary with LUCENT_EXTERNAL_MCP
     let binary = test_binary_path("lucent-db-tools-mcp");
@@ -164,7 +171,10 @@ async fn external_mcp_auto_discovers_and_handles_rename_swap() {
         "method": "initialize",
         "params": { "protocolVersion": "2024-11-05" }
     });
-    stdin.write_all(format!("{}\n", init_req).as_bytes()).await.unwrap();
+    stdin
+        .write_all(format!("{}\n", init_req).as_bytes())
+        .await
+        .unwrap();
     stdin.flush().await.unwrap();
 
     let mut line = String::new();
@@ -179,7 +189,10 @@ async fn external_mcp_auto_discovers_and_handles_rename_swap() {
         "method": "tools/list",
         "params": {}
     });
-    stdin.write_all(format!("{}\n", list_req).as_bytes()).await.unwrap();
+    stdin
+        .write_all(format!("{}\n", list_req).as_bytes())
+        .await
+        .unwrap();
     stdin.flush().await.unwrap();
 
     line.clear();
@@ -187,7 +200,10 @@ async fn external_mcp_auto_discovers_and_handles_rename_swap() {
     let list_res: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(list_res["id"], 2);
     let tool_list = list_res["result"]["tools"].as_array().unwrap();
-    let tool_names: Vec<&str> = tool_list.iter().filter_map(|t| t["name"].as_str()).collect();
+    let tool_names: Vec<&str> = tool_list
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
     assert!(tool_names.contains(&"run_readonly_query"));
     assert!(tool_names.contains(&"search_schema"));
     assert!(tool_names.contains(&"get_objects_info"));
@@ -204,7 +220,10 @@ async fn external_mcp_auto_discovers_and_handles_rename_swap() {
             "arguments": { "sql": "SELECT sum(val) as s FROM items" }
         }
     });
-    stdin.write_all(format!("{}\n", query_req).as_bytes()).await.unwrap();
+    stdin
+        .write_all(format!("{}\n", query_req).as_bytes())
+        .await
+        .unwrap();
     stdin.flush().await.unwrap();
 
     line.clear();
@@ -213,7 +232,10 @@ async fn external_mcp_auto_discovers_and_handles_rename_swap() {
     assert_eq!(query_res["id"], 3);
     assert_eq!(query_res["result"]["isError"], false);
     let text = query_res["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("1"), "Expected query result to contain 1, got: {text}");
+    assert!(
+        text.contains("1"),
+        "Expected query result to contain 1, got: {text}"
+    );
 
     // 7. Test sandbox: replacement scan must be blocked
     let exploit_req = serde_json::json!({
@@ -225,7 +247,10 @@ async fn external_mcp_auto_discovers_and_handles_rename_swap() {
             "arguments": { "sql": "SELECT * FROM 'secret.csv'" }
         }
     });
-    stdin.write_all(format!("{}\n", exploit_req).as_bytes()).await.unwrap();
+    stdin
+        .write_all(format!("{}\n", exploit_req).as_bytes())
+        .await
+        .unwrap();
     stdin.flush().await.unwrap();
 
     line.clear();
@@ -240,7 +265,8 @@ async fn external_mcp_auto_discovers_and_handles_rename_swap() {
         client
             .connect_with_id(
                 init_cid2,
-                ConnectionConfig::new("duckdb").with("path", db2_path.to_string_lossy().to_string()),
+                ConnectionConfig::new("duckdb")
+                    .with("path", db2_path.to_string_lossy().to_string()),
             )
             .await
             .expect("connect init session for v2");
@@ -265,7 +291,10 @@ async fn external_mcp_auto_discovers_and_handles_rename_swap() {
             "arguments": { "sql": "SELECT sum(val) as s FROM items" }
         }
     });
-    stdin.write_all(format!("{}\n", query_req2).as_bytes()).await.unwrap();
+    stdin
+        .write_all(format!("{}\n", query_req2).as_bytes())
+        .await
+        .unwrap();
     stdin.flush().await.unwrap();
 
     line.clear();
@@ -274,7 +303,10 @@ async fn external_mcp_auto_discovers_and_handles_rename_swap() {
     assert_eq!(query_res2["id"], 5);
     assert_eq!(query_res2["result"]["isError"], false);
     let text2 = query_res2["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text2.contains("100"), "Expected query result to contain 100 after swap, got: {text2}");
+    assert!(
+        text2.contains("100"),
+        "Expected query result to contain 100 after swap, got: {text2}"
+    );
 
     // 10. Clean shutdown
     manager.shutdown().await.unwrap();
@@ -315,7 +347,10 @@ async fn external_mcp_dynamic_disconnect_when_profile_toggled_off() {
             "clientInfo": { "name": "test-harness", "version": "1.0" }
         }
     });
-    stdin.write_all(format!("{}\n", init_req).as_bytes()).await.unwrap();
+    stdin
+        .write_all(format!("{}\n", init_req).as_bytes())
+        .await
+        .unwrap();
     stdin.flush().await.unwrap();
 
     let mut line = String::new();
@@ -333,7 +368,10 @@ async fn external_mcp_dynamic_disconnect_when_profile_toggled_off() {
             "arguments": { "sql": "SELECT sum(val) as s FROM items" }
         }
     });
-    stdin.write_all(format!("{}\n", query_req).as_bytes()).await.unwrap();
+    stdin
+        .write_all(format!("{}\n", query_req).as_bytes())
+        .await
+        .unwrap();
     stdin.flush().await.unwrap();
 
     line.clear();
@@ -349,7 +387,10 @@ async fn external_mcp_dynamic_disconnect_when_profile_toggled_off() {
             p.enable_external_agents = false;
         }
     }
-    manager.sync_profile().await.expect("sync profile disconnected");
+    manager
+        .sync_profile()
+        .await
+        .expect("sync profile disconnected");
 
     // 6. Query after disconnect: must fail with spec §4.1 message
     let query_req2 = serde_json::json!({
@@ -361,7 +402,10 @@ async fn external_mcp_dynamic_disconnect_when_profile_toggled_off() {
             "arguments": { "sql": "SELECT sum(val) as s FROM items" }
         }
     });
-    stdin.write_all(format!("{}\n", query_req2).as_bytes()).await.unwrap();
+    stdin
+        .write_all(format!("{}\n", query_req2).as_bytes())
+        .await
+        .unwrap();
     stdin.flush().await.unwrap();
 
     line.clear();
