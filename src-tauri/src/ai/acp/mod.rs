@@ -444,10 +444,12 @@ type BridgeListener = tokio::net::windows::named_pipe::NamedPipeServer;
 fn create_bridge_endpoint(token: &str) -> (BridgeListener, String, Option<tempfile::TempDir>) {
     #[cfg(unix)]
     {
+        use std::os::unix::fs::PermissionsExt;
         let _ = token;
         let dir = tempfile::TempDir::new().expect("tempdir for the bridge socket");
         let path = dir.path().join("bridge.sock");
         let listener = tokio::net::UnixListener::bind(&path).expect("bind the bridge socket");
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700));
         (listener, path.to_string_lossy().into_owned(), Some(dir))
     }
     #[cfg(windows)]
@@ -834,7 +836,7 @@ mod tests {
         acp.session_for("conv-opencode", &process, &tool_ctx(), &sink)
             .await
             .expect("session/new round-trips");
-        
+
         let workspace = crate::ai::acp::driver::workspace_dir("stub", "conv-opencode").unwrap();
         let config_path = workspace.join("opencode.json");
         let content = std::fs::read_to_string(&config_path).expect("opencode.json must be created");
@@ -842,7 +844,9 @@ mod tests {
         assert_eq!(parsed["$schema"], "https://opencode.ai/config.json");
         assert_eq!(parsed["mcp"]["lucent-db-tools"]["type"], "local");
         assert_eq!(parsed["mcp"]["lucent-db-tools"]["enabled"], true);
-        let cmd = parsed["mcp"]["lucent-db-tools"]["command"].as_array().expect("command is an array");
+        let cmd = parsed["mcp"]["lucent-db-tools"]["command"]
+            .as_array()
+            .expect("command is an array");
         assert_eq!(cmd.len(), 5);
         assert_eq!(cmd[1], "--socket");
         assert_eq!(cmd[3], "--token");
