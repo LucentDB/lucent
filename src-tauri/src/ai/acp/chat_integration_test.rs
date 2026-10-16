@@ -53,12 +53,13 @@ fn env_var_guard(name: &'static str) -> EnvVarGuard<'static> {
 async fn full_turn_through_run_agent_turn_with_stub_agent() {
     // Hermetic sandbox + scripted stub behavior (thought chunk → message
     // chunk → end_turn).
+    let _ws_guard = crate::ai::acp::driver::tests::env_var_guard("LUCENT_ACP_WORKSPACE");
     let _ws = tempfile::tempdir().unwrap();
     std::env::set_var(
         "LUCENT_ACP_WORKSPACE",
         _ws.path().to_string_lossy().into_owned(),
     );
-    let _gate_guard = env_var_guard("LUCENT_ACP_TOOLS_GATE_MS");
+    let _gate_guard = crate::ai::acp::driver::tests::env_var_guard("LUCENT_ACP_TOOLS_GATE_MS");
     std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "50");
     let script_dir = tempfile::tempdir().unwrap();
     let script_path = script_dir.path().join("script.json");
