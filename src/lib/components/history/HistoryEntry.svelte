@@ -15,10 +15,14 @@
     onCopy?: (sql: string) => void;
   } = $props();
 
-  function truncateSql(sql: string, maxLen = 80): string {
-    const line = sql.split('\n')[0];
-    return line.length > maxLen ? line.slice(0, maxLen) + '…' : line;
-  }
+  // Avoid split('\n') array allocations on multi-line SQL queries
+  // and derive truncated SQL ONCE per entry state update instead of twice per render pass.
+  let truncatedSql = $derived.by(() => {
+    const newlineIndex = entry.sql.indexOf('\n');
+    const line =
+      newlineIndex === -1 ? entry.sql : entry.sql.slice(0, newlineIndex);
+    return line.length > 80 ? line.slice(0, 80) + '…' : line;
+  });
 
   function formatDuration(ms: number): string {
     if (ms < 1) return '<1ms';
@@ -54,10 +58,10 @@
   <button
     type="button"
     class="entry-main"
-    aria-label="Rerun query: {truncateSql(entry.sql)}"
+    aria-label="Rerun query: {truncatedSql}"
     onclick={() => onRerun?.(entry.sql)}
   >
-    <div class="entry-sql">{truncateSql(entry.sql)}</div>
+    <div class="entry-sql">{truncatedSql}</div>
     <div class="entry-meta">
       <span class="meta-duration" class:slow={entry.durationMs > 1000}>
         {formatDuration(entry.durationMs)}

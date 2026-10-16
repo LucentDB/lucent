@@ -61,13 +61,14 @@ fn acp_cfg(script: Option<&std::path::Path>) -> AcpAgentConfig {
 
 /// Points the agent sandbox at a tempdir so session creation never writes
 /// into the real ~/.lucent (kept alive for the test duration).
-fn hermetic_workspace() -> tempfile::TempDir {
+fn hermetic_workspace() -> (tempfile::TempDir, crate::ai::acp::driver::tests::EnvVarGuard<'static>) {
+    let guard = crate::ai::acp::driver::tests::env_var_guard("LUCENT_ACP_WORKSPACE");
     let dir = tempfile::tempdir().unwrap();
     std::env::set_var(
         "LUCENT_ACP_WORKSPACE",
         dir.path().to_string_lossy().into_owned(),
     );
-    dir
+    (dir, guard)
 }
 
 fn script_file(steps: serde_json::Value) -> tempfile::TempDir {
