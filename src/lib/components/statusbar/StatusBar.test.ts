@@ -83,9 +83,12 @@ describe('IndexingStatusWidget Component', () => {
       name: /schema indexing status/i,
     });
     expect(indexing.detailsOpen).toBe(false);
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(button.getAttribute('aria-haspopup')).toBe('dialog');
 
     await fireEvent.click(button);
     expect(indexing.detailsOpen).toBe(true);
+    expect(button.getAttribute('aria-expanded')).toBe('true');
   });
 });
 
