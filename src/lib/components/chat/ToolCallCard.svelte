@@ -34,7 +34,8 @@
   // header with the Markdown row preview that the body already renders.
   const STATUS_MAX = 80;
   function statusText(summary: string): string {
-    const line = summary.split('\n', 1)[0].trim();
+    const idx = summary.indexOf('\n');
+    const line = (idx === -1 ? summary : summary.slice(0, idx)).trim();
     return line.length > STATUS_MAX
       ? `${line.slice(0, STATUS_MAX - 1)}…`
       : line;
