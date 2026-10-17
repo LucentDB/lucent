@@ -32,7 +32,7 @@
 {#if available}
   <div class="update" role="status">
     <span>Update {available.version}</span>
-    <button onclick={install} disabled={installing}>
+    <button type="button" onclick={install} disabled={installing}>
       {installing ? 'Installing…' : 'Install'}
     </button>
   </div>
