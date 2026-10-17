@@ -46,6 +46,24 @@
   );
   let isRefreshing = $derived(dbs.isFetching || schemas.isFetching);
 
+  // Cache filtered databases and schemas via $derived to avoid re-running
+  // dbMatches / schemaMatches tree filtering on every template render cycle.
+  let filteredDatabases = $derived(
+    databases.filter((d) =>
+      dbMatches(d.name, schemasByDb[d.name], loadedObjects, searchQueryLower),
+    ),
+  );
+  let filteredSchemasByDb = $derived(
+    Object.fromEntries(
+      [...expandedDbs].map((db) => [
+        db,
+        (schemasByDb[db] ?? []).filter((s) =>
+          schemaMatches(s, loadedObjects[s.name], searchQueryLower),
+        ),
+      ]),
+    ),
+  );
+
   // Objects for mounted schema branches, keyed by name. Search filtering and
   // the match badge read this; the branches themselves own the queries.
   let loadedObjects = $state({});
@@ -271,7 +289,7 @@
     {:else if databases.length === 0}
       <div class="empty-root">Connect to a database to explore</div>
     {:else}
-      {#each databases.filter( (d) => dbMatches(d.name, schemasByDb[d.name], loadedObjects, searchQueryLower) ) as db}
+      {#each filteredDatabases as db (db.name)}
         <div class="tree-node">
           <div class="db-row-wrap">
             <button
@@ -335,7 +353,7 @@
               {#if schemas.isPending}
                 <div class="loading-line">Loading…</div>
               {:else if schemasByDb[db.name]}
-                {#each schemasByDb[db.name].filter( (s) => schemaMatches(s, loadedObjects[s.name], searchQueryLower) ) as schema}
+                {#each filteredSchemasByDb[db.name] ?? [] as schema (schema.name)}
                   <div class="schema-node">
                     <button
                       class="node-row schema-row"
