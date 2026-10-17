@@ -28,8 +28,10 @@ describe('UpdateBanner', () => {
 
   it('offers the new version when one is available', async () => {
     check.mockResolvedValue({ version: '0.2.0', downloadAndInstall: vi.fn() });
-    const { container } = render(UpdateBanner);
+    const { container, getByRole } = render(UpdateBanner);
     await vi.waitFor(() => expect(container.textContent).toContain('0.2.0'));
+    const btn = getByRole('button', { name: /install/i });
+    expect(btn.getAttribute('type')).toBe('button');
   });
 
   // A failed check must never surface as a broken UI: the app works fine
