@@ -86,6 +86,12 @@ impl ExternalEndpointManager {
         let listener = tokio::net::UnixListener::bind(&socket_path)
             .map_err(|e| format!("Failed to bind external MCP socket at {}: {e}", socket_path.display()))?;
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600));
+        }
+
         #[cfg(windows)]
         let pipe_name = format!(r"\\.\pipe\lucent-external-{}-{}", std::process::id(), &token[..8]);
         #[cfg(windows)]
@@ -374,7 +380,12 @@ mod tests {
 
         let mut manager = ExternalEndpointManager::start(context, Some(custom_discovery.clone())).await.unwrap();
         #[cfg(unix)]
-        assert!(manager.socket_path.exists());
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(manager.socket_path.exists());
+            let meta = std::fs::metadata(&manager.socket_path).unwrap();
+            assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        }
 
         // Verify the stale descriptor was purged and replaced with current process PID
         let active_disc = read_discovery_file_at(&custom_discovery).unwrap();
