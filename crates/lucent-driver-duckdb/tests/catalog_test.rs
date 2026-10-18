@@ -360,7 +360,9 @@ async fn test_analytics_file() {
         .expect("list namespaces");
     eprintln!("NAMESPACES: {ns:?}");
 
-    let CatalogResult::Namespaces(namespaces) = ns else { panic!() };
+    let CatalogResult::Namespaces(namespaces) = ns else {
+        panic!()
+    };
     for n in &namespaces {
         let objs = connector
             .catalog(
@@ -404,12 +406,21 @@ async fn test_cross_connection_visibility() {
         .expect("connect 1");
 
     // Connection 1 queries before table exists
-    let ns1 = connector.catalog(cid1, CatalogRequest::ListNamespaces).await.unwrap();
+    let ns1 = connector
+        .catalog(cid1, CatalogRequest::ListNamespaces)
+        .await
+        .unwrap();
     eprintln!("BEFORE CREATE - NS1: {ns1:?}");
-    let objs1_before = connector.catalog(cid1, CatalogRequest::ListObjects {
-        namespace: vec!["test_cross".into(), "main".into()],
-        kinds: vec![],
-    }).await.unwrap();
+    let objs1_before = connector
+        .catalog(
+            cid1,
+            CatalogRequest::ListObjects {
+                namespace: vec!["test_cross".into(), "main".into()],
+                kinds: vec![],
+            },
+        )
+        .await
+        .unwrap();
     eprintln!("BEFORE CREATE - OBJS1: {objs1_before:?}");
 
     // Connection 2 connects and creates table
@@ -423,7 +434,12 @@ async fn test_cross_connection_visibility() {
         .expect("connect 2");
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-    let exec = connector.execute(cid2, QueryId(Uuid::new_v4()), "CREATE TABLE my_table (id INT); INSERT INTO my_table VALUES (42);".into(), tx);
+    let exec = connector.execute(
+        cid2,
+        QueryId(Uuid::new_v4()),
+        "CREATE TABLE my_table (id INT); INSERT INTO my_table VALUES (42);".into(),
+        tx,
+    );
     let drain = async {
         while let Some(e) = rx.recv().await {
             if let ExecutionEvent::Failed(err) = e {
@@ -434,32 +450,58 @@ async fn test_cross_connection_visibility() {
     tokio::join!(exec, drain);
 
     // Check connection 2: does it see my_table?!
-    let objs2 = connector.catalog(cid2, CatalogRequest::ListObjects {
-        namespace: vec!["test_cross".into(), "main".into()],
-        kinds: vec![],
-    }).await.unwrap();
+    let objs2 = connector
+        .catalog(
+            cid2,
+            CatalogRequest::ListObjects {
+                namespace: vec!["test_cross".into(), "main".into()],
+                kinds: vec![],
+            },
+        )
+        .await
+        .unwrap();
     eprintln!("AFTER CREATE - OBJS2: {objs2:?}");
 
     // Now check connection 1: does it see my_table?!
-    let ns1_after = connector.catalog(cid1, CatalogRequest::ListNamespaces).await.unwrap();
+    let ns1_after = connector
+        .catalog(cid1, CatalogRequest::ListNamespaces)
+        .await
+        .unwrap();
     eprintln!("AFTER CREATE - NS1: {ns1_after:?}");
-    let objs1_after = connector.catalog(cid1, CatalogRequest::ListObjects {
-        namespace: vec!["test_cross".into(), "main".into()],
-        kinds: vec![],
-    }).await.unwrap();
+    let objs1_after = connector
+        .catalog(
+            cid1,
+            CatalogRequest::ListObjects {
+                namespace: vec!["test_cross".into(), "main".into()],
+                kinds: vec![],
+            },
+        )
+        .await
+        .unwrap();
     eprintln!("AFTER CREATE - OBJS1: {objs1_after:?}");
 
-    let search1 = connector.catalog(cid1, CatalogRequest::SearchObjects {
-        query: "my_table".into(),
-        kinds: vec![],
-        namespace: None,
-        limit: 10,
-    }).await.unwrap();
+    let search1 = connector
+        .catalog(
+            cid1,
+            CatalogRequest::SearchObjects {
+                query: "my_table".into(),
+                kinds: vec![],
+                namespace: None,
+                limit: 10,
+            },
+        )
+        .await
+        .unwrap();
     eprintln!("AFTER CREATE - SEARCH1: {search1:?}");
 
     // Check duckdb_transactions() on cid1
     let (tx_txn, mut rx_txn) = tokio::sync::mpsc::channel(8);
-    let exec_txn = connector.execute(cid1, QueryId(Uuid::new_v4()), "SELECT * FROM duckdb_transactions()".into(), tx_txn);
+    let exec_txn = connector.execute(
+        cid1,
+        QueryId(Uuid::new_v4()),
+        "SELECT * FROM duckdb_transactions()".into(),
+        tx_txn,
+    );
     let drain_txn = async {
         while let Some(e) = rx_txn.recv().await {
             if let ExecutionEvent::Batch(shape, _) = e {
@@ -478,10 +520,16 @@ async fn test_cross_connection_visibility() {
         )
         .await
         .expect("connect 3");
-    let objs3 = connector.catalog(cid3, CatalogRequest::ListObjects {
-        namespace: vec!["test_cross".into(), "main".into()],
-        kinds: vec![],
-    }).await.unwrap();
+    let objs3 = connector
+        .catalog(
+            cid3,
+            CatalogRequest::ListObjects {
+                namespace: vec!["test_cross".into(), "main".into()],
+                kinds: vec![],
+            },
+        )
+        .await
+        .unwrap();
     eprintln!("AFTER CREATE - OBJS3: {objs3:?}");
 }
 
@@ -495,20 +543,32 @@ fn test_cloned_handle_cross_visibility() {
     let h2 = h1.try_clone().unwrap();
 
     // Query on h1 first
-    let count1: i64 = h1.with_conn(|conn| {
-        conn.query_row("SELECT count(*) FROM duckdb_tables()", [], |r| r.get(0)).map_err(|e| e.to_string())
-    }).unwrap();
+    let count1: i64 = h1
+        .with_conn(|conn| {
+            conn.query_row("SELECT count(*) FROM duckdb_tables()", [], |r| r.get(0))
+                .map_err(|e| e.to_string())
+        })
+        .unwrap();
     assert_eq!(count1, 0);
 
     // Create table on h2
     h2.with_conn(|conn| {
-        conn.execute_batch("CREATE TABLE shared_t (x INT)").map_err(|e| e.to_string())
-    }).unwrap();
+        conn.execute_batch("CREATE TABLE shared_t (x INT)")
+            .map_err(|e| e.to_string())
+    })
+    .unwrap();
 
     // Does h1 see it now?!
-    let count2: i64 = h1.with_conn(|conn| {
-        conn.query_row("SELECT count(*) FROM duckdb_tables() WHERE table_name = 'shared_t'", [], |r| r.get(0)).map_err(|e| e.to_string())
-    }).unwrap();
+    let count2: i64 = h1
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT count(*) FROM duckdb_tables() WHERE table_name = 'shared_t'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())
+        })
+        .unwrap();
     eprintln!("H1 SEES TABLE ON SHARED DB? count = {count2}");
     assert_eq!(count2, 1);
 }
