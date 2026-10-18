@@ -115,6 +115,7 @@ fn usage() -> String {
     out
 }
 
+#[allow(clippy::type_complexity)]
 fn resolve_endpoint_with_custom_discovery(
     arg_socket: Option<String>,
     arg_token: Option<String>,
@@ -173,6 +174,7 @@ fn resolve_endpoint_with_custom_discovery(
     Err("--socket and --token required (or active Lucent external endpoint discovery file external-mcp.json)".into())
 }
 
+#[allow(clippy::type_complexity)]
 fn resolve_endpoint(
     arg_socket: Option<String>,
     arg_token: Option<String>,
