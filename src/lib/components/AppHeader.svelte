@@ -38,7 +38,7 @@
     onCloseTabs = undefined,
   } = $props();
 
-  let tabsEl: HTMLDivElement;
+  let tabsEl = $state<HTMLDivElement | undefined>();
   let contextMenu = $state<{
     x: number;
     y: number;
@@ -234,14 +234,20 @@
 
     <div class="spacer">
       {#if connected && tabs.length > 0}
-        <div class="unified-tabs" bind:this={tabsEl}>
+        <div
+          class="unified-tabs"
+          bind:this={tabsEl}
+          role="tablist"
+          aria-label="Open tabs"
+        >
           <!-- DB tabs (query / table / source) -->
           {#each tabs as tab (tab.id)}
             <div
               class="tab"
               class:active={isActive(tab.id)}
-              role="button"
-              tabindex="0"
+              role="tab"
+              aria-selected={isActive(tab.id)}
+              tabindex={isActive(tab.id) ? 0 : -1}
               onclick={() => {
                 onSwitchTab?.(tab.id);
                 closeContextMenu();
@@ -275,7 +281,7 @@
                   e.stopPropagation();
                   onCloseTab?.(tab.id);
                 }}
-                aria-label="Close tab">×</button
+                aria-label={`Close ${tabLabel(tab)}`}>×</button
               >
             </div>
           {/each}
