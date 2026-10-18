@@ -35,9 +35,7 @@ describe('AppHeader accessibility', () => {
 
     expect(screen.getByRole('tablist', { name: 'Open tabs' })).toBeTruthy();
     expect(
-      screen
-        .getByRole('tab', { name: new RegExp(tab.name) })
-        .getAttribute('aria-selected'),
+      screen.getByRole('tab', { name: new RegExp(tab.name) }).getAttribute('aria-selected'),
     ).toBe('false');
   });
 
