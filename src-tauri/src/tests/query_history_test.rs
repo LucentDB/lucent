@@ -386,6 +386,7 @@ async fn append_entry_async_returns_the_same_result_as_the_sync_path() {
 fn query_history_file_permissions_are_strict_on_unix() {
     use std::os::unix::fs::PermissionsExt;
     let (_dir, path) = with_temp_dir();
+    let file_path = path.join("query_history.jsonl");
     let entry = QueryHistoryEntry::new(
         "conn-1".into(),
         "Test".into(),
@@ -397,7 +398,7 @@ fn query_history_file_permissions_are_strict_on_unix() {
         None,
     );
     append_entry(entry).expect("append must succeed");
-    let metadata = std::fs::metadata(&path).expect("metadata must exist");
+    let metadata = std::fs::metadata(&file_path).expect("metadata must exist");
     let mode = metadata.permissions().mode() & 0o777;
     assert_eq!(
         mode, 0o600,
