@@ -99,12 +99,15 @@ pub fn append_entry(entry: QueryHistoryEntry) -> Result<(), String> {
 fn append_entry_at(path: &std::path::Path, entry: QueryHistoryEntry) -> Result<(), String> {
     let _guard = history_guard();
 
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        // read-modify-write: file is read fully before being rewritten in place
-        .truncate(false)
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let mut file = options
         .open(path)
         .map_err(|e| format!("history file open: {e}"))?;
 
