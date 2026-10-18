@@ -29,7 +29,14 @@ describe('AppHeader accessibility', () => {
       expect(screen.getByRole('button', { name })).toBeTruthy();
     }
 
-    expect(screen.getAllByRole('button', { name: 'Close tab' }).length).toBe(1);
+    expect(
+      screen.getAllByRole('button', { name: `Close ${tab.name}` }).length,
+    ).toBe(1);
+
+    expect(screen.getByRole('tablist', { name: 'Open tabs' })).toBeTruthy();
+    expect(
+      screen.getByRole('tab', { name: new RegExp(tab.name) }).getAttribute('aria-selected'),
+    ).toBe('false');
   });
 
   it('track the sidebar and chat state in their labels', () => {
