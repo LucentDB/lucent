@@ -1306,14 +1306,26 @@
 </QueryClientProvider>
 
 {#if queryError}
-  <div class="toast toast-error selectable" onclick={() => (queryError = null)}>
+  <button
+    type="button"
+    role="alert"
+    class="toast toast-error selectable"
+    onclick={() => (queryError = null)}
+    aria-label="Dismiss error notification: {queryError}"
+  >
     {queryError}
-  </div>
+  </button>
 {/if}
 {#if chat.error}
-  <div class="toast toast-error selectable" onclick={() => (chat.error = null)}>
+  <button
+    type="button"
+    role="alert"
+    class="toast toast-error selectable"
+    onclick={() => (chat.error = null)}
+    aria-label="Dismiss error notification: {chat.error}"
+  >
     {chat.error}
-  </div>
+  </button>
 {/if}
 
 {#if showPalette}
@@ -1504,6 +1516,19 @@
     cursor: pointer;
     max-width: 600px;
     word-break: break-word;
+    font-family: inherit;
+    text-align: left;
+    box-shadow: var(--shadow-md, 0 4px 12px rgba(0, 0, 0, 0.15));
+    transition:
+      transform var(--transition-fast, 0.15s ease),
+      box-shadow var(--transition-fast, 0.15s ease);
+  }
+  .toast:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .toast:hover {
+    transform: translateX(-50%) translateY(-1px);
   }
   .toast-error {
     background: var(--danger-bg, rgba(239, 68, 68, 0.1));
