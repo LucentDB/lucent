@@ -53,11 +53,11 @@ impl Connector for DuckDbConnector {
         let external_access = config.get("external_access") != Some("false");
 
         // Opening a database file is filesystem work and can block.
-        let handle = tokio::task::spawn_blocking(move || {
-            DuckHandle::open_ext(&path, read_only, external_access)
-        })
-        .await
-        .map_err(|e| LucentError::new(LucentErrorKind::Internal, format!("open task: {e}")))??;
+        let handle = tokio::task::spawn_blocking(move || DuckHandle::open_ext(&path, read_only, external_access))
+            .await
+            .map_err(|e| {
+                LucentError::new(LucentErrorKind::Internal, format!("open task: {e}"))
+            })??;
 
         let version = {
             let handle = Arc::new(handle);
