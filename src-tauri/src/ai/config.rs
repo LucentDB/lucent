@@ -161,22 +161,29 @@ pub fn keychain_account(provider: &AiProvider) -> &'static str {
     }
 }
 
-/// Persist AiConfig to a JSON file at ~/.lucent/ai-config.json
-pub fn save_config_to_disk(config: &AiConfig) -> Result<(), String> {
-    let path = config_file_path()?;
+/// Persist AiConfig to a specified path atomically with restricted permissions (0o600).
+pub fn save_config_to_path(config: &AiConfig, path: &std::path::Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("failed to create config dir: {e}"))?;
     }
     let json =
         serde_json::to_string_pretty(config).map_err(|e| format!("serialize config: {e}"))?;
-    std::fs::write(&path, json).map_err(|e| format!("write config: {e}"))?;
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    std::fs::write(&tmp, &json).map_err(|e| format!("write temp config: {e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     }
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename config file: {e}"))?;
     log::info!("AI config saved to {path:?}");
     Ok(())
+}
+
+/// Persist AiConfig to a JSON file at ~/.lucent/ai-config.json
+pub fn save_config_to_disk(config: &AiConfig) -> Result<(), String> {
+    let path = config_file_path()?;
+    save_config_to_path(config, &path)
 }
 
 /// Load AiConfig from ~/.lucent/ai-config.json, or return default if missing.
@@ -364,5 +371,31 @@ mod tests {
             parsed.provider_models.get(&AiProvider::Anthropic),
             Some(&"claude-sonnet-5".to_string())
         );
+    }
+
+    #[test]
+    fn test_save_config_to_path_permissions() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join(".lucent").join("ai-config.json");
+
+        let cfg = AiConfig::default();
+        save_config_to_path(&cfg, &config_path).expect("save_config_to_path should succeed");
+
+        assert!(config_path.exists(), "ai-config.json must exist after save");
+        let json = std::fs::read_to_string(&config_path).unwrap();
+        let loaded: AiConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.model, cfg.model);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = std::fs::metadata(&config_path).unwrap();
+            let mode = metadata.permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "ai-config.json must have 0o600 permissions on Unix"
+            );
+        }
     }
 }
