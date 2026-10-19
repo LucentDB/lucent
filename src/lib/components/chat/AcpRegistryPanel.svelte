@@ -2,16 +2,16 @@
   import type { RegistryAgentSummary } from '../../ipc/ai.ts';
 
   let {
-    agents = [] as RegistryAgentSummary[],
+    agents = [],
     loading = false,
     onInstall,
     onUninstall,
-  } = $props<{
+  }: {
     agents: RegistryAgentSummary[];
     loading: boolean;
     onInstall: (id: string) => void;
     onUninstall: (id: string) => void;
-  }>();
+  } = $props();
 </script>
 
 {#if loading}
