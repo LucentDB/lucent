@@ -29,7 +29,11 @@ describe('AppHeader accessibility', () => {
       expect(screen.getByRole('button', { name })).toBeTruthy();
     }
 
-    expect(screen.getAllByRole('button', { name: 'Close tab' }).length).toBe(1);
+    expect(screen.getByRole('tablist', { name: 'Open tabs' })).toBeTruthy();
+    expect(screen.getByRole('tab', { name: /Query 1/ })).toBeTruthy();
+    expect(
+      screen.getAllByRole('button', { name: 'Close Query 1 tab' }).length,
+    ).toBe(1);
   });
 
   it('track the sidebar and chat state in their labels', () => {
