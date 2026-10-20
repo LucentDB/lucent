@@ -149,6 +149,15 @@ const FORBIDDEN_FUNCTIONS: &[&str] = &[
 
 fn is_forbidden_func(name: &str) -> bool {
     FORBIDDEN_FUNCTIONS.contains(&name)
+        || name.starts_with("read_csv")
+        || name.starts_with("read_json")
+        || name.starts_with("read_parquet")
+        || name.starts_with("read_text")
+        || name.starts_with("read_ndjson")
+        || name.starts_with("parquet_")
+        || name.starts_with("st_read")
+        || name.starts_with("pg_read_")
+        || name.starts_with("pg_ls_")
 }
 
 fn check_table_name(name: &ObjectName) -> Result<(), GuardError> {
@@ -172,6 +181,9 @@ fn check_table_name(name: &ObjectName) -> Result<(), GuardError> {
     if lower_cleaned.ends_with(".csv")
         || lower_cleaned.ends_with(".parquet")
         || lower_cleaned.ends_with(".json")
+        || lower_cleaned.ends_with(".ndjson")
+        || lower_cleaned.ends_with(".jsonl")
+        || lower_cleaned.ends_with(".tsv")
         || lower_cleaned.ends_with(".env")
         || lower_cleaned.ends_with(".txt")
         || cleaned.contains('/')
@@ -275,10 +287,7 @@ fn check_expr(expr: &Expr) -> Result<(), GuardError> {
             Ok(())
         }
         Expr::Between {
-            expr,
-            low,
-            high,
-            ..
+            expr, low, high, ..
         } => {
             check_expr(expr)?;
             check_expr(low)?;
@@ -778,11 +787,19 @@ mod tests {
             "SELECT * FROM read_text('/etc/passwd')",
             "SELECT * FROM main.read_text('/etc/passwd')",
             "SELECT * FROM duckdb.read_csv('data.csv')",
+            "SELECT * FROM read_csv_auto('data.csv')",
+            "SELECT * FROM read_json_auto('data.json')",
+            "SELECT * FROM read_ndjson('data.ndjson')",
             "SELECT * FROM 'data.csv'",
+            "SELECT * FROM 'data.tsv'",
+            "SELECT * FROM 'data.ndjson'",
+            "SELECT * FROM 'data.jsonl'",
             "SELECT * FROM '/etc/hosts'",
             "SELECT count(*) FROM glob('/*')",
             "SELECT * FROM pg_read_file('config.json')",
+            "SELECT * FROM pg_read_file_all('config.json')",
             "SELECT * FROM pg_ls_dir('/tmp')",
+            "SELECT * FROM pg_ls_tmpdir()",
             "SELECT 1 ORDER BY read_text('/etc/passwd')",
             "SELECT count(*) FROM users GROUP BY read_text('/etc/passwd')",
             "SELECT (read_json('/etc/passwd'))[0]",
