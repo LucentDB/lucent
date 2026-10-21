@@ -380,3 +380,27 @@ async fn append_entry_async_returns_the_same_result_as_the_sync_path() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].sql, "SELECT 1");
 }
+
+#[test]
+#[cfg(unix)]
+fn test_history_file_permissions_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_dir, config_path) = with_temp_dir();
+    let entry = QueryHistoryEntry::new(
+        "conn-1".into(),
+        "Test DB".into(),
+        "postgres".into(),
+        "SELECT 1".into(),
+        12,
+        Some(1),
+        "success".into(),
+        None,
+    );
+    append_entry(entry).unwrap();
+
+    let file_path = config_path.join("query_history.jsonl");
+    let metadata = std::fs::metadata(&file_path).expect("metadata check");
+    let mode = metadata.permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "history file must have 0600 permissions");
+}
