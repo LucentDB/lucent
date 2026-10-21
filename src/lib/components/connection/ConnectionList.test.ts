@@ -35,6 +35,9 @@ describe('ConnectionList accessible elements', () => {
     });
 
     expect(
+      screen.getByRole('region', { name: 'Connection profiles' }),
+    ).not.toBeNull();
+    expect(
       screen.getByRole('textbox', { name: 'Search connections' }),
     ).not.toBeNull();
     expect(
