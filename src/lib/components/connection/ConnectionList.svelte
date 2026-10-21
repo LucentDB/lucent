@@ -90,7 +90,9 @@
   }
 </script>
 
-<div class="connection-list" onkeydown={handleGlobalKeydown}>
+<svelte:window onkeydown={handleGlobalKeydown} />
+
+<section class="connection-list" aria-label="Connection profiles">
   <!-- Toolbar -->
   <div class="list-toolbar">
     <div class="search-wrapper">
@@ -248,7 +250,7 @@
       </div>
     {/if}
   </div>
-</div>
+</section>
 
 <style>
   .connection-list {
