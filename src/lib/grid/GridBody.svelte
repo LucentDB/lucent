@@ -57,10 +57,11 @@
           row,
           ci === startCount - 1 ? 'cell-start pinned-edge' : 'cell-start',
           absolute,
+          'start',
         )}
       {/each}
       {#each tableRow?.getCenterVisibleCells() ?? [] as cell (cell.id)}
-        {@render bodyCell(cell, row, 'cell-center', absolute)}
+        {@render bodyCell(cell, row, 'cell-center', absolute, 'center')}
       {/each}
       {#each tableRow?.getEndVisibleCells() ?? [] as cell, ci (cell.id)}
         {@render bodyCell(
@@ -68,27 +69,27 @@
           row,
           ci === 0 ? 'cell-end pinned-edge' : 'cell-end',
           absolute,
+          'end',
         )}
       {/each}
     </tr>
   {/each}
 </tbody>
 
-{#snippet bodyCell(cell, row, extraClass, rowIndex)}
+{#snippet bodyCell(cell, row, extraClass, rowIndex, group)}
   {@const index = cell.column.columnDef.meta?.index ?? 0}
   {@const value = row[index]}
+  <!-- Optimization: explicit `group` avoids repeated extraClass.includes() lookups and skips pinning offsets for unpinned center cells -->
   <td
     class="{cellClass(value)} {extraClass}"
     data-selected={cell.getIsSelected() ? 'true' : 'false'}
     class:focused={cell.getIsFocused()}
     tabindex={cell.getTabIndex()}
-    style="width: {widthOf(index)}px; min-width: 80px; {extraClass.includes(
-      'cell-start',
-    )
+    style="width: {widthOf(index)}px; min-width: 80px; {group === 'start'
       ? `left: ${gutterWidth + cell.column.getStart('start')}px;`
-      : ''}{extraClass.includes('cell-end')
-      ? `right: ${cell.column.getAfter('end')}px;`
-      : ''}"
+      : group === 'end'
+        ? `right: ${cell.column.getAfter('end')}px;`
+        : ''}"
     onmousedown={(e) => onCellMouseDown(rowIndex, cell.column.id, e)}
     onmouseenter={() => onCellMouseEnter(rowIndex, cell.column.id)}
     oncontextmenu={(e) => onCellContextMenu(e, index, value)}

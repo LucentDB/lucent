@@ -75,29 +75,33 @@
       {@render headerCell(
         header,
         i === startHeaders.length - 1 ? 'hdr-start pinned-edge' : 'hdr-start',
+        'start',
       )}
     {/each}
     {#each centerHeaders as header (header.id)}
-      {@render headerCell(header, 'hdr-center')}
+      {@render headerCell(header, 'hdr-center', 'center')}
     {/each}
     {#each endHeaders as header, i (header.id)}
-      {@render headerCell(header, i === 0 ? 'hdr-end pinned-edge' : 'hdr-end')}
+      {@render headerCell(
+        header,
+        i === 0 ? 'hdr-end pinned-edge' : 'hdr-end',
+        'end',
+      )}
     {/each}
   </tr>
 </thead>
 
-{#snippet headerCell(header, extraClass)}
+{#snippet headerCell(header, extraClass, group)}
   {@const meta = metaOf(header)}
+  <!-- Optimization: explicit `group` avoids repeated extraClass.includes() lookups -->
   <th
     class="sortable {extraClass}"
     class:active={sortDirectionOf(header.column.id) !== false}
-    style="width: {widthOf(
-      meta.index,
-    )}px; min-width: 80px; {extraClass.includes('hdr-start')
+    style="width: {widthOf(meta.index)}px; min-width: 80px; {group === 'start'
       ? `left: ${startLeftOffset(header)}px;`
-      : ''}{extraClass.includes('hdr-end')
-      ? `right: ${endRightOffset(header)}px;`
-      : ''}"
+      : group === 'end'
+        ? `right: ${endRightOffset(header)}px;`
+        : ''}"
     title={meta.typeName}
   >
     <div class="col-header">
