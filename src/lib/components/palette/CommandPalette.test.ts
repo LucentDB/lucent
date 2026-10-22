@@ -7,7 +7,7 @@ test('sanitizes malicious SVG icons in command palette items', () => {
   const maliciousCommand = {
     id: 'cmd-1',
     label: 'Malicious Command',
-    icon: '<svg><image href="x" onerror="alert(1)" /></svg>',
+    icon: '<svg><image href="x" onerror="alert(1)" /><foreignObject><iframe src="javascript:alert(1)"></iframe></foreignObject></svg>',
   };
 
   const { container } = render(CommandPalette, {
@@ -22,6 +22,8 @@ test('sanitizes malicious SVG icons in command palette items', () => {
   const html = container.innerHTML;
   expect(html.toLowerCase()).not.toContain('onerror');
   expect(html.toLowerCase()).not.toContain('alert(1)');
+  expect(html.toLowerCase()).not.toContain('foreignobject');
+  expect(html.toLowerCase()).not.toContain('iframe');
 });
 
 test('falls back to default icon when icon id is unknown string', () => {
