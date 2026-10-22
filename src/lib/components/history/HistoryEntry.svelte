@@ -15,8 +15,10 @@
     onCopy?: (sql: string) => void;
   } = $props();
 
+  // Avoid sql.split('\n') which allocates arrays for multi-line queries on every item render
   function truncateSql(sql: string, maxLen = 80): string {
-    const line = sql.split('\n')[0];
+    const newlineIndex = sql.indexOf('\n');
+    const line = newlineIndex === -1 ? sql : sql.slice(0, newlineIndex);
     return line.length > maxLen ? line.slice(0, maxLen) + '…' : line;
   }
 
