@@ -21,6 +21,15 @@
   let pos = $state({ x: 0, y: 0 });
   let placed = $state(false);
 
+  $effect(() => {
+    const returnTo = document.activeElement;
+    return () => {
+      if (returnTo instanceof HTMLElement && document.contains(returnTo)) {
+        returnTo.focus();
+      }
+    };
+  });
+
   // Runs after mount, and again if the anchor coordinates change while this
   // instance is alive (a second right-click can update the same instance).
   $effect(() => {
@@ -50,10 +59,54 @@
     onClose();
   }
 
+  function getEnabledItems(): HTMLButtonElement[] {
+    if (!menuEl) return [];
+    return Array.from(
+      menuEl.querySelectorAll<HTMLButtonElement>('.menu-item:not(:disabled)'),
+    );
+  }
+
+  function moveFocus(delta: number) {
+    const buttons = getEnabledItems();
+    if (buttons.length === 0) return;
+    const current = buttons.indexOf(
+      document.activeElement as HTMLButtonElement,
+    );
+    const next =
+      current === -1
+        ? delta > 0
+          ? 0
+          : buttons.length - 1
+        : (current + delta + buttons.length) % buttons.length;
+    buttons[next]?.focus();
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       e.preventDefault();
       onClose();
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      moveFocus(1);
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      moveFocus(-1);
+      return;
+    }
+    if (e.key === 'Home') {
+      e.preventDefault();
+      getEnabledItems()[0]?.focus();
+      return;
+    }
+    if (e.key === 'End') {
+      e.preventDefault();
+      const buttons = getEnabledItems();
+      buttons[buttons.length - 1]?.focus();
+      return;
     }
   }
 
@@ -99,6 +152,7 @@
           stroke-width="2"
           stroke-linecap="round"
           stroke-linejoin="round"
+          aria-hidden="true"
         >
           {#if item.icon === 'save'}
             <path
@@ -210,9 +264,11 @@
     user-select: none;
     transition: background var(--transition-fast);
   }
-  .menu-item:hover:not(:disabled) {
+  .menu-item:hover:not(:disabled),
+  .menu-item:focus-visible:not(:disabled) {
     background: var(--accent-soft);
     color: var(--accent);
+    outline: none;
   }
   .menu-item:disabled {
     color: var(--text-muted);
@@ -222,7 +278,8 @@
     flex-shrink: 0;
     color: var(--text-muted);
   }
-  .menu-item:hover:not(:disabled) svg {
+  .menu-item:hover:not(:disabled) svg,
+  .menu-item:focus-visible:not(:disabled) svg {
     color: var(--accent);
   }
 </style>
