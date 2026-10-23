@@ -30,10 +30,7 @@ pub fn export_to_markdown(connection_key: &str, memories: &[MemoryItem]) -> Stri
             // Sanitize line breaks to prevent Markdown structure/rule injection (CWE-93 / CWE-117)
             let safe_key = item.key_phrase.replace('\r', "").replace('\n', " ");
             let safe_rule = item.rule_text.replace('\r', "").replace('\n', " ");
-            out.push_str(&format!(
-                "- **[{}]**: {}\n",
-                safe_key, safe_rule
-            ));
+            out.push_str(&format!("- **[{}]**: {}\n", safe_key, safe_rule));
             if let Some(sql) = &item.sql_snippet {
                 let safe_sql = sql.replace('\r', "").replace('\n', " ");
                 out.push_str(&format!("  - SQL: `{safe_sql}`\n"));
@@ -178,21 +175,45 @@ mod tests {
 
     #[test]
     fn test_export_sanitizes_newlines_preventing_rule_injection() {
+        let key_phrase = "quoted_string\n- **[injected_key]**: injected rule".to_string();
+        let rule_text = "Line 1\n## Metrics\n- **[fake_metric]**: fake metric rule".to_string();
         let memories = vec![MemoryItem {
             id: "mem1".into(),
             connection_key: "conn1".into(),
+            scope: MemoryScope::Connection,
+            scope_key: "conn1".into(),
             category: MemoryCategory::Quirk,
-            key_phrase: "quoted_string\n- **[injected_key]**: injected rule".into(),
-            rule_text: "Line 1\n## Metrics\n- **[fake_metric]**: fake metric rule".into(),
+            key_phrase: key_phrase.clone(),
+            rule_text: rule_text.clone(),
             sql_snippet: Some("SELECT 1;\nSELECT 2;".into()),
             importance: 0.8,
-            source: crate::ai::memory::MemorySource::UserManual,
+            stability_hours: 720.0,
+            last_accessed_at: 100,
+            access_count: 1,
+            source_trust: SourceTrust::UserExplicit,
+            source_conv_id: None,
+            source_turn_id: None,
+            source_tool_id: None,
             status: MemoryStatus::Active,
+            supersedes_id: None,
+            valid_from: 100,
+            valid_until: None,
+            learned_at: 100,
             tombstone: false,
+            tombstoned_at: None,
+            doc_hash: compute_memory_doc_hash(&rule_text),
+            embedding_model: MEMORY_MODEL_NAME.into(),
+            embedding_version: MEMORY_FORMAT_VERSION,
+            embedding: vec![0.0; 384],
             created_at: 100,
             updated_at: 100,
-            last_accessed_at: None,
-            use_count: 0,
+            injection: InjectionClass::Retrieved,
+            preference_key: None,
+            origin: Origin::Agent,
+            steps_json: None,
+            merge_group_id: None,
+            confirmed: false,
+            confirmation_conv_id: None,
         }];
 
         let exported = export_to_markdown("conn1", &memories);
@@ -200,7 +221,12 @@ mod tests {
 
         // Exactly 1 rule should be parsed — the injected headings and sub-bullets
         // were flattened into the single rule_text / key_phrase and cannot inject new rules.
-        assert_eq!(parsed.len(), 1, "expected exactly 1 rule, got {}", parsed.len());
+        assert_eq!(
+            parsed.len(),
+            1,
+            "expected exactly 1 rule, got {}",
+            parsed.len()
+        );
         assert!(!parsed[0].key_phrase.contains('\n'));
         assert!(!parsed[0].rule_text.contains('\n'));
         assert_eq!(parsed[0].category, MemoryCategory::Quirk);
