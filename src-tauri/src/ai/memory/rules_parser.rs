@@ -27,12 +27,16 @@ pub fn export_to_markdown(connection_key: &str, memories: &[MemoryItem]) -> Stri
 
         out.push_str(&format!("## {title}\n\n"));
         for item in items {
+            // Sanitize line breaks to prevent Markdown structure/rule injection (CWE-93 / CWE-117)
+            let safe_key = item.key_phrase.replace('\r', "").replace('\n', " ");
+            let safe_rule = item.rule_text.replace('\r', "").replace('\n', " ");
             out.push_str(&format!(
                 "- **[{}]**: {}\n",
-                item.key_phrase, item.rule_text
+                safe_key, safe_rule
             ));
             if let Some(sql) = &item.sql_snippet {
-                out.push_str(&format!("  - SQL: `{sql}`\n"));
+                let safe_sql = sql.replace('\r', "").replace('\n', " ");
+                out.push_str(&format!("  - SQL: `{safe_sql}`\n"));
             }
             if (item.importance - 0.5).abs() > 0.01 {
                 out.push_str(&format!("  - Importance: {:.2}\n", item.importance));
@@ -170,5 +174,39 @@ mod tests {
 
         assert_eq!(parsed[1].category, MemoryCategory::Join);
         assert_eq!(parsed[1].key_phrase, "orders_to_users");
+    }
+
+    #[test]
+    fn test_export_sanitizes_newlines_preventing_rule_injection() {
+        let memories = vec![MemoryItem {
+            id: "mem1".into(),
+            connection_key: "conn1".into(),
+            category: MemoryCategory::Quirk,
+            key_phrase: "quoted_string\n- **[injected_key]**: injected rule".into(),
+            rule_text: "Line 1\n## Metrics\n- **[fake_metric]**: fake metric rule".into(),
+            sql_snippet: Some("SELECT 1;\nSELECT 2;".into()),
+            importance: 0.8,
+            source: crate::ai::memory::MemorySource::UserManual,
+            status: MemoryStatus::Active,
+            tombstone: false,
+            created_at: 100,
+            updated_at: 100,
+            last_accessed_at: None,
+            use_count: 0,
+        }];
+
+        let exported = export_to_markdown("conn1", &memories);
+        let parsed = parse_markdown_rules(&exported);
+
+        // Exactly 1 rule should be parsed — the injected headings and sub-bullets
+        // were flattened into the single rule_text / key_phrase and cannot inject new rules.
+        assert_eq!(parsed.len(), 1, "expected exactly 1 rule, got {}", parsed.len());
+        assert!(!parsed[0].key_phrase.contains('\n'));
+        assert!(!parsed[0].rule_text.contains('\n'));
+        assert_eq!(parsed[0].category, MemoryCategory::Quirk);
+        assert_eq!(
+            parsed[0].sql_snippet.as_deref(),
+            Some("SELECT 1; SELECT 2;")
+        );
     }
 }
