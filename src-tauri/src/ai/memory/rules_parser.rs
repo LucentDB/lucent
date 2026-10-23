@@ -1,4 +1,7 @@
-use super::{MemoryCategory, MemoryItem, MemoryStatus};
+use super::{
+    compute_memory_doc_hash, InjectionClass, MemoryCategory, MemoryItem, MemoryScope, MemoryStatus,
+    Origin, SourceTrust, MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME,
+};
 
 /// Exports memories for a connection to structured Markdown (LUCENT.md).
 pub fn export_to_markdown(connection_key: &str, memories: &[MemoryItem]) -> String {
