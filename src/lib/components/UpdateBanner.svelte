@@ -32,7 +32,13 @@
 {#if available}
   <div class="update" role="status">
     <span>Update {available.version}</span>
-    <button onclick={install} disabled={installing}>
+    <button
+      onclick={install}
+      disabled={installing}
+      aria-label={installing
+        ? `Installing update ${available.version}`
+        : `Install update ${available.version}`}
+    >
       {installing ? 'Installing…' : 'Install'}
     </button>
   </div>
