@@ -26,10 +26,11 @@ describe('UpdateBanner', () => {
     expect(container.textContent).not.toContain('Update');
   });
 
-  it('offers the new version when one is available', async () => {
+  it('offers the new version when one is available with accessible label', async () => {
     check.mockResolvedValue({ version: '0.2.0', downloadAndInstall: vi.fn() });
-    const { container } = render(UpdateBanner);
+    const { container, getByRole } = render(UpdateBanner);
     await vi.waitFor(() => expect(container.textContent).toContain('0.2.0'));
+    expect(getByRole('button', { name: 'Install update 0.2.0' })).toBeDefined();
   });
 
   // A failed check must never surface as a broken UI: the app works fine
