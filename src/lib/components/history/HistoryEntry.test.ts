@@ -51,4 +51,32 @@ describe('HistoryEntry accessibility', () => {
       screen.getByRole('button', { name: 'Unfavorite query' }),
     ).toBeDefined();
   });
+
+  it('correctly truncates multi-line SQL queries without showing subsequent lines', () => {
+    const multiLineEntry: HistoryEntryType = {
+      ...sampleEntry,
+      sql: 'SELECT id, name\nFROM users\nWHERE active = true;\nORDER BY id DESC;',
+    };
+    render(HistoryEntry, { entry: multiLineEntry });
+
+    const mainBtn = screen.getByRole('button', {
+      name: /rerun query: select id, name/i,
+    });
+    expect(mainBtn).toBeDefined();
+    expect(mainBtn.getAttribute('aria-label')).not.toContain('FROM users');
+  });
+
+  it('correctly truncates single-line SQL queries that exceed max length', () => {
+    const longSql = 'SELECT ' + 'a'.repeat(100) + ' FROM users;';
+    const longEntry: HistoryEntryType = {
+      ...sampleEntry,
+      sql: longSql,
+    };
+    render(HistoryEntry, { entry: longEntry });
+
+    const mainBtn = screen.getByRole('button', {
+      name: /rerun query: select a+…/i,
+    });
+    expect(mainBtn).toBeDefined();
+  });
 });
