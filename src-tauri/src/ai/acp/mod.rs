@@ -842,9 +842,7 @@ mod tests {
         assert_eq!(parsed["$schema"], "https://opencode.ai/config.json");
         assert_eq!(parsed["mcp"]["lucent-db-tools"]["type"], "local");
         assert_eq!(parsed["mcp"]["lucent-db-tools"]["enabled"], true);
-        let cmd = parsed["mcp"]["lucent-db-tools"]["command"]
-            .as_array()
-            .expect("command is an array");
+        let cmd = parsed["mcp"]["lucent-db-tools"]["command"].as_array().expect("command is an array");
         assert_eq!(cmd.len(), 5);
         assert_eq!(cmd[1], "--socket");
         assert_eq!(cmd[3], "--token");
