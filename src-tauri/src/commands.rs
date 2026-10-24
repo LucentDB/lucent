@@ -3716,6 +3716,14 @@ fn validate_custom_endpoint(config: &AiConfig) -> Result<(), String> {
             return Err("Custom provider requires an endpoint URL".to_string());
         }
     }
+
+    if let Some(ep) = config.endpoint.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let parsed = reqwest::Url::parse(ep).map_err(|e| format!("Invalid endpoint URL: {e}"))?;
+        if parsed.scheme() != "http" && parsed.scheme() != "https" {
+            return Err("Endpoint URL scheme must be http or https".to_string());
+        }
+    }
+
     Ok(())
 }
 
@@ -4712,6 +4720,28 @@ mod custom_endpoint_validation_tests {
     fn accepts_non_custom_with_no_endpoint() {
         let cfg = config_with(AiProvider::OpenAI, None);
         assert!(validate_custom_endpoint(&cfg).is_ok());
+    }
+
+    #[test]
+    fn rejects_non_http_https_endpoint_schemes() {
+        for scheme in ["file:///etc/passwd", "javascript:alert(1)", "ftp://example.com"] {
+            let cfg = config_with(AiProvider::Custom, Some(scheme));
+            let err = validate_custom_endpoint(&cfg).unwrap_err();
+            assert!(
+                err.contains("Endpoint URL scheme must be http or https"),
+                "expected scheme error for {scheme}, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_endpoint_urls() {
+        let cfg = config_with(AiProvider::Custom, Some("not-a-valid-url"));
+        let err = validate_custom_endpoint(&cfg).unwrap_err();
+        assert!(
+            err.contains("Invalid endpoint URL"),
+            "expected invalid url error, got {err}"
+        );
     }
 }
 
