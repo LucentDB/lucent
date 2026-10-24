@@ -35,7 +35,9 @@
     <button
       onclick={install}
       disabled={installing}
-      aria-label={installing ? `Installing update ${available.version}` : `Install update ${available.version}`}
+      aria-label={installing
+        ? `Installing update ${available.version}`
+        : `Install update ${available.version}`}
     >
       {installing ? 'Installing…' : 'Install'}
     </button>
