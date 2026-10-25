@@ -221,9 +221,10 @@
         class="run-btn"
         onclick={handleExecute}
         disabled={executing}
+        title="Run query"
         type="button"
       >
-        <span class="run-icon">▶</span>
+        <span class="run-icon" aria-hidden="true">▶</span>
         {executing ? 'Running...' : 'Run'}
       </button>
     </div>
@@ -232,9 +233,9 @@
   <div class="editor-container" bind:this={container}></div>
 
   {#if error}
-    <div class="error-panel selectable">
+    <div class="error-panel selectable" role="alert">
       <div class="error-header">
-        <span class="error-icon">!</span>
+        <span class="error-icon" aria-hidden="true">!</span>
         <span class="error-title">Query Failed</span>
       </div>
       <pre class="error-message">{error}</pre>

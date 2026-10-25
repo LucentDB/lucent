@@ -41,4 +41,41 @@ describe('ConnectionList accessible elements', () => {
       screen.getByRole('button', { name: 'Toggle view mode' }),
     ).not.toBeNull();
   });
+
+  it('renders a region landmark for connection profiles', () => {
+    render(ConnectionList, {
+      props: {
+        profiles: [sampleProfile],
+        groupedProfiles: [{ name: 'Default', profiles: [sampleProfile] }],
+        loading: false,
+        activeProfileId: null,
+        testingIds: new Set<string>(),
+      },
+    });
+
+    expect(
+      screen.getByRole('region', { name: 'Connection profiles' }),
+    ).not.toBeNull();
+  });
+
+  it('focuses search input when / key is pressed globally', async () => {
+    const { fireEvent } = await import('@testing-library/svelte');
+    render(ConnectionList, {
+      props: {
+        profiles: [sampleProfile],
+        groupedProfiles: [{ name: 'Default', profiles: [sampleProfile] }],
+        loading: false,
+        activeProfileId: null,
+        testingIds: new Set<string>(),
+      },
+    });
+
+    const searchInput = screen.getByRole('textbox', {
+      name: 'Search connections',
+    });
+    expect(document.activeElement).not.toBe(searchInput);
+
+    await fireEvent.keyDown(window, { key: '/' });
+    expect(document.activeElement).toBe(searchInput);
+  });
 });

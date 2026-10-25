@@ -86,6 +86,12 @@ impl ExternalEndpointManager {
         let listener = tokio::net::UnixListener::bind(&socket_path)
             .map_err(|e| format!("Failed to bind external MCP socket at {}: {e}", socket_path.display()))?;
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o700));
+        }
+
         #[cfg(windows)]
         let pipe_name = format!(r"\\.\pipe\lucent-external-{}-{}", std::process::id(), &token[..8]);
         #[cfg(windows)]

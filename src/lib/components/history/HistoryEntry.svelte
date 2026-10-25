@@ -26,7 +26,8 @@
   }
 
   function truncateSql(sql: string, maxLen = 80): string {
-    const line = sql.split('\n')[0];
+    const nl = sql.indexOf('\n');
+    const line = nl === -1 ? sql : sql.slice(0, nl);
     return line.length > maxLen ? line.slice(0, maxLen) + '…' : line;
   }
 

@@ -96,17 +96,21 @@ pub fn append_entry(entry: QueryHistoryEntry) -> Result<(), String> {
 /// The locked read-modify-write body. Takes the path explicitly so async
 /// callers can resolve it on the calling thread before crossing into the
 /// blocking pool (G1).
+fn open_history_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
 fn append_entry_at(path: &std::path::Path, entry: QueryHistoryEntry) -> Result<(), String> {
     let _guard = history_guard();
 
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        // read-modify-write: file is read fully before being rewritten in place
-        .truncate(false)
-        .open(path)
-        .map_err(|e| format!("history file open: {e}"))?;
+    let mut file = open_history_file(path).map_err(|e| format!("history file open: {e}"))?;
 
     // Exclusive lock before touching the file
     fs2::FileExt::lock_exclusive(&file).map_err(|e| format!("history file lock: {e}"))?;
@@ -313,13 +317,7 @@ pub fn date_group(executed_at: &str) -> String {
 
 fn rewrite_all(entries: &[QueryHistoryEntry]) -> Result<(), String> {
     let path = history_file_path();
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
-        .map_err(|e| e.to_string())?;
+    let mut file = open_history_file(&path).map_err(|e| e.to_string())?;
     // Lock BEFORE truncating — a concurrent append_entry holds the exclusive
     // lock while rewriting; truncating first would clobber its in-flight write.
     fs2::FileExt::lock_exclusive(&file).map_err(|e| e.to_string())?;

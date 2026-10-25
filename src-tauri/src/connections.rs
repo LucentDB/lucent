@@ -552,18 +552,29 @@ fn keychain_delete(service: &str, account: &str) -> Result<(), KeychainError> {
 }
 
 pub fn get_password(profile_id: &str) -> Result<String, KeychainError> {
+    if profile_id.trim().is_empty() {
+        return Err(KeychainError::NotFound);
+    }
     resolve_secret_with(KEYCHAIN_SERVICE, profile_id, || {
         keychain_get(KEYCHAIN_SERVICE, profile_id)
     })
 }
 
 pub fn set_password(profile_id: &str, password: &str) -> Result<(), KeychainError> {
+    if profile_id.trim().is_empty() {
+        return Err(KeychainError::Other(
+            "account ID cannot be empty".to_string(),
+        ));
+    }
     store_secret_with(KEYCHAIN_SERVICE, profile_id, password, || {
         keychain_set(KEYCHAIN_SERVICE, profile_id, password)
     })
 }
 
 pub fn delete_password(profile_id: &str) -> Result<(), KeychainError> {
+    if profile_id.trim().is_empty() {
+        return Ok(());
+    }
     delete_secret_with(KEYCHAIN_SERVICE, profile_id, || {
         keychain_delete(KEYCHAIN_SERVICE, profile_id)
     })
@@ -572,18 +583,29 @@ pub fn delete_password(profile_id: &str) -> Result<(), KeychainError> {
 /// SSH secret helpers (same file-first treatment; currently no production
 /// readers — the tunnel path is unwired — so this is latent-proofing).
 pub fn get_ssh_secret(tunnel_id: &str) -> Result<String, KeychainError> {
+    if tunnel_id.trim().is_empty() {
+        return Err(KeychainError::NotFound);
+    }
     resolve_secret_with(KEYCHAIN_SSH_SERVICE, tunnel_id, || {
         keychain_get(KEYCHAIN_SSH_SERVICE, tunnel_id)
     })
 }
 
 pub fn set_ssh_secret(tunnel_id: &str, secret: &str) -> Result<(), KeychainError> {
+    if tunnel_id.trim().is_empty() {
+        return Err(KeychainError::Other(
+            "account ID cannot be empty".to_string(),
+        ));
+    }
     store_secret_with(KEYCHAIN_SSH_SERVICE, tunnel_id, secret, || {
         keychain_set(KEYCHAIN_SSH_SERVICE, tunnel_id, secret)
     })
 }
 
 pub fn delete_ssh_secret(tunnel_id: &str) -> Result<(), KeychainError> {
+    if tunnel_id.trim().is_empty() {
+        return Ok(());
+    }
     delete_secret_with(KEYCHAIN_SSH_SERVICE, tunnel_id, || {
         keychain_delete(KEYCHAIN_SSH_SERVICE, tunnel_id)
     })

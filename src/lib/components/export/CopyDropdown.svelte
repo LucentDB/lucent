@@ -56,8 +56,9 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="copy-dropdown" onkeydown={handleKeydown}>
+<svelte:window onkeydown={handleKeydown} />
+
+<div class="copy-dropdown">
   <button
     class="copy-btn"
     {disabled}
@@ -65,7 +66,7 @@
     title="Copy results"
     aria-label="Copy results"
     aria-expanded={open}
-    aria-haspopup="true"
+    aria-haspopup="menu"
   >
     <svg
       width="16"

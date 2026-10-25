@@ -1864,6 +1864,11 @@ pub fn validate_approved(
 /// paths the user explicitly chose in a native dialog. Only ever grows via
 /// `choose_path_via_dialog`; nothing else writes it.
 fn approved_paths_file() -> Result<std::path::PathBuf, CommandError> {
+    if let Ok(dir) = std::env::var("LUCENT_CONFIG_DIR") {
+        let path = std::path::PathBuf::from(dir).join("lucent");
+        std::fs::create_dir_all(&path).map_err(|e| CommandError::new("PathError", e.to_string()))?;
+        return Ok(path.join("approved_save_paths.json"));
+    }
     let mut dir =
         dirs::config_dir().ok_or_else(|| CommandError::new("PathError", "no config dir"))?;
     dir.push("lucent");
@@ -1898,7 +1903,13 @@ async fn persist_approved_paths(state: &AppState) -> Result<(), CommandError> {
         &file,
         serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()),
     )
-    .map_err(|e| CommandError::new("PathError", format!("cannot persist approved paths: {e}")))
+    .map_err(|e| CommandError::new("PathError", format!("cannot persist approved paths: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 /// Shared body for `choose_save_path` / `choose_export_path`: show a native
@@ -3887,6 +3898,14 @@ fn validate_custom_endpoint(config: &AiConfig) -> Result<(), String> {
             return Err("Custom provider requires an endpoint URL".to_string());
         }
     }
+
+    if let Some(ep) = config.endpoint.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let parsed = reqwest::Url::parse(ep).map_err(|e| format!("Invalid endpoint URL: {e}"))?;
+        if parsed.scheme() != "http" && parsed.scheme() != "https" {
+            return Err("Endpoint URL scheme must be http or https".to_string());
+        }
+    }
+
     Ok(())
 }
 
@@ -5008,6 +5027,28 @@ mod custom_endpoint_validation_tests {
     fn accepts_non_custom_with_no_endpoint() {
         let cfg = config_with(AiProvider::OpenAI, None);
         assert!(validate_custom_endpoint(&cfg).is_ok());
+    }
+
+    #[test]
+    fn rejects_non_http_https_endpoint_schemes() {
+        for scheme in ["file:///etc/passwd", "javascript:alert(1)", "ftp://example.com"] {
+            let cfg = config_with(AiProvider::Custom, Some(scheme));
+            let err = validate_custom_endpoint(&cfg).unwrap_err();
+            assert!(
+                err.contains("Endpoint URL scheme must be http or https"),
+                "expected scheme error for {scheme}, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_endpoint_urls() {
+        let cfg = config_with(AiProvider::Custom, Some("not-a-valid-url"));
+        let err = validate_custom_endpoint(&cfg).unwrap_err();
+        assert!(
+            err.contains("Invalid endpoint URL"),
+            "expected invalid url error, got {err}"
+        );
     }
 }
 
