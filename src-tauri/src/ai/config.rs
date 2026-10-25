@@ -78,6 +78,12 @@ pub struct AiConfig {
     /// Per-query statement_timeout for AI read-only queries, seconds. 0 disables.
     #[serde(default = "default_ai_query_timeout_secs")]
     pub ai_query_timeout_secs: u64,
+    /// Total wall-clock cap for one agent turn, seconds. 0 disables the cap.
+    /// Covers the whole driver.chat future (process acquire, session setup,
+    /// the prompt turn, parked permission waits). Generous by design — the
+    /// ACP driver's idle watchdog is the finer-grained protection.
+    #[serde(default = "default_agent_turn_timeout_secs")]
+    pub agent_turn_timeout_secs: u64,
     /// Per-provider "last model picked in Settings" — a pure UX convenience
     /// for re-populating the model picker when the provider dropdown changes.
     /// NOT consulted at agent-run time; `provider` + `model` above remain the
@@ -119,6 +125,9 @@ fn default_sample_column_values() -> bool {
 fn default_ai_query_timeout_secs() -> u64 {
     60
 }
+fn default_agent_turn_timeout_secs() -> u64 {
+    1800
+}
 fn default_enable_ai_memory() -> bool {
     true
 }
@@ -140,6 +149,7 @@ impl Default for AiConfig {
             enable_semantic_index: true,
             sample_column_values: true,
             ai_query_timeout_secs: 60,
+            agent_turn_timeout_secs: 1800,
             provider_models: HashMap::new(),
             acp: None,
             enable_ai_memory: true,
@@ -170,22 +180,29 @@ pub fn keychain_account(provider: &AiProvider) -> &'static str {
     }
 }
 
-/// Persist AiConfig to a JSON file at ~/.lucent/ai-config.json
-pub fn save_config_to_disk(config: &AiConfig) -> Result<(), String> {
-    let path = config_file_path()?;
+/// Persist AiConfig to a specified path atomically with restricted permissions (0o600).
+pub fn save_config_to_path(config: &AiConfig, path: &std::path::Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("failed to create config dir: {e}"))?;
     }
     let json =
         serde_json::to_string_pretty(config).map_err(|e| format!("serialize config: {e}"))?;
-    std::fs::write(&path, json).map_err(|e| format!("write config: {e}"))?;
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    std::fs::write(&tmp, &json).map_err(|e| format!("write temp config: {e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     }
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename config file: {e}"))?;
     log::info!("AI config saved to {path:?}");
     Ok(())
+}
+
+/// Persist AiConfig to a JSON file at ~/.lucent/ai-config.json
+pub fn save_config_to_disk(config: &AiConfig) -> Result<(), String> {
+    let path = config_file_path()?;
+    save_config_to_path(config, &path)
 }
 
 /// Load AiConfig from ~/.lucent/ai-config.json, or return default if missing.
@@ -238,6 +255,21 @@ mod tests {
         let cfg: AiConfig = serde_json::from_str(old_json).expect("old config still parses");
         assert_eq!(
             cfg.ai_query_timeout_secs, 60,
+            "missing field falls back to default"
+        );
+    }
+
+    #[test]
+    fn agent_turn_timeout_defaults_to_1800s_and_survives_old_configs() {
+        assert_eq!(AiConfig::default().agent_turn_timeout_secs, 1800);
+        let old_json = r#"{
+            "provider": "openai", "endpoint": null, "model": "gpt-4o",
+            "maxTokens": 4096, "maxTurns": 50, "rowLimit": 500,
+            "sendResultsToAi": true, "enableBlastRadiusCheck": true
+        }"#;
+        let cfg: AiConfig = serde_json::from_str(old_json).expect("old config still parses");
+        assert_eq!(
+            cfg.agent_turn_timeout_secs, 1800,
             "missing field falls back to default"
         );
     }
@@ -384,5 +416,31 @@ mod tests {
             parsed.provider_models.get(&AiProvider::Anthropic),
             Some(&"claude-sonnet-5".to_string())
         );
+    }
+
+    #[test]
+    fn test_save_config_to_path_permissions() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join(".lucent").join("ai-config.json");
+
+        let cfg = AiConfig::default();
+        save_config_to_path(&cfg, &config_path).expect("save_config_to_path should succeed");
+
+        assert!(config_path.exists(), "ai-config.json must exist after save");
+        let json = std::fs::read_to_string(&config_path).unwrap();
+        let loaded: AiConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.model, cfg.model);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = std::fs::metadata(&config_path).unwrap();
+            let mode = metadata.permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "ai-config.json must have 0o600 permissions on Unix"
+            );
+        }
     }
 }

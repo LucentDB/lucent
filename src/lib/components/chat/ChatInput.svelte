@@ -1,14 +1,20 @@
 <script lang="ts">
-  import { chat } from '../../stores/chat.svelte.ts';
+  import { chat, isConvRunning } from '../../stores/chat.svelte.ts';
 
   let {
     onSend,
+    onStop,
+    conversationId,
     disabled = false,
     placeholder = 'Ask anything about your database…',
     hint = 'Enter to send · Shift+Enter for newline',
     docked = true,
   }: {
     onSend: (msg: string) => void;
+    /** Called when the Stop control is clicked while this conversation runs. */
+    onStop?: (convId: string) => void;
+    /** The conversation this input composes for (defaults to the active one). */
+    conversationId?: string;
     /** Blocks input for reasons beyond streaming — e.g. no connection. */
     disabled?: boolean;
     placeholder?: string;
@@ -26,9 +32,21 @@
   let value = $state('');
   let inputEl: HTMLTextAreaElement;
 
-  const blocked = $derived(chat.isStreaming || disabled);
+  const convId = $derived(conversationId ?? chat.activeConversationId);
+  const running = $derived(isConvRunning(convId));
+  const stopping = $derived(
+    chat.conversations.find((c) => c.id === convId)?.runPhase === 'stopping',
+  );
+  // Per-conversation: only the conversation with a live turn is blocked —
+  // other tabs keep a working input (parallel chats).
+  const blocked = $derived(running || disabled);
 
   function handleKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape' && running && convId) {
+      e.preventDefault();
+      onStop?.(convId);
+      return;
+    }
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
       e.preventDefault();
       submit();
@@ -40,11 +58,18 @@
   }
 
   function submit() {
+    // While running the button is Stop, not Send — and the textarea stays
+    // enabled so the next message can be composed (sending waits for idle).
+    if (running) return;
     const t = value.trim();
     if (!t || blocked) return;
     onSend(t);
     value = '';
     if (inputEl) inputEl.style.height = 'auto';
+  }
+
+  function stop() {
+    if (convId) onStop?.(convId);
   }
 
   function autoResize() {
@@ -63,17 +88,22 @@
       onkeydown={handleKeydown}
       oninput={autoResize}
       {placeholder}
-      disabled={blocked}
+      disabled={disabled}
       rows={1}></textarea>
     <button
       class="send-btn"
-      class:busy={chat.isStreaming}
-      onclick={submit}
-      disabled={blocked || !value.trim()}
-      aria-label="Send message"
+      class:busy={running && !stopping}
+      class:stop={running}
+      onclick={running ? stop : submit}
+      disabled={running ? stopping : blocked || !value.trim()}
+      aria-label={running ? 'Stop generation' : 'Send message'}
     >
-      {#if chat.isStreaming}
-        <span class="spinner"></span>
+      {#if running}
+        {#if stopping}
+          <span class="spinner"></span>
+        {:else}
+          <span class="stop-rule" aria-hidden="true"></span>
+        {/if}
       {:else}
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
           <path
@@ -172,6 +202,30 @@
   .send-btn:disabled.busy {
     background: var(--accent);
     color: #fff;
+  }
+  /* Stop state: danger-tinted so it reads as an interrupt, matching the
+     notebook cell Stop button. */
+  .send-btn.stop {
+    background: var(--danger-bg);
+    color: var(--danger);
+    border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  }
+  .send-btn.stop:hover:not(:disabled) {
+    background: var(--danger-bg);
+    color: var(--danger);
+  }
+  .send-btn.stop:disabled {
+    background: var(--danger-bg);
+    color: var(--danger);
+    opacity: 0.7;
+    cursor: wait;
+  }
+  .stop-rule {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    background: currentColor;
+    flex-shrink: 0;
   }
   .spinner {
     width: 14px;

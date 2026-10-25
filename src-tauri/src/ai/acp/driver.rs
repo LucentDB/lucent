@@ -120,39 +120,52 @@ impl AcpChatDriver {
         session
             .last_memory_hash
             .store(memory_hash, Ordering::SeqCst);
-        // ACP delivers the system prompt — and therefore its memory block — only
-        // on a session's first turn; a follow-up re-attaches the block only when
-        // it changed (F13), otherwise the session already holds it.
-        // F-C2: report rules only when the session holds them — delivered now
-        // (first prompt or a changed block) or delivered earlier unchanged.
-        let delivered_memory_count = if memory_hash != 0 {
-            applied_memory_count
-        } else {
-            0
-        };
+        // The memory block now rides on the user message, so it is delivered
+        // on EVERY turn — report the count every turn, not just the first.
+        let delivered_memory_count = applied_memory_count;
         let mut notice: Option<String> = None;
         let prompt_text = if first_prompt {
             // Spec D4: the preamble only claims DB tools the agent actually
-            // connected (ground truth = the bridge hello). Wait once, decide once —
-            // v1 prepends the preamble to the first user message only.
-            let tools_ok = if mcp_hopeless(&self.acp.agent_id) {
+            // connected (ground truth = the bridge hello).
+            if mcp_hopeless(&self.acp.agent_id) {
                 // A curated-unsupported agent accepts `mcpServers` and drops it,
-                // so the handshake will never arrive: waiting the full gate
-                // stalls the first turn of every conversation for nothing.
-                false
+                // so the handshake will never arrive: waiting the gate stalls
+                // the first turn of every conversation for nothing.
+                if !session.tools_notice.swap(true, Ordering::SeqCst) {
+                    notice = Some(cli_bridge_notice());
+                }
+                first_prompt_text(
+                    &system_prompt,
+                    &message,
+                    &self.acp.agent_id,
+                    false,
+                    tool_helper_path(&self.acp.agent_id, &session_key),
+                )
             } else {
-                session.tools.wait_connected(tools_gate_timeout()).await
-            };
-            if !tools_ok && !session.tools_notice.swap(true, Ordering::SeqCst) {
-                notice = Some(cli_bridge_notice());
+                // Optimistic send: the prompt goes out at once with the native
+                // preamble while the gate resolves in the background. If the
+                // bridge never connects, the CLI-bridge notice lands mid-turn
+                // instead of the first token stalling up to 5s.
+                let gate_tools = session.tools.clone();
+                let gate_session = session.clone();
+                let gate_sink = sink.clone();
+                tokio::spawn(async move {
+                    if !gate_tools.wait_connected(tools_gate_timeout()).await
+                        && !gate_session.tools_notice.swap(true, Ordering::SeqCst)
+                    {
+                        gate_sink.event(AiEvent::Notice {
+                            content: cli_bridge_notice(),
+                        });
+                    }
+                });
+                first_prompt_text(
+                    &system_prompt,
+                    &message,
+                    &self.acp.agent_id,
+                    true,
+                    tool_helper_path(&self.acp.agent_id, &session_key),
+                )
             }
-            first_prompt_text(
-                &system_prompt,
-                &message,
-                &self.acp.agent_id,
-                tools_ok,
-                tool_helper_path(&self.acp.agent_id, &session_key),
-            )
         } else {
             followup_prompt_text(inject, &message)
         };
@@ -180,6 +193,13 @@ impl AcpChatDriver {
         // the connection task and its process-group guard — the same
         // cancel-then-kill fallback the rig path uses).
         let mut cancel_deadline: Option<tokio::time::Instant> = None;
+        // Idle watchdog: refreshed on EVERY streamed agent event below. A
+        // turn that streams anything — thought/message chunks, tool
+        // calls/updates, usage, permission requests — never dies here; only
+        // total silence trips it, reusing the cancel path exactly.
+        let mut last_activity = tokio::time::Instant::now();
+        let mut idle_fired = false;
+        let idle_timeout = agent_turn_idle_timeout();
 
         let reply: Result<super::connection::PromptOutcome, super::connection::PromptError> = loop {
             tokio::select! {
@@ -195,6 +215,9 @@ impl AcpChatDriver {
                     });
                 }
                 ev = events_rx.recv() => {
+                    // Any agent activity — stream chunks, tool updates, usage,
+                    // permission requests — resets the idle watchdog.
+                    last_activity = tokio::time::Instant::now();
                     match ev {
                         Ok(ev) => self.dispatch_event(
                             ev, &session.session_id, &session_key,
@@ -236,10 +259,39 @@ impl AcpChatDriver {
                     // connection task (Client drop closes stdio; the agent exits on EOF),
                     // charge the restart budget, and evict its sessions.
                     self.acp_state.kill_agent(&self.acp.agent_id).await;
+                    if idle_fired {
+                        return Err(
+                            "The agent went quiet for a long stretch with no updates, so Lucent stopped the turn. \
+                             (Any tool it was running may still be running.)"
+                                .into(),
+                        );
+                    }
                     return Err(
                         "The agent didn't respond to cancellation — Lucent restarted it. Other conversations with this agent were interrupted; send your message again."
                             .into(),
                     );
+                }
+                // Idle watchdog: fires only after `idle_timeout` of complete
+                // silence. Reuses the cancel path exactly (drain, notify,
+                // then kill after `cancel_kill_timeout()`), so a hung agent
+                // is reaped but a working one never is. Setting `cancel_sent`
+                // is load-bearing: the kill arm below is gated on it.
+                _ = tokio::time::sleep_until(last_activity + idle_timeout), if !idle_fired && !cancel_sent => {
+                    idle_fired = true;
+                    // A cancel is now in flight: arm the kill deadline and
+                    // keep the external-cancel arm from double-sending.
+                    cancel_sent = true;
+                    self.acp_state
+                        .permissions
+                        .drain_cancelled(&session.session_id)
+                        .await;
+                    let _ = conn
+                        .cmds
+                        .send(AgentCommand::Cancel {
+                            session_id: session.session_id.clone(),
+                        })
+                        .await;
+                    cancel_deadline = Some(tokio::time::Instant::now() + cancel_kill_timeout());
                 }
             }
         };
@@ -772,14 +824,16 @@ fn end_turn_usage_is_empty(u: &Usage) -> bool {
 /// Field semantics: the agent reports uncached input, output, reasoning and
 /// cache traffic separately, so the totals Lucent shows are
 /// `prompt = input + cached_read + cached_write` (the whole prompt, with
-/// `cached_prompt_tokens` the cached subset, matching the rig path's
-/// `input_tokens`/`cached_input_tokens` convention) and
+/// `cached_prompt_tokens` the read subset and `cached_write_prompt_tokens`
+/// the creation subset, matching the rig path) and
 /// `completion = output + thought` (reasoning tokens are tokens the model
 /// generated).
 pub fn apply_end_turn_usage(usage: &mut TokenUsage, u: &Usage) {
-    let cached = u.cached_read_tokens.unwrap_or(0) + u.cached_write_tokens.unwrap_or(0);
-    usage.prompt_tokens = clamp_u64(u.input_tokens + cached);
-    usage.cached_prompt_tokens = clamp_u64(cached);
+    let read = u.cached_read_tokens.unwrap_or(0);
+    let write = u.cached_write_tokens.unwrap_or(0);
+    usage.prompt_tokens = clamp_u64(u.input_tokens + read + write);
+    usage.cached_prompt_tokens = clamp_u64(read);
+    usage.cached_write_prompt_tokens = clamp_u64(write);
     usage.completion_tokens = clamp_u64(u.output_tokens + u.thought_tokens.unwrap_or(0));
 }
 
@@ -796,6 +850,18 @@ fn cancel_kill_timeout() -> std::time::Duration {
         .and_then(|v| v.parse().ok())
         .map(std::time::Duration::from_millis)
         .unwrap_or(std::time::Duration::from_secs(5))
+}
+
+/// How long a turn may go with NO streamed agent activity before the idle
+/// watchdog cancels it (reusing the cancel → kill path). Deliberately
+/// generous: agents that buffer output or run long silent tools must not be
+/// mistaken for hung. `LUCENT_ACP_TURN_IDLE_MS` overrides for tests.
+fn agent_turn_idle_timeout() -> std::time::Duration {
+    std::env::var("LUCENT_ACP_TURN_IDLE_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(std::time::Duration::from_secs(10 * 60))
 }
 
 /// Pending-forever future until `deadline` (used by the post-cancel kill
@@ -873,6 +939,33 @@ pub(crate) mod tests {
         let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var(name).ok();
         EnvVarGuard(name, prior, Some(lock))
+    }
+
+    /// Multi-var version of `env_var_guard`: one lock acquisition covers all
+    /// names (`ENV_LOCK` is a non-reentrant std Mutex — two live single
+    /// guards on one thread deadlock).
+    pub(crate) struct MultiEnvGuard {
+        priors: Vec<(&'static str, Option<String>)>,
+        #[allow(dead_code)]
+        lock: Option<std::sync::MutexGuard<'static, ()>>,
+    }
+    impl Drop for MultiEnvGuard {
+        fn drop(&mut self) {
+            for (name, prior) in self.priors.drain(..) {
+                match prior {
+                    Some(v) => std::env::set_var(name, v),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+    pub(crate) fn env_var_guards(names: &[&'static str]) -> MultiEnvGuard {
+        let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let priors = names.iter().map(|n| (*n, std::env::var(n).ok())).collect();
+        MultiEnvGuard {
+            priors,
+            lock: Some(lock),
+        }
     }
 
     fn hermetic_workspace() -> tempfile::TempDir {
@@ -1061,7 +1154,8 @@ pub(crate) mod tests {
         let mut turn = TokenUsage::default();
         apply_end_turn_usage(&mut turn, &reported);
         assert_eq!(turn.prompt_tokens, 195);
-        assert_eq!(turn.cached_prompt_tokens, 45);
+        assert_eq!(turn.cached_prompt_tokens, 40);
+        assert_eq!(turn.cached_write_prompt_tokens, 5);
         assert_eq!(turn.completion_tokens, 40);
 
         // Optional fields absent: plain input/output, no cache.
@@ -1069,6 +1163,7 @@ pub(crate) mod tests {
         apply_end_turn_usage(&mut minimal, &Usage::new(180, 150, 30));
         assert_eq!(minimal.prompt_tokens, 150);
         assert_eq!(minimal.cached_prompt_tokens, 0);
+        assert_eq!(minimal.cached_write_prompt_tokens, 0);
         assert_eq!(minimal.completion_tokens, 30);
     }
 
@@ -1121,12 +1216,17 @@ pub(crate) mod tests {
             .expect("scripted turn completes");
 
         let events = sink.0.lock().unwrap().clone();
+        // The bridge-gate notice now resolves in the background, so it may
+        // land anywhere in the stream — assert the ordered agent events and
+        // the exactly-once notice separately.
+        let ordered: Vec<_> = events
+            .iter()
+            .filter(|e| !matches!(e, AiEvent::Notice { .. }))
+            .cloned()
+            .collect();
         assert_sequence(
-            &events,
+            &ordered,
             vec![
-                AiEvent::Notice {
-                    content: cli_bridge_notice(),
-                },
                 AiEvent::Thinking {
                     content: "thinking…".into(),
                 },
@@ -1158,11 +1258,37 @@ pub(crate) mod tests {
                         prompt_tokens: 100,
                         completion_tokens: 0,
                         cached_prompt_tokens: 0,
+                        cached_write_prompt_tokens: 0,
                     },
                     applied_memory_count: 0,
                     cancelled: false,
                 },
             ],
+        );
+        // The background gate resolves after the turn here (nothing connects
+        // the stub's bridge): exactly one notice, whenever it lands.
+        for _ in 0..100 {
+            let notices = sink
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| matches!(e, AiEvent::Notice { .. }))
+                .count();
+            if notices == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            sink.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| matches!(e, AiEvent::Notice { .. }))
+                .count(),
+            1,
+            "the CLI-bridge notice fires exactly once"
         );
     }
 
@@ -1214,6 +1340,7 @@ pub(crate) mod tests {
             .expect("Done event present");
         assert_eq!(usage.prompt_tokens, 190); // 150 uncached + 40 cached
         assert_eq!(usage.cached_prompt_tokens, 40);
+        assert_eq!(usage.cached_write_prompt_tokens, 0); // no write reported
         assert_eq!(usage.completion_tokens, 40); // 30 output + 10 reasoning
     }
 
@@ -1254,10 +1381,37 @@ pub(crate) mod tests {
             .expect("turn completes despite unknown variants");
 
         let events = sink.0.lock().unwrap().clone();
-        assert_eq!(events.len(), 3, "Notice + Text + Done: {events:?}");
-        assert!(matches!(&events[0], AiEvent::Notice { .. }));
-        assert!(matches!(&events[1], AiEvent::Text { content } if content == "still here"));
-        assert!(matches!(&events[2], AiEvent::Done { .. }));
+        let non_notice: Vec<_> = events
+            .into_iter()
+            .filter(|e| !matches!(e, AiEvent::Notice { .. }))
+            .collect();
+        assert_eq!(non_notice.len(), 2, "Text + Done only: {non_notice:?}");
+        assert!(matches!(&non_notice[0], AiEvent::Text { content } if content == "still here"));
+        assert!(matches!(&non_notice[1], AiEvent::Done { .. }));
+        // The background gate resolves after the turn: exactly one notice.
+        for _ in 0..100 {
+            let notices = sink
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| matches!(e, AiEvent::Notice { .. }))
+                .count();
+            if notices == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            sink.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| matches!(e, AiEvent::Notice { .. }))
+                .count(),
+            1,
+            "the CLI-bridge notice fires exactly once"
+        );
     }
 
     #[test]
@@ -1391,8 +1545,17 @@ pub(crate) mod tests {
         assert_eq!(tools_gate_timeout(), Duration::from_millis(250));
     }
 
+    #[test]
+    fn turn_idle_timeout_defaults_to_ten_minutes() {
+        let _guard = env_var_guard("LUCENT_ACP_TURN_IDLE_MS");
+        std::env::remove_var("LUCENT_ACP_TURN_IDLE_MS");
+        assert_eq!(agent_turn_idle_timeout(), Duration::from_secs(10 * 60));
+        std::env::set_var("LUCENT_ACP_TURN_IDLE_MS", "250");
+        assert_eq!(agent_turn_idle_timeout(), Duration::from_millis(250));
+    }
+
     #[tokio::test]
-    async fn no_tools_preamble_when_the_bridge_never_connects() {
+    async fn optimistic_gate_sends_prompt_at_once_and_notices_later() {
         let _ws = hermetic_workspace();
         let _guard = env_var_guard("LUCENT_ACP_TOOLS_GATE_MS");
         std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "200");
@@ -1426,21 +1589,43 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let stderr = process.stderr_snippet();
+        // Optimistic send: the prompt goes out at once with the native
+        // preamble (the gate resolves in the background), so the agent sees
+        // the MCP guidance up front and the notice corrects it after.
         assert!(
-            stderr.contains("lucent-tool"),
-            "the fallback preamble reached the agent: {stderr:?}"
+            stderr.contains("DATABASE TOOLS IN ACP"),
+            "the optimistic native preamble reached the agent: {stderr:?}"
         );
         assert!(
             stderr.contains("sys preamble"),
             "the system prompt and schema context are preserved: {stderr:?}"
         );
 
-        let events = sink.0.lock().unwrap().clone();
-        let notices = events
-            .iter()
-            .filter(|e| matches!(e, AiEvent::Notice { .. }))
-            .count();
-        assert_eq!(notices, 1, "the notice fires exactly once: {events:?}");
+        // The background gate resolves after the turn: exactly one notice.
+        for _ in 0..100 {
+            let notices = sink
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| matches!(e, AiEvent::Notice { .. }))
+                .count();
+            if notices == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            sink.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| matches!(e, AiEvent::Notice { .. }))
+                .count(),
+            1,
+            "the notice fires exactly once: {:?}",
+            sink.0.lock().unwrap().clone()
+        );
 
         // Second turn: no re-wait, no second notice.
         driver
@@ -1559,9 +1744,8 @@ pub(crate) mod tests {
             .await
             .expect("second turn (same session)");
 
-        // F-C2 gating: turn 1 delivers the system prompt (with its memory
-        // block); turn 2 sends only the message, so the recomputed 7 was never
-        // delivered and the event must report 0.
+        // The memory block now rides on the user message, so it is delivered
+        // on EVERY turn: turn 1 reports 3, turn 2 reports its own 7.
         let done_counts: Vec<usize> = sink
             .0
             .lock()
@@ -1577,8 +1761,8 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             done_counts,
-            vec![3, 0],
-            "only delivered memory rules are reported"
+            vec![3, 7],
+            "delivered rules are reported on every turn"
         );
 
         let process = acp_state
@@ -1807,6 +1991,110 @@ pub(crate) mod tests {
                 .any(|e| matches!(e, AiEvent::Text { content } if content == "recovered")),
             "the fresh session streamed the ok script: {events:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn idle_watchdog_cancels_a_silent_turn() {
+        let _ws = hermetic_workspace();
+        let _guards = env_var_guards(&[
+            "LUCENT_ACP_TURN_IDLE_MS",
+            "LUCENT_ACP_CANCEL_KILL_MS",
+        ]);
+        std::env::set_var("LUCENT_ACP_TURN_IDLE_MS", "300");
+        std::env::set_var("LUCENT_ACP_CANCEL_KILL_MS", "300");
+
+        // The stub sleeps 60s and never streams — the idle watchdog must fire
+        // first, reuse the cancel path, and (the stub ignoring cancel) kill
+        // with the idle-specific message.
+        let script = script_file(json!({
+            "stopReason": "end_turn",
+            "steps": [{"sleepMs": 60000}]
+        }));
+        let acp_state = AcpState::new();
+        let sink = Arc::new(CollectorSink(std::sync::Mutex::new(Vec::new())));
+        let conv = conversation("conv-idle");
+
+        let acp_task = acp_state.clone();
+        let sink_task = sink.clone();
+        let script_path = script.path().join("script.json");
+        let handle = tokio::spawn(async move {
+            let driver = AcpChatDriver::new(acp_task, acp_cfg(Some(&script_path)), tool_ctx());
+            driver
+                .chat(
+                    "hi".into(),
+                    &AiConfig::default(),
+                    "preamble".into(),
+                    conv,
+                    sink_task,
+                    tokio_util::sync::CancellationToken::new(),
+                    0,
+                )
+                .await
+        });
+
+        let err = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect("turn ends at the idle kill deadline")
+            .expect("task did not panic")
+            .expect_err("the idle watchdog errors a silent turn");
+        assert!(
+            err.contains("went quiet"),
+            "truthful idle message, not the generic cancel-kill one: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_resets_the_idle_watchdog() {
+        // A turn that keeps streaming must NOT trip the watchdog: the stub
+        // emits a chunk every 100ms while the idle window is 250ms.
+        let _ws = hermetic_workspace();
+        let _guards = env_var_guards(&[
+            "LUCENT_ACP_TURN_IDLE_MS",
+            "LUCENT_ACP_TOOLS_GATE_MS",
+        ]);
+        std::env::set_var("LUCENT_ACP_TURN_IDLE_MS", "250");
+        std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "50");
+        let script = script_file(json!({
+            "stopReason": "end_turn",
+            "steps": [
+                {"notify": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "a"}}},
+                {"sleepMs": 100},
+                {"notify": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "b"}}},
+                {"sleepMs": 100},
+                {"notify": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "c"}}},
+                {"sleepMs": 100},
+                {"notify": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "d"}}}
+            ]
+        }));
+        let acp_state = AcpState::new();
+        let driver = AcpChatDriver::new(
+            acp_state,
+            acp_cfg(Some(&script.path().join("script.json"))),
+            tool_ctx(),
+        );
+        let sink = Arc::new(CollectorSink(std::sync::Mutex::new(Vec::new())));
+        let conv = conversation("conv-idle-streaming");
+
+        driver
+            .chat(
+                "hi".into(),
+                &AiConfig::default(),
+                "preamble".into(),
+                conv,
+                sink.clone(),
+                tokio_util::sync::CancellationToken::new(),
+                0,
+            )
+            .await
+            .expect("a streaming turn survives the idle watchdog");
+
+        let done = sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, AiEvent::Done { .. }));
+        assert!(done, "the turn completed normally");
     }
 
     #[tokio::test]

@@ -9,10 +9,15 @@ import {
   resumeFromPermission,
   clearRejectedDml,
   updateLast,
+  setRunPhase,
+  isConvRunning,
 } from '../stores/chat.svelte.ts';
 import {
   handleAiEvent,
+  flushStreamPending,
   createAiSession,
+  aiSessionFor,
+  releaseAiSession,
   listAiModels,
   listRegistryAgents,
   installAcpAgent,
@@ -29,9 +34,97 @@ import {
 import { aiConfig } from '../stores/ai-config.svelte.ts';
 
 const invokeMock = vi.fn().mockResolvedValue(undefined);
+
+// Fidelity fake for Tauri's Channel semantics — mirrors
+// @tauri-apps/api/core.js (Channel: per-instance monotonically increasing
+// JS index counter, `{end:true}` unregisters the callback) plus the Rust
+// side's per-invoke index counter (channel.rs `channel_on`) and the
+// `on_drop` end marker (commands.rs:2987 overwrites `event_channel`).
+// Defined via vi.hoisted so the vi.mock factory below can reference it.
+const chanHarness = vi.hoisted(() => {
+  type RawChanMsg = { index: number; end?: boolean; message?: unknown };
+  const chanCallbacks = new Map<number, (data: RawChanMsg) => void>();
+  const chanDropped: number[] = [];
+  const chanSentCount = new Map<number, number>();
+  let chanSeq = 0;
+  class FakeChannel {
+    id: number;
+    onmessage: (e: never) => void;
+    next = 0;
+    pending: Record<number, unknown> = {};
+    messageEndIndex: number | undefined;
+    constructor() {
+      this.id = ++chanSeq;
+      this.onmessage = () => {};
+      const self = this;
+      chanCallbacks.set(this.id, (raw) => self.receive(raw));
+    }
+    deliver(msg: unknown) {
+      this.onmessage(msg as never);
+      this.next += 1;
+    }
+    receive(raw: RawChanMsg) {
+      if ('end' in raw) {
+        // cleanupCallback: only unregisters when the end index matches.
+        if (raw.index === this.next) chanCallbacks.delete(this.id);
+        else this.messageEndIndex = raw.index;
+        return;
+      }
+      if (raw.index === this.next) {
+        this.deliver(raw.message);
+        while (this.next in this.pending) {
+          const m = this.pending[this.next];
+          delete this.pending[this.next];
+          this.deliver(m);
+        }
+      } else {
+        // Parked in pendingMessages, never flushed — the index-counter half
+        // of why a reused channel drops turn-2 events.
+        this.pending[raw.index] = raw.message;
+      }
+    }
+    toJSON() {
+      return `__CHANNEL__:${this.id}`;
+    }
+  }
+  // Stands in for the Rust side's webview.eval(format_raw_js(id, json)).
+  // `tauri channel.rs:138,145` mints a FRESH index counter per command
+  // invocation, so each `chanSender` (one per send/turn) counts from 0 —
+  // even when the JS channel id is reused. That is the faithful model of
+  // the index-counter half of the reuse bug: a reused JS channel whose
+  // `next` has advanced parks every turn-2 message in `pendingMessages`.
+  function chanSender(id: number) {
+    let idx = 0;
+    return {
+      send(msg: unknown) {
+        chanSentCount.set(id, (chanSentCount.get(id) ?? 0) + 1);
+        const cb = chanCallbacks.get(id);
+        if (!cb) {
+          chanDropped.push(id);
+          return;
+        }
+        const i = idx;
+        idx += 1;
+        cb({ message: msg, index: i });
+      },
+    };
+  }
+  // Stands in for the Rust `on_drop` eval that fires when the previous
+  // channel is dropped (commands.rs:2987). The Rust side reports its message
+  // count so far as the index — channel.rs:186-191.
+  function chanEnd(id: number) {
+    chanCallbacks.get(id)?.({ index: chanSentCount.get(id) ?? 0, end: true });
+  }
+  function chanReset() {
+    chanCallbacks.clear();
+    chanDropped.length = 0;
+    chanSentCount.clear();
+  }
+  return { FakeChannel, chanSender, chanEnd, chanReset, chanDropped };
+});
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
-  Channel: class {},
+  Channel: chanHarness.FakeChannel,
 }));
 
 const listenMock = vi.fn();
@@ -61,8 +154,12 @@ function seedActiveConversationWithMessage(messageId: string) {
 
 function seedConversation(convId: string) {
   chat.conversations = [];
-  const conv = createNewTab('conn-1');
+  // Assign the id BEFORE the conversation enters the store: $state proxies
+  // do not propagate post-hoc id mutation on the original reference.
+  const conv = createConversation('conn-1');
   conv.id = convId;
+  chat.conversations = [conv];
+  chat.activeConversationId = convId;
   return conv;
 }
 
@@ -70,6 +167,39 @@ function seedConversation(convId: string) {
 // the original `conv` reference doesn't see mutations made by store functions.
 function getConv(id: string) {
   return chat.conversations.find((c) => c.id === id)!;
+}
+
+// Deterministic rAF stub: the stream-coalescing path in ai.ts buffers
+// text/thinking behind requestAnimationFrame.
+function stubRaf() {
+  const rafQueue: FrameRequestCallback[] = [];
+  const realRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {
+    rafQueue.push(cb);
+    return rafQueue.length;
+  }) as typeof requestAnimationFrame;
+  return {
+    flushFrame: () => {
+      for (const cb of rafQueue.splice(0)) cb(0);
+    },
+    restoreRaf: () => {
+      globalThis.requestAnimationFrame = realRaf;
+    },
+  };
+}
+
+function turnDoneEvent(convId: string) {
+  return {
+    type: 'done',
+    conversation_id: convId,
+    final_message: 'ok',
+    cancelled: false,
+    usage: {
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      cached_prompt_tokens: 0,
+    },
+  } as const;
 }
 
 describe('handleAiEvent', () => {
@@ -83,6 +213,7 @@ describe('handleAiEvent', () => {
     const conv = seedActiveConversationWithMessage('m1');
     handleAiEvent(conv.id, { type: 'thinking', content: 'Investigating ' });
     handleAiEvent(conv.id, { type: 'thinking', content: 'the schema' });
+    flushStreamPending();
     const c = getConv(conv.id);
     expect(c.messages).toHaveLength(1);
     const session = c.messages[0].session!;
@@ -165,6 +296,7 @@ describe('handleAiEvent', () => {
       promptTokens: 10,
       completionTokens: 5,
       cachedPromptTokens: 0,
+      cachedWritePromptTokens: 0,
     });
   });
 
@@ -224,6 +356,7 @@ describe('handleAiEvent', () => {
         promptTokens: 120,
         completionTokens: 45,
         cachedPromptTokens: 30,
+        cachedWritePromptTokens: 0,
       });
     });
     expect(invokeMock).toHaveBeenCalledWith('get_ai_usage', {
@@ -818,7 +951,7 @@ describe('acp registry, install, and permission surface', () => {
 
     // The backend emits the event globally — a payload for another
     // conversation must not touch this session's card.
-    chat.isStreaming = true;
+    setRunPhase(conv.id, 'running');
     cb({ payload: { conversation_id: 'other_conv' } });
     expect(getConv(conv.id).isPaused).toBe(true);
     expect(chat.isStreaming).toBe(true);
@@ -830,11 +963,13 @@ describe('acp registry, install, and permission surface', () => {
     expect(
       cleared.messages[cleared.messages.length - 1].dmlApproval,
     ).toBeUndefined();
-    expect(chat.isStreaming).toBe(false);
+    // dml:rejected is not terminal — the turn is still live.
+    expect(chat.isStreaming).toBe(true);
+    setRunPhase(conv.id, 'idle');
     await session.cleanup();
   });
 
-  it('forwards ai:agent_permission payloads to the handler and stops streaming', async () => {
+  it('forwards ai:agent_permission payloads to the handler and keeps the turn running', async () => {
     const conv = seedActiveConversationWithMessage('m1');
     const payload: AgentPermissionPayload = {
       conversationId: conv.id,
@@ -854,10 +989,12 @@ describe('acp registry, install, and permission surface', () => {
     )?.[1] as (e: { payload: AgentPermissionPayload }) => void;
     expect(cb).toBeTruthy();
 
-    chat.isStreaming = true;
+    setRunPhase(conv.id, 'running');
     cb({ payload });
     expect(onAgentPermission).toHaveBeenCalledWith(payload);
-    expect(chat.isStreaming).toBe(false);
+    // A permission pause is not terminal — the turn is still live.
+    expect(chat.isStreaming).toBe(true);
+    setRunPhase(conv.id, 'idle');
     await session.cleanup();
   });
 });
@@ -921,6 +1058,9 @@ describe('sendMessage', () => {
   it('passes userMessageId and assistantMessageId to invoke ai_chat', async () => {
     invokeMock.mockResolvedValue(undefined);
     const channel = {} as any;
+    const conv = createConversation('conn-1');
+    conv.id = 'conv-1';
+    chat.conversations = [conv];
     await sendMessage(
       'hello',
       channel,
@@ -939,7 +1079,322 @@ describe('sendMessage', () => {
       userMessageId: 'user-msg-id',
       assistantMessageId: 'asst-msg-id',
     });
+    expect(getConv('conv-1').runPhase).toBe('running');
     expect(chat.isStreaming).toBe(true);
+  });
+});
+
+describe('run phase transitions', () => {
+  beforeEach(() => {
+    chat.conversations = [];
+    chat.activeConversationId = null;
+    chat.isStreaming = false;
+  });
+
+  function doneEvent(convId: string, cancelled = false) {
+    return {
+      type: 'done',
+      conversation_id: convId,
+      final_message: 'ok',
+      cancelled,
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        cached_prompt_tokens: 0,
+      },
+    } as const;
+  }
+
+  it('clears running to idle on done, per conversation', () => {
+    const a = seedActiveConversationWithMessage('m1');
+    const b = createConversation('conn-1');
+    chat.conversations = [...chat.conversations, b];
+    setRunPhase(a.id, 'running');
+    setRunPhase(b.id, 'running');
+    expect(chat.isStreaming).toBe(true);
+
+    handleAiEvent(a.id, doneEvent(a.id));
+
+    expect(getConv(a.id).runPhase).toBe('idle');
+    // The other tab's parallel turn is untouched.
+    expect(getConv(b.id).runPhase).toBe('running');
+    expect(chat.isStreaming).toBe(true);
+    expect(isConvRunning(a.id)).toBe(false);
+    expect(isConvRunning(b.id)).toBe(true);
+  });
+
+  it('clears stopping to idle on a cancelled done', () => {
+    const conv = seedActiveConversationWithMessage('m1');
+    setRunPhase(conv.id, 'stopping');
+    handleAiEvent(conv.id, doneEvent(conv.id, true));
+    expect(getConv(conv.id).runPhase).toBe('idle');
+    expect(chat.isStreaming).toBe(false);
+  });
+
+  it('clears the phase on ai:error', async () => {
+    seedConversation('conv-a');
+    const session = createAiSession('conv-a');
+    await session.setupListeners({
+      onDmlApproval: vi.fn(),
+      onAgentPermission: vi.fn(),
+      onError: vi.fn(),
+    });
+    setRunPhase('conv-a', 'stopping');
+    // The live registration (listenerCbs is overwritten per setup; the
+    // listen mock history holds stale closures from earlier tests).
+    const cb = listenerCbs['ai:error'] as (e: {
+      payload: { conversation_id: string; message: string };
+    }) => void;
+    cb({ payload: { conversation_id: 'conv-a', message: 'boom' } });
+    expect(getConv('conv-a').runPhase).toBe('idle');
+    await session.cleanup();
+  });
+});
+
+describe('aiSessionFor registry', () => {
+  beforeEach(() => {
+    chat.conversations = [];
+    chat.activeConversationId = null;
+    listenMock.mockClear();
+    for (const k of Object.keys(listenerCbs)) delete listenerCbs[k];
+    chanHarness.chanReset();
+  });
+
+  const handlers = {
+    onDmlApproval: () => {},
+    onAgentPermission: () => {},
+    onError: () => {},
+  };
+
+  it('creates a fresh channel per send while registering listeners once', async () => {
+    seedConversation('conv-a');
+    const first = aiSessionFor('conv-a');
+    await first.ensureListeners(handlers);
+    const second = aiSessionFor('conv-a');
+    await second.ensureListeners(handlers);
+    // Tauri Channels are single-use — each send gets its own channel.
+    expect(second.createChannel()).not.toBe(first.createChannel());
+    // Listeners registered exactly once despite two sends.
+    expect(listenMock.mock.calls.filter(([e]) => e === 'ai:error')).toHaveLength(1);
+    releaseAiSession('conv-a');
+  });
+
+  it('does not release a mid-turn session', async () => {
+    seedConversation('conv-a');
+    const s = aiSessionFor('conv-a');
+    await s.ensureListeners(handlers);
+    setRunPhase('conv-a', 'running');
+    releaseAiSession('conv-a');
+    // Still cached: its Done event must arrive to clear the phase, so
+    // re-entry does not re-register listeners.
+    await aiSessionFor('conv-a').ensureListeners(handlers);
+    expect(listenMock.mock.calls.filter(([e]) => e === 'ai:error')).toHaveLength(1);
+    setRunPhase('conv-a', 'idle');
+    releaseAiSession('conv-a');
+    // Released while idle: the next session registers listeners again.
+    await aiSessionFor('conv-a').ensureListeners(handlers);
+    expect(listenMock.mock.calls.filter(([e]) => e === 'ai:error')).toHaveLength(2);
+    releaseAiSession('conv-a');
+  });
+
+  it('delivers turn-2 text and Done on a fresh channel after turn 1 ended', async () => {
+    seedConversation('conv-turn2');
+    invokeMock.mockResolvedValue(undefined);
+    const { flushFrame, restoreRaf } = stubRaf();
+    try {
+      // ── turn 1 ──────────────────────────────────────────────────
+      const s1 = aiSessionFor('conv-turn2');
+      await s1.ensureListeners(handlers);
+      addMessage('conv-turn2', {
+        id: 'u1',
+        role: 'user',
+        content: 'hi',
+        createdAt: Date.now(),
+      });
+      addMessage('conv-turn2', {
+        id: 'a1',
+        role: 'assistant',
+        content: '',
+        createdAt: Date.now(),
+      });
+      const ch1 = s1.createChannel();
+      await sendMessage('hi', ch1, 'conv-turn2', 'conn-1', null, 'u1', 'a1');
+      const tx1 = chanHarness.chanSender(ch1.id);
+      tx1.send({ type: 'text', content: 'first reply' });
+      flushFrame();
+      tx1.send(turnDoneEvent('conv-turn2'));
+      expect(getConv('conv-turn2').messages[1].content).toBe('first reply');
+      expect(getConv('conv-turn2').runPhase).toBe('idle');
+
+      // Rust replaces ConversationState.event_channel (commands.rs:2987) →
+      // the turn-1 channel's on_drop eval runs.
+      chanHarness.chanEnd(ch1.id);
+
+      // ── turn 2 ──────────────────────────────────────────────────
+      const s2 = aiSessionFor('conv-turn2');
+      await s2.ensureListeners(handlers);
+      addMessage('conv-turn2', {
+        id: 'u2',
+        role: 'user',
+        content: 'oh great',
+        createdAt: Date.now(),
+      });
+      addMessage('conv-turn2', {
+        id: 'a2',
+        role: 'assistant',
+        content: '',
+        createdAt: Date.now(),
+      });
+      const ch2 = s2.createChannel();
+      await sendMessage(
+        'oh great',
+        ch2,
+        'conv-turn2',
+        'conn-1',
+        null,
+        'u2',
+        'a2',
+      );
+      const tx2 = chanHarness.chanSender(ch2.id);
+      tx2.send({
+        type: 'text',
+        content: 'glad it helped',
+      });
+      flushFrame();
+      tx2.send(turnDoneEvent('conv-turn2'));
+
+      // ── assertions ──────────────────────────────────────────────
+      expect(chanHarness.chanDropped).toEqual([]);
+      expect(getConv('conv-turn2').messages[3].content).toBe(
+        'glad it helped',
+      );
+      expect(getConv('conv-turn2').runPhase).toBe('idle');
+      expect(chat.isStreaming).toBe(false);
+      // Listeners still registered exactly once across both turns.
+      expect(listenMock.mock.calls.filter(([e]) => e === 'ai:error')).toHaveLength(1);
+    } finally {
+      restoreRaf();
+      flushStreamPending();
+      setRunPhase('conv-turn2', 'idle');
+      releaseAiSession('conv-turn2');
+    }
+  });
+
+  it('does not reuse a channel whose JS index counter has advanced', async () => {
+    seedConversation('conv-turn2b');
+    invokeMock.mockResolvedValue(undefined);
+    const { flushFrame, restoreRaf } = stubRaf();
+    try {
+      const s1 = aiSessionFor('conv-turn2b');
+      await s1.ensureListeners(handlers);
+      addMessage('conv-turn2b', {
+        id: 'u1',
+        role: 'user',
+        content: 'hi',
+        createdAt: Date.now(),
+      });
+      addMessage('conv-turn2b', {
+        id: 'a1',
+        role: 'assistant',
+        content: '',
+        createdAt: Date.now(),
+      });
+      const ch1 = s1.createChannel();
+      await sendMessage('hi', ch1, 'conv-turn2b', 'conn-1', null, 'u1', 'a1');
+      const tx1 = chanHarness.chanSender(ch1.id);
+      tx1.send({ type: 'text', content: 'first reply' });
+      flushFrame();
+      tx1.send(turnDoneEvent('conv-turn2b'));
+      // NOTE: no chanEnd here — the JS index counter alone must not break
+      // turn 2, so turn 2 needs a channel whose counter starts at 0.
+      const s2 = aiSessionFor('conv-turn2b');
+      await s2.ensureListeners(handlers);
+      addMessage('conv-turn2b', {
+        id: 'u2',
+        role: 'user',
+        content: 'again',
+        createdAt: Date.now(),
+      });
+      addMessage('conv-turn2b', {
+        id: 'a2',
+        role: 'assistant',
+        content: '',
+        createdAt: Date.now(),
+      });
+      const ch2 = s2.createChannel();
+      await sendMessage(
+        'again',
+        ch2,
+        'conv-turn2b',
+        'conn-1',
+        null,
+        'u2',
+        'a2',
+      );
+      const tx2 = chanHarness.chanSender(ch2.id);
+      tx2.send({ type: 'text', content: 'x' });
+      flushFrame();
+      tx2.send(turnDoneEvent('conv-turn2b'));
+
+      expect(chanHarness.chanDropped).toEqual([]);
+      expect(getConv('conv-turn2b').messages[3].content).toBe('x');
+      expect(getConv('conv-turn2b').runPhase).toBe('idle');
+    } finally {
+      restoreRaf();
+      flushStreamPending();
+      setRunPhase('conv-turn2b', 'idle');
+      releaseAiSession('conv-turn2b');
+    }
+  });
+});
+
+describe('stream coalescing', () => {
+  beforeEach(() => {
+    chat.conversations = [];
+    chat.activeConversationId = null;
+    flushStreamPending();
+  });
+
+  it('buffers text behind rAF and flushes in order before tool events', () => {
+    const conv = seedActiveConversationWithMessage('m1');
+    const rafCbs: FrameRequestCallback[] = [];
+    const realRaf = globalThis.requestAnimationFrame;
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback) => {
+      rafCbs.push(cb);
+      return rafCbs.length;
+    };
+    try {
+      handleAiEvent(conv.id, { type: 'thinking', content: 'Reasoning' });
+      handleAiEvent(conv.id, { type: 'text', content: 'Hel' });
+      handleAiEvent(conv.id, { type: 'text', content: 'lo' });
+      // Nothing applied yet — all buffered.
+      expect(getConv(conv.id).messages[0].content).toBe('');
+      // A tool event flushes the text first so segments stay ordered.
+      handleAiEvent(conv.id, {
+        type: 'tool_calls',
+        tools: [{ id: 'call_1', name: 'search_schema', args: {} }],
+      });
+      const msg = getConv(conv.id).messages[0];
+      // The flushed text was demoted into a note by the tool_calls event
+      // (mid-work commentary), preserving arrival order.
+      expect(msg.content).toBe('');
+      expect(msg.session!.segments[0]).toMatchObject({
+        type: 'thinking',
+        content: 'Reasoning',
+        streaming: false,
+      });
+      expect(msg.session!.segments[1]).toEqual({
+        type: 'note',
+        content: 'Hello',
+      });
+      expect(msg.session!.segments[2]).toMatchObject({
+        type: 'tool_call',
+        call: { name: 'search_schema' },
+      });
+    } finally {
+      globalThis.requestAnimationFrame = realRaf;
+      flushStreamPending();
+    }
   });
 });
 

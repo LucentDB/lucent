@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { ChatMessage as T } from '../../stores/chat.svelte.ts';
-  import { renderMarkdown } from './markdown.ts';
+  import { renderMarkdown, splitStablePrefix } from './markdown.ts';
   import DmlApprovalCard from './DmlApprovalCard.svelte';
   import PermissionRequestCard from './PermissionRequestCard.svelte';
   import WorkSession from './WorkSession.svelte';
@@ -27,7 +27,18 @@
     conversationId?: string; // NEW — for updating thinking state
   } = $props();
 
-  let rendered = $derived(renderMarkdown(message.content));
+  let rendered = $derived.by(() => {
+    // While a turn streams, only the stable prefix goes through the markdown
+    // pipeline; the in-flight tail renders as plain text (no per-token
+    // re-parse, no dangling tags at the boundary). Completed messages render
+    // whole so nothing stays unformatted.
+    const streaming =
+      message.role === 'assistant' && message.session?.active === true;
+    const parts = streaming
+      ? splitStablePrefix(message.content)
+      : { stable: message.content, tail: '' };
+    return { html: renderMarkdown(parts.stable), tail: parts.tail };
+  });
 
   // R24: the pill toggles an attribution popover. The Memory Drawer action
   // lives inside the popover, so the pill no longer needs a drawer handler to
@@ -63,7 +74,11 @@
     {/if}
 
     {#if message.content}
-      <div class="text selectable">{@html rendered}</div>
+      <div class="text selectable">
+        {@html rendered.html}{#if rendered.tail}<span class="stream-tail"
+          >{rendered.tail}</span
+        >{/if}
+      </div>
     {/if}
 
     {#if message.dmlApproval}
@@ -313,6 +328,11 @@
     max-width: 100%;
     border-radius: var(--radius-md);
     margin: 8px 0;
+  }
+
+  /* In-flight streaming tail: plain text, whitespace preserved. */
+  .stream-tail {
+    white-space: pre-wrap;
   }
 
   .usage {

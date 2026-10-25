@@ -88,6 +88,12 @@ impl ExternalEndpointManager {
             )
         })?;
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o700));
+        }
+
         #[cfg(windows)]
         let pipe_name = format!(
             r"\\.\pipe\lucent-external-{}-{}",

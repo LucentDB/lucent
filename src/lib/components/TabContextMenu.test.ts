@@ -74,4 +74,51 @@ describe('TabContextMenu', () => {
     await fireEvent.pointerDown(document.body);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it('navigates menu items with ArrowDown, ArrowUp, Home, and End', async () => {
+    const { getByText } = setup();
+    const closeTabBtn = getByText('Close Tab');
+    const closeOthersBtn = getByText('Close Others');
+    const closeAllBtn = getByText('Close All');
+
+    // ArrowDown focuses first item
+    await fireEvent.keyDown(window, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(closeTabBtn);
+
+    // ArrowDown moves to second item
+    await fireEvent.keyDown(window, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(closeOthersBtn);
+
+    // End moves to last item
+    await fireEvent.keyDown(window, { key: 'End' });
+    expect(document.activeElement).toBe(closeAllBtn);
+
+    // ArrowDown wraps around to first item
+    await fireEvent.keyDown(window, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(closeTabBtn);
+
+    // ArrowUp wraps to last item
+    await fireEvent.keyDown(window, { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(closeAllBtn);
+
+    // Home moves to first item
+    await fireEvent.keyDown(window, { key: 'Home' });
+    expect(document.activeElement).toBe(closeTabBtn);
+  });
+
+  it('restores focus on close', async () => {
+    const trigger = document.createElement('button');
+    document.body.appendChild(trigger);
+    trigger.focus();
+    expect(document.activeElement).toBe(trigger);
+
+    const { unmount } = render(TabContextMenu, {
+      items: makeItems(vi.fn()),
+      onClose: vi.fn(),
+    });
+
+    unmount();
+    expect(document.activeElement).toBe(trigger);
+    document.body.removeChild(trigger);
+  });
 });

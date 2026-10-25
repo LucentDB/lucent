@@ -11,7 +11,7 @@ use crate::ai::provider::LlmProvider;
 use crate::ai::providers::rig::RigProvider;
 use crate::ai::tools::AiToolContext;
 use crate::commands::{
-    cached_api_key, cached_password, load_api_key, validate_approved, AppState, CommandError,
+    cached_api_key_for, cached_password, validate_approved, AppState, CommandError,
 };
 use crate::notebook::events::NotebookEvent;
 use crate::notebook::file::{self, NotebookFileV2};
@@ -839,13 +839,14 @@ async fn run_ai_cell(
         (schema_prompt, tier)
     };
 
+    // Static prefix first, dynamic notebook context last: the schema prompt
+    // is the cacheable part and must lead, or nothing is ever reusable.
     let full_prompt = format!(
-        "You are working in a SQL notebook.\n\n\
-         {notebook_context_prompt}\
-\
+        "{system_prompt}\n\n\
+         You are working in a SQL notebook. \
          When asked for data, write and execute a query.\n\
          When asked for explanation, respond with text.\n\n\
-         {system_prompt}"
+         {notebook_context_prompt}"
     );
 
     log::info!(
@@ -865,23 +866,16 @@ async fn run_ai_cell(
         None
     } else {
         log::info!("AI cell '{cell_id}': loading API key");
-        let cached = {
-            let guard = state.api_key_cache.read().await;
-            cached_api_key(&guard, &config.provider)
-        };
-        let api_key = match cached {
-            Some(k) => k,
-            None => {
-                let key = load_api_key(&config).map_err(|e| CommandError::new("ai_config", e))?;
-                *state.api_key_cache.write().await = Some((config.provider.clone(), key.clone()));
-                key
-            }
-        };
+        let api_key = cached_api_key_for(&state, &config)
+            .await
+            .map_err(|e| CommandError::new("ai_config", e))?;
         log::info!("AI cell '{cell_id}': creating LLM provider");
         Some(Arc::new(RigProvider::new(
             config.provider.clone(),
             api_key,
             config.endpoint.clone(),
+            // The cell id is the stable per-cell session for the header.
+            Some(cell_id.clone()),
         )))
     };
 
@@ -936,13 +930,10 @@ async fn run_ai_cell(
         cell_id.clone(),
     )));
 
-    // The ACP driver keys its session-per-conversation map by this. Notebook
-    // cells are stateless per run — the rig path builds a fresh
-    // `ConversationState` every time and starts from an empty history — so
-    // each run gets its own ACP session, dropped on the way out. A key that
-    // included only the cell id would instead let a re-run continue the
-    // previous conversation, quietly making the same cell answer differently
-    // the second time.
+    // The ACP driver keys its session-per-conversation map by this. The key
+    // is stable per notebook+cell, so re-runs reuse the warm session (the
+    // rig path still builds a fresh `ConversationState` every time and
+    // starts from an empty history — that statelessness is unchanged).
     let acp_session_key = acp_cell_session_key(session_key, &cell_id);
     if is_acp {
         conv.lock().await.conversation_id = Some(acp_session_key.clone());
@@ -982,23 +973,28 @@ async fn run_ai_cell(
         cell_acp_excluded_tools(is_acp),
     );
 
-    // ── Run the agent loop (with 5-minute timeout) ────────────────────────
+    // ── Run the agent loop (with the shared configurable turn cap) ──────
     log::info!("AI cell '{cell_id}': entering agent loop");
-    const AGENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-    let chat_result = tokio::time::timeout(
-        AGENT_TIMEOUT,
-        agent.chat(
-            augmented_message,
-            &config,
-            full_prompt,
-            conv.clone(),
-            sink.clone(),
-            cancel.clone(),
-            // Notebook cells build their own prompt and inject no memories.
-            0,
-        ),
-    )
-    .await;
+    let turn_timeout_secs = config.agent_turn_timeout_secs;
+    let chat_future = agent.chat(
+        augmented_message,
+        &config,
+        full_prompt,
+        conv.clone(),
+        sink.clone(),
+        cancel.clone(),
+        // Notebook cells build their own prompt and inject no memories.
+        0,
+    );
+    let chat_result = if turn_timeout_secs == 0 {
+        Ok(chat_future.await)
+    } else {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(turn_timeout_secs),
+            chat_future,
+        )
+        .await
+    };
 
     // E2: the run is over (success, error, or timeout) — unregister the cell
     // so the Stop button stops targeting it. Must happen before the match
@@ -1014,12 +1010,12 @@ async fn run_ai_cell(
     // precedes every `return` below it.
     state.result_store.clear_scope(&result_scope_id);
 
-    // Same reasoning as the per-run session key: the run is over, so the ACP
-    // session goes with it. Dropping here (before every `return` below) also
-    // keeps a notebook from accumulating one live session per AI cell.
-    if is_acp {
-        state.acp.drop_session(&acp_session_key).await;
-    }
+    // The ACP session key is stable per notebook+cell, so the session is
+    // KEPT across runs: re-running a cell reuses the warm session instead of
+    // paying a fresh `session/new` + cold preamble every time. Sessions are
+    // still dropped on teardown and the RPC-error path, so leaks are bounded.
+    // (The per-run `ConversationState` above stays fresh — that is the rig
+    // path's statelessness, which costs nothing.)
 
     // Detached observation capture: the cell run is over (success, error, or
     // timeout), so a deterministic explicit-request observation is recorded off
@@ -1109,14 +1105,14 @@ async fn run_ai_cell(
                 String::new()
             };
             let error = CellError::QueryError {
-                message: format!("Agent timed out after 300 seconds.{}", stderr_note),
+                message: format!("Agent timed out after {turn_timeout_secs} seconds.{}", stderr_note),
                 sql_error: String::new(),
             };
             let _ = channel.send(NotebookEvent::CellError {
                 cell_id: cell_id.clone(),
                 error,
             });
-            return Err(CommandError::new("agent_timeout", "timed out after 300s"));
+            return Err(CommandError::new("agent_timeout", format!("timed out after {turn_timeout_secs}s")));
         }
     }
 

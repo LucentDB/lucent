@@ -44,7 +44,11 @@ export function tokenizeSql(code: string): SqlToken[] {
   return tokens;
 }
 
+// Fast-path regex to skip 5 regex replaces when text contains no HTML special characters
+const HTML_ESCAPES_RE = /[&<>"']/;
+
 function escapeHtml(text: string): string {
+  if (!HTML_ESCAPES_RE.test(text)) return text;
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')

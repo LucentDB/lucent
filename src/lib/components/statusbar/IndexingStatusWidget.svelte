@@ -49,6 +49,8 @@
     class:popover-open={indexing.detailsOpen}
     onclick={handleClick}
     aria-label="Schema indexing status"
+    aria-expanded={indexing.detailsOpen}
+    aria-haspopup="dialog"
     title={indexing.isComplete
       ? 'Schema indexing up to date (Click for details)'
       : indexing.text}

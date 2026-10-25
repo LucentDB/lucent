@@ -249,6 +249,9 @@ pub(crate) fn accumulate_usage(existing: &TokenUsage, new: &TokenUsage) -> Token
         cached_prompt_tokens: existing
             .cached_prompt_tokens
             .saturating_add(new.cached_prompt_tokens),
+        cached_write_prompt_tokens: existing
+            .cached_write_prompt_tokens
+            .saturating_add(new.cached_write_prompt_tokens),
     }
 }
 
@@ -344,8 +347,25 @@ pub struct AppState {
     /// seconds and — whenever the binary's code signature changes (every dev
     /// rebuild) — macOS prompts for the login password on EVERY access.
     /// Connect, test-connection, AI chat, and notebooks all need the same
-    /// secret; this keeps them to a single keychain read.
+    /// secret; this keeps them to a single keychain read. In debug builds the
+    /// read is additionally served file-first (see connections.rs), so after
+    /// a one-time migration the keychain is not touched at all.
     pub password_cache: Arc<RwLock<HashMap<String, String>>>,
+    /// Per-profile single-flight locks for `cached_password`: without them two
+    /// concurrent first-reads of the same profile both miss the cache and both
+    /// hit the keychain (two prompt pairs). The lock is held only across the
+    /// load, never across query execution.
+    pub password_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
+    /// Decrypted SSH tunnel secrets (tunnel_id → secret). Same treatment as
+    /// `password_cache`; the tunnel path is currently unwired, so this is
+    /// latent-proofing for when it is.
+    pub ssh_secret_cache: Arc<RwLock<HashMap<String, String>>>,
+    /// Per-tunnel single-flight locks for `cached_ssh_secret`.
+    pub ssh_secret_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
+    /// Serializes the first load of the AI API key: concurrent first turns
+    /// (two chats, or a chat plus a notebook cell) must share one
+    /// `load_api_key` call, not each hit the keychain.
+    pub api_key_lock: Arc<Mutex<()>>,
     /// Hold this lock only to clone the Arc. Never hold it across `.execute().await` — a long query would serialize every other query and deadlock `cancel`.
     pub client: Arc<Mutex<Option<ConnectorClient>>>,
     /// The ConnectionId assigned by the worker for the current connection.
@@ -564,6 +584,10 @@ impl AppState {
             approved_save_paths: Arc::new(Mutex::new(load_approved_paths())),
             api_key_cache: Arc::new(RwLock::new(None)),
             password_cache: Arc::new(RwLock::new(HashMap::new())),
+            password_locks: Arc::new(DashMap::new()),
+            ssh_secret_cache: Arc::new(RwLock::new(HashMap::new())),
+            ssh_secret_locks: Arc::new(DashMap::new()),
+            api_key_lock: Arc::new(Mutex::new(())),
             notebook_sessions: DashMap::new(),
             logs: crate::supervisor::new_log_buffer(),
             llm_usage: DashMap::new(),
@@ -987,21 +1011,92 @@ async fn profile_to_config(
 }
 
 /// Read a profile's keychain secret at most once per launch; later reads for
-/// the same profile come from memory.
+/// the same profile come from memory. Concurrent first-reads share one
+/// in-flight load (single-flight): without the per-profile lock, N tasks that
+/// miss together would each hit the keychain.
 pub(crate) async fn cached_password(
     state: &AppState,
     profile_id: &str,
 ) -> Result<String, crate::connections::KeychainError> {
+    cached_password_with(state, profile_id, || {
+        crate::connections::get_password(profile_id)
+    })
+    .await
+}
+
+/// Test seam for `cached_password`: the closure lets tests count store reads
+/// and inject failures without touching the real keychain.
+pub(crate) async fn cached_password_with(
+    state: &AppState,
+    profile_id: &str,
+    load: impl FnOnce() -> Result<String, crate::connections::KeychainError>,
+) -> Result<String, crate::connections::KeychainError> {
     if let Some(pw) = state.password_cache.read().await.get(profile_id) {
         return Ok(pw.clone());
     }
-    let pw = crate::connections::get_password(profile_id)?;
+    // Single-flight: the per-profile lock serializes concurrent first-reads
+    // so N tasks that miss together share one store load. Re-check after
+    // acquiring — the winner may have populated the cache meanwhile. The
+    // lock is held only across the (synchronous) load, never across queries.
+    let slot = state
+        .password_locks
+        .entry(profile_id.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone();
+    let _guard = slot.lock().await;
+    if let Some(pw) = state.password_cache.read().await.get(profile_id) {
+        return Ok(pw.clone());
+    }
+    let pw = load()?;
     state
         .password_cache
         .write()
         .await
         .insert(profile_id.to_string(), pw.clone());
     Ok(pw)
+}
+
+/// Read an SSH tunnel secret at most once per launch (same single-flight
+/// treatment as `cached_password`). Currently no production readers — the
+/// tunnel path is unwired — so this is latent-proofing plus the seam tests.
+#[allow(dead_code)]
+pub(crate) async fn cached_ssh_secret(
+    state: &AppState,
+    tunnel_id: &str,
+) -> Result<String, crate::connections::KeychainError> {
+    cached_ssh_secret_with(state, tunnel_id, || {
+        crate::connections::get_ssh_secret(tunnel_id)
+    })
+    .await
+}
+
+/// Test seam for `cached_ssh_secret`.
+#[allow(dead_code)]
+pub(crate) async fn cached_ssh_secret_with(
+    state: &AppState,
+    tunnel_id: &str,
+    load: impl FnOnce() -> Result<String, crate::connections::KeychainError>,
+) -> Result<String, crate::connections::KeychainError> {
+    if let Some(secret) = state.ssh_secret_cache.read().await.get(tunnel_id) {
+        return Ok(secret.clone());
+    }
+    // Single-flight, same shape as `cached_password_with`.
+    let slot = state
+        .ssh_secret_locks
+        .entry(tunnel_id.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone();
+    let _guard = slot.lock().await;
+    if let Some(secret) = state.ssh_secret_cache.read().await.get(tunnel_id) {
+        return Ok(secret.clone());
+    }
+    let secret = load()?;
+    state
+        .ssh_secret_cache
+        .write()
+        .await
+        .insert(tunnel_id.to_string(), secret.clone());
+    Ok(secret)
 }
 
 async fn connect_impl(
@@ -1448,9 +1543,18 @@ pub async fn duplicate_connection(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<crate::connections::ConnectionProfile, CommandError> {
+    duplicate_connection_impl(&state, &id).await
+}
+
+/// Testable body of `duplicate_connection` (takes `&AppState` so tests need
+/// no Tauri runtime — same `*_impl` pattern as `save_memory_manual_impl`).
+pub(crate) async fn duplicate_connection_impl(
+    state: &AppState,
+    id: &str,
+) -> Result<crate::connections::ConnectionProfile, CommandError> {
     let original = state
         .repo
-        .get_profile(&id)
+        .get_profile(id)
         .await
         .ok_or_else(|| CommandError::new("NotFound", "profile not found"))?;
 
@@ -1466,8 +1570,9 @@ pub async fn duplicate_connection(
     copy.updated_at = now;
     copy.last_used = None;
 
-    // Copy password if exists (best-effort)
-    if let Ok(pw) = crate::connections::get_password(&id) {
+    // Copy password if exists (best-effort). Cache-first: duplicating an
+    // already-connected profile must not cost another keychain read.
+    if let Ok(pw) = cached_password(state, id).await {
         crate::connections::set_password(&copy.id, &pw).ok();
         state
             .password_cache
@@ -1606,6 +1711,13 @@ pub async fn save_ssh_config(
     if let Some(s) = &secret {
         crate::connections::set_ssh_secret(&config.id, s)
             .map_err(|e| CommandError::new("KeychainError", e.to_string()))?;
+        // Keep the per-launch cache coherent so a later tunnel read never
+        // re-hits the store for a secret we already hold.
+        state
+            .ssh_secret_cache
+            .write()
+            .await
+            .insert(config.id.clone(), s.clone());
     }
     state
         .repo
@@ -1623,6 +1735,9 @@ pub async fn list_ssh_configs(
 
 #[tauri::command]
 pub async fn delete_ssh_config(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
+    // Evict first: the repository's keychain/file delete is best-effort, but
+    // a deleted tunnel must never serve its secret from memory afterwards.
+    state.ssh_secret_cache.write().await.remove(&id);
     state
         .repo
         .delete_ssh_config(&id)
@@ -1796,6 +1911,11 @@ pub fn validate_approved(
 /// paths the user explicitly chose in a native dialog. Only ever grows via
 /// `choose_path_via_dialog`; nothing else writes it.
 fn approved_paths_file() -> Result<std::path::PathBuf, CommandError> {
+    if let Ok(dir) = std::env::var("LUCENT_CONFIG_DIR") {
+        let path = std::path::PathBuf::from(dir).join("lucent");
+        std::fs::create_dir_all(&path).map_err(|e| CommandError::new("PathError", e.to_string()))?;
+        return Ok(path.join("approved_save_paths.json"));
+    }
     let mut dir =
         dirs::config_dir().ok_or_else(|| CommandError::new("PathError", "no config dir"))?;
     dir.push("lucent");
@@ -1830,7 +1950,13 @@ async fn persist_approved_paths(state: &AppState) -> Result<(), CommandError> {
         &file,
         serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()),
     )
-    .map_err(|e| CommandError::new("PathError", format!("cannot persist approved paths: {e}")))
+    .map_err(|e| CommandError::new("PathError", format!("cannot persist approved paths: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 /// Shared body for `choose_save_path` / `choose_export_path`: show a native
@@ -2719,26 +2845,62 @@ pub(crate) fn cached_api_key(
         .map(|(_, k)| k.clone())
 }
 
-/// Builds a conversation's system prompt: the schema tree (from the cache or,
-/// on expiry, rendered from the in-memory graph) plus the context tier used
-/// by preflight. Shared by `ai_chat` and `execute_dml`'s agent resume (C1).
-async fn build_system_prompt(
+/// Cache-first API key load shared by AI chat, notebook cells, and "List
+/// models": concurrent first turns share one in-flight `load_api_key` call
+/// (single-flight) instead of each hitting the keychain.
+pub(crate) async fn cached_api_key_for(
     state: &AppState,
-    connection_id: &str,
-) -> (String, crate::ai::mschema::ContextTier) {
-    let (prompt, tier, _) = build_system_prompt_with_query(state, connection_id, None, None).await;
-    (prompt, tier)
+    config: &AiConfig,
+) -> Result<String, String> {
+    cached_api_key_for_with(state, config, || load_api_key(config)).await
+}
+
+/// Test seam for `cached_api_key_for`: the closure lets tests count loads and
+/// inject failures without touching file/env/keychain.
+pub(crate) async fn cached_api_key_for_with(
+    state: &AppState,
+    config: &AiConfig,
+    load: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    let cached = {
+        let guard = state.api_key_cache.read().await;
+        cached_api_key(&guard, &config.provider)
+    };
+    if let Some(k) = cached {
+        return Ok(k);
+    }
+    // Single-flight: concurrent first turns (two chats, or a chat plus a
+    // notebook cell) share one load instead of each hitting the keychain.
+    // Re-check after acquiring — the winner may have populated the cache.
+    // The read guard above is scoped (not held across this lock), so the
+    // write below cannot deadlock against it.
+    let _guard = state.api_key_lock.lock().await;
+    let cached = {
+        let guard = state.api_key_cache.read().await;
+        cached_api_key(&guard, &config.provider)
+    };
+    if let Some(k) = cached {
+        return Ok(k);
+    }
+    let key = load()?;
+    *state.api_key_cache.write().await = Some((config.provider.clone(), key.clone()));
+    Ok(key)
 }
 
 /// Returns the built prompt, the context tier, and the number of learned
 /// memory rules injected (F-C2). The count is `0` when memory is disabled or
 /// no query was supplied; it flows to the turn's `Done` event.
+///
+/// The per-query retrieved block is returned SEPARATELY, not appended: it
+/// varies every turn (keyed on this turn's message), so baking it into the
+/// system prompt would shift the whole system message and defeat provider
+/// prefix caching. Callers attach it to the user turn instead.
 async fn build_system_prompt_with_query(
     state: &AppState,
     connection_id: &str,
     query: Option<&str>,
     conversation_id: Option<&str>,
-) -> (String, crate::ai::mschema::ContextTier, usize) {
+) -> (String, crate::ai::mschema::ContextTier, usize, Option<String>) {
     // Static prompt + tier selection happen under the schema_graph lock. The
     // guard is scoped to this block and dropped before any memory work:
     // embedding can download/run a 130 MB ONNX model, retrieval reads SQLite,
@@ -2801,6 +2963,7 @@ async fn build_system_prompt_with_query(
         .await
         .is_memory_enabled(connection_id);
     let mut applied_memory_count = 0usize;
+    let mut memory_block: Option<String> = None;
     if enable_memory {
         // Profile plane: rules that apply to every turn for this connection.
         // The snapshot is built once for the conversation and then frozen —
@@ -2889,16 +3052,16 @@ async fn build_system_prompt_with_query(
                 // F-C2: report exactly the rules the block injected.
                 applied_memory_count = retrieved.len();
 
-                if let Some(mem_block) =
-                    crate::ai::context::format_memory_block(&retrieved, &golden)
-                {
-                    prompt.push_str(&mem_block);
-                }
+                // Returned separately so the caller can attach it to the USER
+                // turn: per-turn content must trail the message, never sit
+                // inside the cacheable system prefix.
+                memory_block =
+                    crate::ai::context::format_memory_block(&retrieved, &golden);
             }
         }
     }
 
-    (prompt, tier, applied_memory_count)
+    (prompt, tier, applied_memory_count, memory_block)
 }
 
 /// Lazily initializes the cross-encoder reranker (a second ONNX model
@@ -2982,15 +3145,10 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
     // for `AiProvider::Acp` is a placeholder by design (spec §4.7/D8).
     let is_acp = config.acp.is_some();
 
-    // Read the cache separately so the read guard drops before the match body
-    // runs. Otherwise a write() inside the None branch would deadlock — the
-    // temporary read guard from the scrutinee lives until the match ends.
-    let cached_key = {
-        let guard = state.api_key_cache.read().await;
-        cached_api_key(&guard, &config.provider)
-    };
-    // RIG-ONLY: the API key load + `RigProvider` construction. `context_tier`
-    // stays shared — the preflight below consumes it on both paths.
+    // RIG-ONLY: the API key load + `RigProvider` construction, cache-first and
+    // single-flight via `cached_api_key_for` so concurrent first turns share
+    // one load instead of each hitting the keychain. `context_tier` stays
+    // shared — the preflight below consumes it on both paths.
     let context_tier = {
         let guard = state.schema_graph.lock().await;
         guard
@@ -3001,24 +3159,19 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
     let provider: Option<Arc<dyn LlmProvider>> = if is_acp {
         None
     } else {
-        let api_key = match cached_key {
-            Some(k) => k,
-            None => {
-                let t0 = std::time::Instant::now();
-                let key = load_api_key(&config)?;
-                log::info!(
-                    "API key loaded from keychain/env/file in {:.0?}",
-                    t0.elapsed()
-                );
-                *state.api_key_cache.write().await = Some((config.provider.clone(), key.clone()));
-                key
-            }
-        };
+        let t0 = std::time::Instant::now();
+        let api_key = cached_api_key_for(state, &config).await?;
+        log::info!(
+            "API key loaded from keychain/env/file in {:.0?}",
+            t0.elapsed()
+        );
         log::info!("Creating LLM provider");
         Some(Arc::new(RigProvider::new(
             config.provider.clone(),
             api_key,
             config.endpoint.clone(),
+            // Stable per-conversation id for the OpenCode Go session header.
+            Some(conversation_id.clone()),
         )))
     };
 
@@ -3120,20 +3273,27 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
     });
     let app_err = app_handle.clone();
     let conv_err = conv.clone();
-    const AGENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-    let chat_result = tokio::time::timeout(
-        AGENT_TIMEOUT,
-        driver.chat(
-            augmented_message,
-            &config,
-            system_prompt,
-            conv,
-            sink,
-            cancel.clone(),
-            applied_memory_count,
-        ),
-    )
-    .await;
+    // Total wall-clock cap for the turn (configurable, generous by default;
+    // 0 disables it — the ACP idle watchdog is the finer-grained guard).
+    let turn_timeout_secs = config.agent_turn_timeout_secs;
+    let chat_future = driver.chat(
+        augmented_message,
+        &config,
+        system_prompt,
+        conv,
+        sink,
+        cancel.clone(),
+        applied_memory_count,
+    );
+    let chat_result = if turn_timeout_secs == 0 {
+        Ok(chat_future.await)
+    } else {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(turn_timeout_secs),
+            chat_future,
+        )
+        .await
+    };
 
     match chat_result {
         Ok(Ok(())) => {}
@@ -3150,7 +3310,7 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
             s.state = AgentState::Idle;
         }
         Err(_) => {
-            log::error!("Agent timed out after 300s");
+            log::error!("Agent timed out after {turn_timeout_secs}s");
             cancel.cancel();
             let stderr_note = if is_acp {
                 if let Some(acp_cfg) = config.acp.as_ref() {
@@ -3168,10 +3328,7 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
                 "ai:error",
                 AiErrorPayload {
                     conversation_id: conversation_id.clone(),
-                    message: format!(
-                        "Agent timed out after 300 seconds. Try simplifying the question.{}",
-                        stderr_note
-                    ),
+                    message: format!("Agent timed out after {turn_timeout_secs} seconds. Try simplifying the question.{}", stderr_note)
                 },
             );
             let mut s = conv_err.lock().await;
@@ -3228,6 +3385,16 @@ async fn ai_chat_impl(
     user_message_id: Option<String>,
     assistant_message_id: Option<String>,
 ) -> Result<(), String> {
+    // Overlap the system-prompt build (embedder + reranker + SQLite) with the
+    // worker-connect / conversation-setup work below: the futures are
+    // independent, so the expensive inference leaves the critical send path.
+    // (Lazy — nothing runs until `.await`, so early returns cost nothing.)
+    let prompt_fut = build_system_prompt_with_query(
+        &state,
+        &connection_id,
+        Some(&message),
+        Some(&conversation_id),
+    );
     // Verify a database connection is active before starting the AI agent.
     // Without this, the agent wastes tokens and time on tools that will all
     // fail with "Database not connected".
@@ -3348,14 +3515,17 @@ async fn ai_chat_impl(
         })
         .await;
 
-    let (system_prompt, _context_tier, applied_memory_count) = build_system_prompt_with_query(
-        &state,
-        &connection_id,
-        Some(&message),
-        Some(&conversation_id),
-    )
-    .await;
+    let (system_prompt, _context_tier, applied_memory_count, memory_block) =
+        prompt_fut.await;
     log::info!("System prompt complete ({} bytes)", system_prompt.len());
+
+    // The per-turn retrieved block rides on the USER turn, trailing the
+    // question — the system prompt stays byte-stable for prefix caching.
+    // (`run_agent_turn` stacks the preflight block after this.)
+    let chat_message = match memory_block {
+        Some(b) => format!("{message}\n\n{b}"),
+        None => message.clone(),
+    };
 
     // `run_agent_turn` consumes `message`; keep a copy for the observer so an
     // explicit "remember that …" in this turn is captured at completion. The
@@ -3370,7 +3540,7 @@ async fn ai_chat_impl(
         &app_handle,
         channel,
         conversation_id,
-        message,
+        chat_message,
         system_prompt,
         applied_memory_count,
         assistant_message_id,
@@ -3601,7 +3771,11 @@ pub async fn execute_dml(
         ),
     ));
     let conv_conn_id = conv.lock().await.connection_id.clone();
-    let (system_prompt, _context_tier) = build_system_prompt(&state, &conv_conn_id).await;
+    // Pass the live conversation id (not None,None): the frozen profile
+    // snapshot must still be injected so the resume turn's system prompt does
+    // not diverge from the conversation's other turns (prefix-cache miss).
+    let (system_prompt, _context_tier, _, _) =
+        build_system_prompt_with_query(&state, &conv_conn_id, None, Some(&conversation_id)).await;
     run_agent_turn(
         &state,
         &app_handle,
@@ -3809,6 +3983,14 @@ fn validate_custom_endpoint(config: &AiConfig) -> Result<(), String> {
             return Err("Custom provider requires an endpoint URL".to_string());
         }
     }
+
+    if let Some(ep) = config.endpoint.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let parsed = reqwest::Url::parse(ep).map_err(|e| format!("Invalid endpoint URL: {e}"))?;
+        if parsed.scheme() != "http" && parsed.scheme() != "https" {
+            return Err("Endpoint URL scheme must be http or https".to_string());
+        }
+    }
+
     Ok(())
 }
 
@@ -3851,19 +4033,49 @@ pub async fn save_ai_settings(
 
 #[tauri::command]
 pub async fn list_ai_models(
+    state: State<'_, AppState>,
     provider: AiProvider,
     api_key: Option<String>,
     endpoint: Option<String>,
 ) -> Result<Vec<crate::ai::providers::dispatch::ModelSummary>, String> {
-    let key = match api_key {
+    list_ai_models_impl(&state, provider, api_key, endpoint).await
+}
+
+/// Resolve the API key for a "List models" click: an explicitly passed key
+/// wins, otherwise the shared cache (one keychain read per launch, not one
+/// per click). A missing key resolves to empty, as before — the provider's
+/// list call then reports its usual error.
+pub(crate) async fn resolve_list_models_key(
+    state: &AppState,
+    provider: &AiProvider,
+    api_key: Option<String>,
+) -> String {
+    match api_key {
         Some(k) if !k.trim().is_empty() => k.trim().to_string(),
-        _ => keyring::Entry::new(KEYCHAIN_SERVICE, keychain_account(&provider))
-            .ok()
-            .and_then(|entry| entry.get_password().ok())
-            .map(|k| k.trim().to_string())
-            .filter(|k| !k.is_empty())
-            .unwrap_or_default(),
-    };
+        _ => {
+            let config = AiConfig {
+                provider: provider.clone(),
+                ..AiConfig::default()
+            };
+            cached_api_key_for(state, &config)
+                .await
+                .map(|k| k.trim().to_string())
+                .ok()
+                .filter(|k| !k.is_empty())
+                .unwrap_or_default()
+        }
+    }
+}
+
+/// Testable body of `list_ai_models` (takes `&AppState` so tests need no
+/// Tauri runtime).
+pub(crate) async fn list_ai_models_impl(
+    state: &AppState,
+    provider: AiProvider,
+    api_key: Option<String>,
+    endpoint: Option<String>,
+) -> Result<Vec<crate::ai::providers::dispatch::ModelSummary>, String> {
+    let key = resolve_list_models_key(state, &provider, api_key).await;
     crate::ai::providers::dispatch::list_models_for(&provider, &key, &endpoint).await
 }
 
@@ -4642,7 +4854,7 @@ mod applied_memory_count_tests {
         seed_profile_rule(&state.memory_manager, FIRST).await;
 
         // First turn for the conversation builds and stores the snapshot.
-        let (first_prompt, _, _) =
+        let (first_prompt, _, _, _) =
             build_system_prompt_with_query(&state, "conn-freeze", None, Some("conv-freeze")).await;
         assert!(
             first_prompt.contains(FIRST),
@@ -4652,7 +4864,7 @@ mod applied_memory_count_tests {
         // Rule learned mid-session — must not leak into the frozen snapshot.
         seed_profile_rule(&state.memory_manager, SECOND).await;
 
-        let (second_prompt, _, _) =
+        let (second_prompt, _, _, _) =
             build_system_prompt_with_query(&state, "conn-freeze", None, Some("conv-freeze")).await;
         assert!(
             !second_prompt.contains(SECOND),
@@ -4665,7 +4877,7 @@ mod applied_memory_count_tests {
 
         // A different conversation id has its own key and builds fresh, so it
         // sees the rule learned after the first conversation was frozen.
-        let (other_prompt, _, _) =
+        let (other_prompt, _, _, _) =
             build_system_prompt_with_query(&state, "conn-freeze", None, Some("conv-other")).await;
         assert!(
             other_prompt.contains(SECOND),
@@ -4682,18 +4894,49 @@ mod applied_memory_count_tests {
         *state.ai_config.write().await = AiConfig::default();
         seed_rule(&state.memory_manager, "conn-fc2").await;
 
-        let (_prompt, _tier, count) =
+        let (_prompt, _tier, count, _) =
             build_system_prompt_with_query(&state, "conn-fc2", Some("recent invoices"), None).await;
         assert_eq!(count, 1, "one matching rule retrieved → one applied");
 
-        let (_prompt, _tier, count) =
+        let (_prompt, _tier, count, _) =
             build_system_prompt_with_query(&state, "conn-fc2", None, None).await;
         assert_eq!(count, 0, "no query → no retrieval");
 
         state.ai_config.write().await.enable_ai_memory = false;
-        let (_prompt, _tier, count) =
+        let (_prompt, _tier, count, _) =
             build_system_prompt_with_query(&state, "conn-fc2", Some("recent invoices"), None).await;
         assert_eq!(count, 0, "disabled memory applies no rules");
+    }
+
+    /// Prefix-cache stability: the per-turn retrieved block is returned
+    /// separately so it can ride the user message — the system prompt itself
+    /// must stay free of per-query content.
+    #[tokio::test]
+    async fn per_turn_memory_block_leaves_the_system_prompt_stable() {
+        let state = state();
+        *state.ai_config.write().await = AiConfig::default();
+        seed_rule(&state.memory_manager, "conn-stable").await;
+
+        let (prompt_a, _, _, block_a) =
+            build_system_prompt_with_query(&state, "conn-stable", Some("recent invoices"), None)
+                .await;
+        let (prompt_b, _, _, block_b) =
+            build_system_prompt_with_query(&state, "conn-stable", Some("unpaid orders"), None)
+                .await;
+        assert_eq!(
+            prompt_a, prompt_b,
+            "the system prompt must not vary with the turn's question"
+        );
+        let block = block_a.expect("retrieved rules ride the user turn");
+        assert!(
+            !prompt_a.contains("recent invoices set"),
+            "no per-turn rules inside the cacheable prefix"
+        );
+        assert!(
+            block.contains("recent invoices set"),
+            "the separated block still carries the rule: {block}"
+        );
+        let _ = block_b;
     }
 }
 
@@ -4870,6 +5113,28 @@ mod custom_endpoint_validation_tests {
         let cfg = config_with(AiProvider::OpenAI, None);
         assert!(validate_custom_endpoint(&cfg).is_ok());
     }
+
+    #[test]
+    fn rejects_non_http_https_endpoint_schemes() {
+        for scheme in ["file:///etc/passwd", "javascript:alert(1)", "ftp://example.com"] {
+            let cfg = config_with(AiProvider::Custom, Some(scheme));
+            let err = validate_custom_endpoint(&cfg).unwrap_err();
+            assert!(
+                err.contains("Endpoint URL scheme must be http or https"),
+                "expected scheme error for {scheme}, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_endpoint_urls() {
+        let cfg = config_with(AiProvider::Custom, Some("not-a-valid-url"));
+        let err = validate_custom_endpoint(&cfg).unwrap_err();
+        assert!(
+            err.contains("Invalid endpoint URL"),
+            "expected invalid url error, got {err}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4883,11 +5148,13 @@ mod usage_tests {
             prompt_tokens: 100,
             completion_tokens: 20,
             cached_prompt_tokens: 30,
+            cached_write_prompt_tokens: 0,
         };
         let new = TokenUsage {
             prompt_tokens: 50,
             completion_tokens: 10,
             cached_prompt_tokens: 5,
+            cached_write_prompt_tokens: 0,
         };
         let acc = accumulate_usage(&existing, &new);
         assert_eq!(acc.prompt_tokens, 150);
@@ -4901,6 +5168,7 @@ mod usage_tests {
             prompt_tokens: 42,
             completion_tokens: 7,
             cached_prompt_tokens: 3,
+            cached_write_prompt_tokens: 0,
         };
         let acc = accumulate_usage(&TokenUsage::default(), &new);
         assert_eq!(acc.prompt_tokens, 42);
@@ -4948,6 +5216,7 @@ mod conversation_lifecycle_tests {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 cached_prompt_tokens: 2,
+                cached_write_prompt_tokens: 0,
             },
         );
 
@@ -5040,7 +5309,9 @@ mod catalog_mapping_tests {
 
 #[cfg(test)]
 mod password_cache_tests {
-    use super::{cached_password, AppState};
+    use super::{cached_password, cached_password_with, AppState};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn a_cached_secret_is_returned_without_a_keychain_read() {
@@ -5075,6 +5346,326 @@ mod password_cache_tests {
         );
         // The cache must not have been polluted by the miss.
         assert!(state.password_cache.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sequential_reads_hit_the_store_exactly_once() {
+        let state = AppState::new();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let load = || {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, crate::connections::KeychainError>("pw".to_string())
+        };
+        let first = cached_password_with(&state, "prof-seq", load).await.unwrap();
+        let reads2 = reads.clone();
+        let second = cached_password_with(&state, "prof-seq", || {
+            reads2.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, crate::connections::KeychainError>("pw".to_string())
+        })
+        .await
+        .unwrap();
+        assert_eq!((first.as_str(), second.as_str()), ("pw", "pw"));
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "the second read must come from memory"
+        );
+    }
+
+    /// The check-then-act race: N tasks that miss the cache together must
+    /// share ONE store read. Pre-single-flight this reads N times (N prompt
+    /// pairs on an ACL-mismatched dev build).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_first_reads_share_one_store_read() {
+        let state = Arc::new(AppState::new());
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let state = state.clone();
+            let reads = reads.clone();
+            handles.push(tokio::spawn(async move {
+                cached_password_with(&state, "prof-race", || {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    // A real keychain read stalls; the fake must yield so the
+                    // race window stays open and the test means something.
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    Ok::<_, crate::connections::KeychainError>("pw".to_string())
+                })
+                .await
+            }));
+        }
+        for h in handles {
+            assert_eq!(h.await.unwrap().unwrap(), "pw");
+        }
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "8 concurrent first-reads must share one store read"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_load_failure_is_not_cached() {
+        let state = AppState::new();
+        let tries = Arc::new(AtomicUsize::new(0));
+        let tries2 = tries.clone();
+        let err = cached_password_with(&state, "prof-fail", || {
+            tries.fetch_add(1, Ordering::SeqCst);
+            Err::<String, _>(crate::connections::KeychainError::NotFound)
+        })
+        .await;
+        assert!(err.is_err());
+        let err2 = cached_password_with(&state, "prof-fail", || {
+            tries2.fetch_add(1, Ordering::SeqCst);
+            Err::<String, _>(crate::connections::KeychainError::NotFound)
+        })
+        .await;
+        assert!(err2.is_err());
+        assert_eq!(
+            tries.load(Ordering::SeqCst),
+            2,
+            "a miss must not poison the cache"
+        );
+    }
+
+    /// Pin the invariant `delete_connection` relies on: after evicting the
+    /// cached entry the next read goes back to the store exactly once.
+    #[tokio::test]
+    async fn evict_then_reread_hits_the_store_exactly_once() {
+        let state = AppState::new();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let reads2 = reads.clone();
+        cached_password_with(&state, "prof-evict", || {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, crate::connections::KeychainError>("v1".to_string())
+        })
+        .await
+        .unwrap();
+        // This is what `delete_connection` does on profile delete.
+        state.password_cache.write().await.remove("prof-evict");
+        let reread = cached_password_with(&state, "prof-evict", || {
+            reads2.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, crate::connections::KeychainError>("v1".to_string())
+        })
+        .await
+        .unwrap();
+        assert_eq!(reread, "v1");
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+}
+
+/// SSH secrets get the same single-flight cache treatment as passwords. The
+/// tunnel path is currently unwired (no production readers), so these tests
+/// pin the seam for when it is: one store read per tunnel per launch, shared
+/// under concurrent first access. All loads are injected fakes — no keychain.
+#[cfg(test)]
+mod ssh_secret_cache_tests {
+    use super::{cached_ssh_secret_with, AppState};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn sequential_reads_hit_the_store_exactly_once() {
+        let state = AppState::new();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let reads2 = reads.clone();
+        let first = cached_ssh_secret_with(&state, "tun-1", || {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, crate::connections::KeychainError>("s3cr3t".to_string())
+        })
+        .await
+        .unwrap();
+        let second = cached_ssh_secret_with(&state, "tun-1", || {
+            reads2.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, crate::connections::KeychainError>("s3cr3t".to_string())
+        })
+        .await
+        .unwrap();
+        assert_eq!((first.as_str(), second.as_str()), ("s3cr3t", "s3cr3t"));
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_first_reads_share_one_store_read() {
+        let state = Arc::new(AppState::new());
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let state = state.clone();
+            let reads = reads.clone();
+            handles.push(tokio::spawn(async move {
+                cached_ssh_secret_with(&state, "tun-race", || {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    Ok::<_, crate::connections::KeychainError>("s3cr3t".to_string())
+                })
+                .await
+            }));
+        }
+        for h in handles {
+            assert_eq!(h.await.unwrap().unwrap(), "s3cr3t");
+        }
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "8 concurrent first-reads must share one store read"
+        );
+    }
+}
+
+/// `duplicate_connection` must route through `cached_password`, not read the
+/// keychain directly: duplicating an already-connected profile must not cost
+/// another store read (another prompt pair on macOS).
+/// Keychain-safety: the original's secret is seeded through the dev file and
+/// the in-memory cache holds a sentinel, so both the bypassing (RED) and the
+/// cached (GREEN) paths resolve without ever reaching the real keychain.
+///
+/// Debug-only: seeding goes through the dev file, which is a keychain no-op.
+/// (Release routing is identical code; the release-only difference lives in
+/// the connections layer, covered by the passthrough tests there.)
+#[cfg(all(test, debug_assertions))]
+mod duplicate_cache_tests {
+    use super::{duplicate_connection_impl, AppState};
+
+    /// TEST_CONFIG_DIR is thread-local: this must stay on one thread.
+    #[tokio::test(flavor = "current_thread")]
+    async fn duplicate_reads_the_cached_secret_not_the_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        crate::connections::TEST_CONFIG_DIR
+            .with(|c| *c.borrow_mut() = Some(tmp.path().to_path_buf()));
+        let state = AppState::new();
+
+        let mut profile = crate::connections::ConnectionProfile::new("Orig".into());
+        profile.id = "prof-dup-src".to_string();
+        state.repo.save_profile(profile).await.unwrap();
+
+        // The store holds a decoy; memory holds the sentinel. A direct read
+        // returns the decoy (RED); a cache-first read returns the sentinel.
+        crate::connections::set_password("prof-dup-src", "store-decoy").unwrap();
+        state
+            .password_cache
+            .write()
+            .await
+            .insert("prof-dup-src".to_string(), "sentinel-secret".to_string());
+
+        let copy = duplicate_connection_impl(&state, "prof-dup-src")
+            .await
+            .expect("duplicate must succeed");
+        assert_ne!(copy.id, "prof-dup-src");
+
+        let copied = crate::connections::get_password(&copy.id).expect("copy has a secret");
+        assert_eq!(
+            copied, "sentinel-secret",
+            "duplicate must copy the cached secret, not re-read the store"
+        );
+
+        crate::connections::TEST_CONFIG_DIR.with(|c| *c.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+mod api_key_single_flight_tests {
+    use super::{cached_api_key_for_with, resolve_list_models_key, AppState};
+    use crate::ai::config::{AiConfig, AiProvider};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn config() -> AiConfig {
+        AiConfig {
+            provider: AiProvider::OpenAI,
+            ..AiConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cached_key_is_returned_without_loading() {
+        let state = AppState::new();
+        *state.api_key_cache.write().await =
+            Some((AiProvider::OpenAI, "sentinel-key".to_string()));
+        let out = cached_api_key_for_with(&state, &config(), || {
+            panic!("a cache hit must never load")
+        })
+        .await
+        .unwrap();
+        assert_eq!(out, "sentinel-key");
+    }
+
+    /// Same check-then-act race as the password cache, on the AI path: two
+    /// concurrent first turns (two chats, or a chat plus a notebook cell)
+    /// must share one load, not raise two back-to-back prompt pairs.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_first_loads_share_one_load() {
+        let state = Arc::new(AppState::new());
+        let loads = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let state = state.clone();
+            let loads = loads.clone();
+            let cfg = AiConfig {
+                provider: AiProvider::OpenAI,
+                ..AiConfig::default()
+            };
+            handles.push(tokio::spawn(async move {
+                cached_api_key_for_with(&state, &cfg, || {
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    Ok::<_, String>("sk-x".to_string())
+                })
+                .await
+            }));
+        }
+        for h in handles {
+            assert_eq!(h.await.unwrap().unwrap(), "sk-x");
+        }
+        assert_eq!(
+            loads.load(Ordering::SeqCst),
+            1,
+            "8 concurrent first-loads must share one load"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_mismatch_reloads() {
+        let state = AppState::new();
+        *state.api_key_cache.write().await =
+            Some((AiProvider::Ollama, "other-provider-key".to_string()));
+        let loads = Arc::new(AtomicUsize::new(0));
+        let loads2 = loads.clone();
+        let out = cached_api_key_for_with(&state, &config(), || {
+            loads.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, String>("sk-fresh".to_string())
+        })
+        .await
+        .unwrap();
+        assert_eq!(out, "sk-fresh");
+        assert_eq!(loads2.load(Ordering::SeqCst), 1);
+    }
+
+    /// "List models" with a blank key field must serve the cached key, not
+    /// hit the keychain on every click (the old code read the keychain
+    /// directly). Seeding the cache with a sentinel proves the hit path
+    /// never loads — if it did, this would touch file/env/keychain.
+    #[tokio::test]
+    async fn list_models_uses_the_cached_key() {
+        let state = AppState::new();
+        *state.api_key_cache.write().await =
+            Some((AiProvider::OpenAI, "sentinel-key".to_string()));
+        let out = resolve_list_models_key(&state, &AiProvider::OpenAI, None).await;
+        assert_eq!(out, "sentinel-key");
+    }
+
+    #[tokio::test]
+    async fn list_models_prefers_an_explicitly_passed_key() {
+        let state = AppState::new();
+        *state.api_key_cache.write().await =
+            Some((AiProvider::OpenAI, "sentinel-key".to_string()));
+        let out = resolve_list_models_key(
+            &state,
+            &AiProvider::OpenAI,
+            Some("  sk-inline  ".to_string()),
+        )
+        .await;
+        assert_eq!(out, "sk-inline");
     }
 }
 
@@ -5667,6 +6258,7 @@ mod manual_memory_injection_tests {
                 prompt_tokens: 150,
                 completion_tokens: 45,
                 cached_prompt_tokens: 20,
+                cached_write_prompt_tokens: 0,
             },
             applied_memory_count: 2,
             cancelled: false,

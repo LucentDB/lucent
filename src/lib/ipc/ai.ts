@@ -14,6 +14,8 @@ import {
   persistConversationMessage,
   updateLast,
   clearRejectedDml,
+  setRunPhase,
+  setTabClosedHook,
   type TokenUsage,
 } from '../stores/chat.svelte.ts';
 import { aiConfig } from '../stores/ai-config.svelte.ts';
@@ -64,6 +66,8 @@ export type AiChannelEvent =
         prompt_tokens: number;
         completion_tokens: number;
         cached_prompt_tokens: number;
+        /** Cache-creation tokens; older backends omit it. */
+        cached_write_prompt_tokens?: number;
       };
       /** Learned memory rules injected into this turn's prompt (F-C2).
        *  Backend `#[serde(default)]`, so older events may omit it. */
@@ -128,19 +132,75 @@ export interface AgentPermissionPayload {
  * any event arrives), so every event targets that conversation's last message
  * — no per-turn message bookkeeping is needed.
  */
+
+// ── Stream coalescing ─────────────────────────────────────────────────────
+// Per-token channel messages each used to mutate the store (and re-render
+// markdown + reflow the scroll) on arrival. `text`/`thinking` chunks instead
+// accumulate here and flush once per animation frame, so N tokens in one
+// frame produce one store write. Everything else stays immediate — but flushes
+// first, so buffered text never renders out of order with notices/tool cards.
+interface PendingChunks {
+  text: string[];
+  think: string[];
+}
+const streamPending = new Map<string, PendingChunks>();
+let streamFlushHandle = 0;
+
+function pendingKey(convId: string, msgId: string): string {
+  return `${convId}\n${msgId}`;
+}
+
+function scheduleStreamFlush() {
+  if (streamFlushHandle) return;
+  if (typeof requestAnimationFrame !== 'function') {
+    // No frame scheduler (tests, SSR) — apply immediately.
+    flushStreamPending();
+    return;
+  }
+  streamFlushHandle = requestAnimationFrame(() => {
+    streamFlushHandle = 0;
+    flushStreamPending();
+  });
+}
+
+/** Apply all buffered chunks. Exported for tests (deterministic flush). */
+export function flushStreamPending() {
+  for (const [key, p] of streamPending) {
+    const sep = key.indexOf('\n');
+    const convId = key.slice(0, sep);
+    const msgId = key.slice(sep + 1);
+    for (const c of p.think) appendToThinking(convId, msgId, c);
+    if (p.text.length > 0) finalizeActiveThinkingSegment(convId, msgId);
+    for (const c of p.text) appendToLast(convId, c);
+  }
+  streamPending.clear();
+}
+
 export function handleAiEvent(conversationId: string, e: AiChannelEvent) {
+  if (e.type === 'text' || e.type === 'thinking') {
+    const conv = chat.conversations.find((c) => c.id === conversationId);
+    if (!conv || conv.messages.length === 0) return;
+    const messageId = conv.messages[conv.messages.length - 1].id;
+    const key = pendingKey(conversationId, messageId);
+    let p = streamPending.get(key);
+    if (!p) {
+      p = { text: [], think: [] };
+      streamPending.set(key, p);
+    }
+    if (e.type === 'text') p.text.push(e.content);
+    else p.think.push(e.content);
+    scheduleStreamFlush();
+    return;
+  }
+  // A notice/tool event arriving behind buffered text must not jump ahead of
+  // it — flush first so segments render in arrival order.
+  flushStreamPending();
+
   const conv = chat.conversations.find((c) => c.id === conversationId);
   if (!conv || conv.messages.length === 0) return;
   const messageId = conv.messages[conv.messages.length - 1].id;
 
   switch (e.type) {
-    case 'thinking':
-      appendToThinking(conversationId, messageId, e.content);
-      break;
-    case 'text':
-      finalizeActiveThinkingSegment(conversationId, messageId);
-      appendToLast(conversationId, e.content);
-      break;
     case 'notice':
       // A system note from Lucent itself (e.g. DB tools unavailable) —
       // rendered as a note segment, not as an agent message.
@@ -161,7 +221,7 @@ export function handleAiEvent(conversationId: string, e: AiChannelEvent) {
       });
       break;
     case 'done':
-      chat.isStreaming = false;
+      setRunPhase(conversationId, 'idle');
       finalizeSession(conversationId, messageId);
       if (e.cancelled) markStoppedToolCalls(conversationId, messageId);
       updateLast(conversationId, {
@@ -169,6 +229,7 @@ export function handleAiEvent(conversationId: string, e: AiChannelEvent) {
           promptTokens: e.usage.prompt_tokens,
           completionTokens: e.usage.completion_tokens,
           cachedPromptTokens: e.usage.cached_prompt_tokens,
+          cachedWritePromptTokens: e.usage.cached_write_prompt_tokens ?? 0,
         },
         rulesApplied: e.applied_memory_count ?? 0,
       });
@@ -185,6 +246,7 @@ export interface BackendTokenUsage {
   prompt_tokens: number;
   completion_tokens: number;
   cached_prompt_tokens: number;
+  cached_write_prompt_tokens?: number;
 }
 
 /** Accumulated LLM token usage for a conversation (zeros if none yet). */
@@ -196,6 +258,7 @@ export async function getAiUsage(conversationId: string): Promise<TokenUsage> {
     promptTokens: raw.prompt_tokens,
     completionTokens: raw.completion_tokens,
     cachedPromptTokens: raw.cached_prompt_tokens,
+    cachedWritePromptTokens: raw.cached_write_prompt_tokens ?? 0,
   };
 }
 
@@ -219,13 +282,9 @@ function finalizeLastMessageSession(conversationId: string) {
 }
 
 export function createAiSession(conversationId: string) {
-  const channel = new Channel<AiChannelEvent>();
   const unlisteners: UnlistenFn[] = [];
 
-  channel.onmessage = (e: AiChannelEvent) => handleAiEvent(conversationId, e);
-
   return {
-    channel,
     setupListeners: async (handlers: {
       onDmlApproval: (p: DmlApprovalPayload) => void;
       onAgentPermission: (p: AgentPermissionPayload) => void;
@@ -236,7 +295,8 @@ export function createAiSession(conversationId: string) {
           // Events are global; only this conversation's payloads may pause it.
           if (e.payload.conversation_id !== conversationId) return;
           handlers.onDmlApproval(e.payload);
-          chat.isStreaming = false;
+          // Paused, not finished: the turn is still live (Stop stays
+          // available), so the run phase is untouched.
           finalizeLastMessageSession(conversationId);
         }),
       );
@@ -244,7 +304,7 @@ export function createAiSession(conversationId: string) {
         await listen<AgentPermissionPayload>('ai:agent_permission', (e) => {
           if (e.payload.conversationId !== conversationId) return;
           handlers.onAgentPermission(e.payload);
-          chat.isStreaming = false;
+          // Same as DML: a permission pause is not a terminal event.
           finalizeLastMessageSession(conversationId);
         }),
       );
@@ -253,7 +313,6 @@ export function createAiSession(conversationId: string) {
           // The backend emits this globally for the conversation whose bridge
           // rejected the preview — only touch that conversation's card.
           if (e.payload.conversation_id !== conversationId) return;
-          chat.isStreaming = false;
           clearRejectedDml(conversationId);
           finalizeLastMessageSession(conversationId);
         }),
@@ -264,7 +323,7 @@ export function createAiSession(conversationId: string) {
           (e) => {
             if (e.payload.conversation_id !== conversationId) return;
             handlers.onError(e.payload);
-            chat.isStreaming = false;
+            setRunPhase(conversationId, 'idle');
             finalizeLastMessageSession(conversationId);
           },
         ),
@@ -285,7 +344,7 @@ export async function sendMessage(
   userMessageId?: string | null,
   assistantMessageId?: string | null,
 ) {
-  chat.isStreaming = true;
+  setRunPhase(conversationId, 'running');
   chat.error = null;
   try {
     return await invoke('ai_chat', {
@@ -298,7 +357,7 @@ export async function sendMessage(
       assistantMessageId: assistantMessageId ?? null,
     });
   } catch (e) {
-    chat.isStreaming = false;
+    setRunPhase(conversationId, 'idle');
     chat.error = String(e);
     throw e;
   }
@@ -306,6 +365,89 @@ export async function sendMessage(
 
 export async function cancelRun(conversationId: string) {
   return invoke('ai_cancel', { conversationId });
+}
+
+// ── Per-conversation session registry ─────────────────────────────────────
+// One set of global listeners per conversation, registered once and released
+// when the tab closes (the old per-send creation leaked four global
+// listeners per message). The event Channel is deliberately NOT part of
+// the cached session: use newAiChannel() for every send (below).
+
+/** A fresh per-send Channel. Tauri Channels are single-use: once the Rust
+ *  side drops its handle it evals `{end:true}` at the JS callback and
+ *  `unregisterCallback`s it, and the Rust index counter is minted fresh per
+ *  `invoke` while the JS-side counter is not reset either. Never cache one
+ *  of these across `invoke('ai_chat')` calls. */
+export function newAiChannel(
+  conversationId: string,
+): Channel<AiChannelEvent> {
+  const channel = new Channel<AiChannelEvent>();
+  channel.onmessage = (e: AiChannelEvent) => handleAiEvent(conversationId, e);
+  return channel;
+}
+
+interface SessionEntry {
+  setup: (handlers: SessionHandlers) => Promise<void>;
+  cleanup: () => Promise<void> | void;
+  listenersReady: boolean;
+}
+
+export interface SessionHandlers {
+  onDmlApproval: (p: DmlApprovalPayload) => void;
+  onAgentPermission: (p: AgentPermissionPayload) => void;
+  onError: (p: { conversation_id: string; message: string }) => void;
+}
+
+const sessions = new Map<string, SessionEntry>();
+
+export function aiSessionFor(conversationId: string): {
+  createChannel: () => Channel<AiChannelEvent>;
+  ensureListeners: (handlers: SessionHandlers) => Promise<void>;
+} {
+  ensureTabHook();
+  let s = sessions.get(conversationId);
+  if (!s) {
+    const created = createAiSession(conversationId);
+    s = {
+      setup: created.setupListeners,
+      cleanup: created.cleanup,
+      listenersReady: false,
+    };
+    sessions.set(conversationId, s);
+  }
+  return {
+    createChannel: () => newAiChannel(conversationId),
+    ensureListeners: async (handlers: SessionHandlers) => {
+      const entry = sessions.get(conversationId);
+      if (!entry || entry.listenersReady) return;
+      await entry.setup(handlers);
+      entry.listenersReady = true;
+    },
+  };
+}
+
+export function releaseAiSession(conversationId: string) {
+  ensureTabHook();
+  const s = sessions.get(conversationId);
+  if (!s) return;
+  // Never drop a mid-turn session: its terminal Done event would be lost and
+  // the run phase would never clear.
+  const conv = chat.conversations.find((c) => c.id === conversationId);
+  if (conv && conv.runPhase !== 'idle') return;
+  void s.cleanup();
+  sessions.delete(conversationId);
+}
+
+// The store never imports this module (that would cycle), so the hook wires
+// lazily on first use — both modules are fully initialized by then, whereas
+// a top-level call runs mid-cycle and hits uninitialized bindings.
+let tabHookWired = false;
+
+function ensureTabHook() {
+  if (!tabHookWired) {
+    tabHookWired = true;
+    setTabClosedHook(releaseAiSession);
+  }
 }
 
 export async function executeDml(

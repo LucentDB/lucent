@@ -201,6 +201,7 @@ mod tests {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 cached_prompt_tokens: 0,
+                cached_write_prompt_tokens: 0,
             },
             thinking: Some("I need to check the schema".into()),
         };
@@ -233,8 +234,12 @@ mod tests {
         match &summary.content {
             MessageContent::Text(t) => {
                 assert!(
-                    t.contains("14 earlier messages"),
-                    "summary must count the omitted: {t}"
+                    t.contains("some earlier messages were omitted"),
+                    "summary tells the model the past collapsed: {t}"
+                );
+                assert!(
+                    !t.chars().any(|c| c.is_ascii_digit()),
+                    "summary carries no changing count (prefix-cache stable): {t}"
                 );
             }
             other => panic!("expected text summary, got {other:?}"),
@@ -335,8 +340,12 @@ mod tests {
         match &out[0].content {
             MessageContent::Text(t) => {
                 assert!(
-                    t.contains("1 earlier messages"),
-                    "summary must count the omitted: {t}"
+                    t.contains("some earlier messages were omitted"),
+                    "summary tells the model the past collapsed: {t}"
+                );
+                assert!(
+                    !t.chars().any(|c| c.is_ascii_digit()),
+                    "summary carries no changing count (prefix-cache stable): {t}"
                 )
             }
             other => panic!("expected text summary, got {other:?}"),
@@ -574,6 +583,9 @@ impl DatabaseAgent {
             .await;
 
         let mut turn_count = 0u32;
+        // Per-round usage accumulator: `Done` reports the turn total rather
+        // than just the last round's split, so cache hit rates stay visible.
+        let mut turn_usage = TokenUsage::default();
         // First prompt is the user's actual message; subsequent prompts are empty.
         let mut prompt = Message::user(message);
 
@@ -586,6 +598,17 @@ impl DatabaseAgent {
         loop {
             if cancel.is_cancelled() {
                 log::info!("Agent cancelled at turn {turn_count}");
+                // The Stop button's `stopping → idle` transition depends on a
+                // terminal event: emit one (mirrors the ACP driver's
+                // `Done { cancelled: true }`) so the UI always resolves.
+                sink.event(AiEvent::Done {
+                    conversation_id: conversation_id.clone(),
+                    final_message: String::new(),
+                    usage: turn_usage.clone(),
+                    applied_memory_count,
+                    cancelled: true,
+                });
+                conv_state.lock().await.state = AgentState::Idle;
                 return Ok(());
             }
             if turn_count >= config.max_turns {
@@ -645,6 +668,7 @@ impl DatabaseAgent {
                     response.usage.completion_tokens,
                 );
             }
+            turn_usage = add_usage(&turn_usage, &response.usage);
 
             // Record the prompt that produced this turn (only genuine user text
             // is stored — empty continuation prompts never enter history).
@@ -663,7 +687,7 @@ impl DatabaseAgent {
                 sink.event(AiEvent::Done {
                     conversation_id: conversation_id.clone(),
                     final_message: final_msg,
-                    usage: response.usage,
+                    usage: turn_usage.clone(),
                     applied_memory_count,
                     cancelled: false,
                 });
@@ -1032,13 +1056,15 @@ fn compact_history(history: Vec<Message>) -> Vec<Message> {
     {
         tail.remove(0);
     }
-    let omitted = total - tail.len();
     let mut out = Vec::with_capacity(tail.len() + 1);
-    out.push(Message::user(format!(
-        "[Earlier context: {omitted} earlier messages were omitted to stay within \
+    // The placeholder carries no count: a changing "N earlier messages"
+    // sentence would shift the message-array prefix every turn and defeat
+    // provider prefix caching once the window engages.
+    out.push(Message::user(
+        "[Earlier context: some earlier messages were omitted to stay within \
          the context window. Continue the conversation normally; the pending task \
-         is in the latest messages below.]"
-    )));
+         is in the latest messages below.]",
+    ));
     out.extend(tail);
     out
 }
@@ -1078,6 +1104,20 @@ pub(crate) fn model_text_for_tool(name: &str, raw: String) -> String {
         raw
     } else {
         truncate_tool_output(&raw)
+    }
+}
+
+/// Saturating per-field sum of two usage reports (turn-total accumulation).
+fn add_usage(a: &TokenUsage, b: &TokenUsage) -> TokenUsage {
+    TokenUsage {
+        prompt_tokens: a.prompt_tokens.saturating_add(b.prompt_tokens),
+        completion_tokens: a.completion_tokens.saturating_add(b.completion_tokens),
+        cached_prompt_tokens: a
+            .cached_prompt_tokens
+            .saturating_add(b.cached_prompt_tokens),
+        cached_write_prompt_tokens: a
+            .cached_write_prompt_tokens
+            .saturating_add(b.cached_write_prompt_tokens),
     }
 }
 
@@ -1550,6 +1590,117 @@ mod sink_tests {
             content: "hi".into(),
         });
         assert_eq!(sink.0.lock().unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::*;
+    use crate::ai::provider::{AgentDelta, LlmProvider, LucentAgent};
+
+    struct NeverProvider;
+    #[async_trait::async_trait]
+    impl LlmProvider for NeverProvider {
+        async fn build_agent(
+            &self,
+            _: &str,
+            _: String,
+            _: u32,
+            _: Vec<crate::ai::tools::LucentToolEnum>,
+        ) -> Box<dyn LucentAgent> {
+            Box::new(NeverAgent)
+        }
+    }
+
+    struct NeverAgent;
+    #[async_trait::async_trait]
+    impl LucentAgent for NeverAgent {
+        async fn complete(
+            &self,
+            _: Message,
+            _: Vec<Message>,
+            _: &(dyn Fn(AgentDelta) + Send + Sync),
+        ) -> Result<LlmResponse, LlmError> {
+            panic!("a pre-cancelled turn must never reach the LLM");
+        }
+    }
+
+    fn empty_ctx() -> AiToolContext {
+        AiToolContext {
+            db: Arc::new(Mutex::new(None)),
+            connection_id: None,
+            memory_connection_key: None,
+            capabilities: None,
+            config: AiConfig::default(),
+            schema_graph: Arc::new(Mutex::new(None)),
+            embedder: Arc::new(Mutex::new(None)),
+            reranker: Arc::new(Mutex::new(None)),
+            memory_manager: crate::ai::tools::test_memory_manager(),
+            result_scope: crate::ai::result_store::ResultScope::isolated("test"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_turn_emits_exactly_one_cancelled_done() {
+        let agent = DatabaseAgent::new(Arc::new(NeverProvider), vec![], empty_ctx());
+        let conv = Arc::new(Mutex::new(ConversationState::new("conv-cancel".into())));
+        let sink = Arc::new(CollectorSink(std::sync::Mutex::new(Vec::new())));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+
+        agent
+            .chat(
+                "hi".into(),
+                &AiConfig::default(),
+                "preamble".into(),
+                conv.clone(),
+                sink.clone(),
+                cancel,
+                2,
+            )
+            .await
+            .expect("cancel resolves Ok");
+
+        let events = sink.0.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "exactly one terminal event: {events:?}");
+        match &events[0] {
+            crate::ai::events::AiEvent::Done {
+                final_message,
+                cancelled,
+                applied_memory_count,
+                ..
+            } => {
+                assert!(cancelled, "the UI clears `stopping` off this flag");
+                assert!(final_message.is_empty());
+                assert_eq!(*applied_memory_count, 2);
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+        assert!(
+            matches!(conv.lock().await.state, AgentState::Idle),
+            "the conversation releases its claim"
+        );
+    }
+
+    #[test]
+    fn add_usage_sums_all_fields_saturating() {
+        let a = TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            cached_prompt_tokens: 30,
+            cached_write_prompt_tokens: 5,
+        };
+        let b = TokenUsage {
+            prompt_tokens: 50,
+            completion_tokens: 10,
+            cached_prompt_tokens: 5,
+            cached_write_prompt_tokens: 7,
+        };
+        let total = add_usage(&a, &b);
+        assert_eq!(total.prompt_tokens, 150);
+        assert_eq!(total.completion_tokens, 30);
+        assert_eq!(total.cached_prompt_tokens, 35);
+        assert_eq!(total.cached_write_prompt_tokens, 12);
     }
 }
 

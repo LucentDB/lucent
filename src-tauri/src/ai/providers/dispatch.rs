@@ -162,14 +162,29 @@ pub async fn list_models_for(
         | AiProvider::Custom
         | AiProvider::OpenCode => {
             let base_url = resolve_base_url(provider, endpoint)?;
-            list_via(
-                openai::Client::builder()
-                    .api_key(api_key)
-                    .base_url(&base_url)
-                    .build(),
-                provider,
-            )
-            .await?
+            let mut builder = openai::Client::builder()
+                .api_key(api_key)
+                .base_url(&base_url);
+            if *provider == AiProvider::OpenCode {
+                // Auxiliary request (the Hermes note): the session header is
+                // expected here too. No conversation context exists, so a
+                // stable synthetic value keeps routing affinity honest.
+                let mut headers = reqwest::header::HeaderMap::new();
+                headers.insert(
+                    reqwest::header::HeaderName::from_static("x-opencode-session"),
+                    reqwest::header::HeaderValue::from_static("lucent-model-list"),
+                );
+                headers.insert(
+                    reqwest::header::USER_AGENT,
+                    reqwest::header::HeaderValue::from_str(&format!(
+                        "lucent/{}",
+                        env!("CARGO_PKG_VERSION")
+                    ))
+                    .expect("version is header-safe"),
+                );
+                builder = builder.http_headers(headers);
+            }
+            list_via(builder.build(), provider).await?
         }
         // The agent owns model choice; there is no model list to enumerate.
         // (The frontend hides the model picker for ACP anyway.)

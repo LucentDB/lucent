@@ -137,6 +137,30 @@ test('strips forbidden base, meta, and link tags from rendered markdown', () => 
   expect(out.toLowerCase()).not.toContain('<link');
 });
 
+test('strips frame and frameset tags from rendered markdown', () => {
+  const payload = `<frameset><frame src="http://example.com" /></frameset>`;
+  const out = renderMarkdown(payload);
+  expect(out.toLowerCase()).not.toContain('<frame');
+  expect(out.toLowerCase()).not.toContain('<frameset');
+});
+
+test('limits excessively long markdown input to prevent DoS', () => {
+  const longInput = 'A'.repeat(600_000);
+  const out = renderMarkdown(longInput);
+  expect(out).toContain('(output truncated)');
+  expect(out.length).toBeLessThan(550_000);
+});
+
+test('drops non-http URI schemes like file, vscode, ftp', () => {
+  const linkOut1 = renderMarkdown('[file](file:///etc/passwd)');
+  expect(linkOut1.toLowerCase()).not.toContain('file:');
+
+  const linkOut2 = renderMarkdown('[vscode](vscode://file/path)');
+  expect(linkOut2.toLowerCase()).not.toContain('vscode:');
+
+  const linkOut3 = renderMarkdown('[ftp](ftp://example.com)');
+  expect(linkOut3.toLowerCase()).not.toContain('ftp:');
+});
 test('strips inline style attributes to prevent CSS injection and UI spoofing', () => {
   const out = renderMarkdown(
     '<p style="position:fixed;top:0;left:0;width:100%;height:100%;z-index:9999;background:red">Overlay</p>',
@@ -157,4 +181,26 @@ test('strips standalone non-checkbox inputs and additional form control tags', (
   expect(out.toLowerCase()).not.toContain('<option');
   expect(out.toLowerCase()).not.toContain('<datalist');
   expect(out.toLowerCase()).not.toContain('<output');
+});
+test('splitStablePrefix never splits inside a fenced code block', async () => {
+  const { splitStablePrefix } = await import('./markdown');
+  const content = 'Intro paragraph.\n\n```sql\nSELECT *\nFROM users\n';
+  const { stable, tail } = splitStablePrefix(content);
+  expect(stable).toBe('Intro paragraph.\n\n');
+  expect(tail).toBe('```sql\nSELECT *\nFROM users\n');
+});
+
+test('splitStablePrefix cuts at the last blank line otherwise', async () => {
+  const { splitStablePrefix } = await import('./markdown');
+  const content = 'First block.\n\nSecond block so far';
+  const { stable, tail } = splitStablePrefix(content);
+  expect(stable).toBe('First block.');
+  expect(tail).toBe('\n\nSecond block so far');
+});
+
+test('splitStablePrefix returns the whole text when there is no boundary', async () => {
+  const { splitStablePrefix } = await import('./markdown');
+  const { stable, tail } = splitStablePrefix('one short line');
+  expect(stable).toBe('one short line');
+  expect(tail).toBe('');
 });

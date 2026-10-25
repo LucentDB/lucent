@@ -1084,6 +1084,7 @@ mod runner {
                     provider_kind,
                     api_key.clone(),
                     endpoint.clone(),
+                    None,
                 ));
             let tool_ctx = crate::ai::tools::AiToolContext {
                 db: db.clone(),

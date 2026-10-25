@@ -345,6 +345,7 @@ async fn e2e_llm_tool_awareness() {
         crate::ai::config::AiProvider::OpenAI,
         api_key,
         Some(endpoint),
+        None,
     ));
 
     let ctx = crate::ai::tools::AiToolContext {
@@ -395,6 +396,7 @@ async fn anthropic_provider_completes_a_real_request() {
     let provider = crate::ai::providers::rig::RigProvider::new(
         crate::ai::config::AiProvider::Anthropic,
         api_key,
+        None,
         None,
     );
     let agent = provider

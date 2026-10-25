@@ -28,6 +28,8 @@ import {
   closeAllTabs,
   adaptPersistedMessage,
   persistConversationMessage,
+  setRunPhase,
+  isConvRunning,
   OPEN_TABS_STORAGE_KEY,
 } from './chat.svelte.ts';
 
@@ -998,3 +1000,45 @@ describe('persistConversationMessage', () => {
 });
 
 
+
+describe('run phase', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    chat.conversations = [];
+    chat.activeConversationId = null;
+    chat.isStreaming = false;
+  });
+
+  it('starts idle and syncs the global summary across conversations', () => {
+    const a = createConversation('conn-1');
+    const b = createConversation('conn-1');
+    expect(a.runPhase).toBe('idle');
+    chat.conversations = [a, b];
+    setRunPhase(a.id, 'running');
+    expect(isConvRunning(a.id)).toBe(true);
+    expect(isConvRunning(b.id)).toBe(false);
+    expect(chat.isStreaming).toBe(true);
+    setRunPhase(a.id, 'idle');
+    expect(chat.isStreaming).toBe(false);
+  });
+
+  it('openConversation shows the tab before hydration lands', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'load_chat_conversation') {
+        await new Promise((r) => setTimeout(r, 20));
+        return [];
+      }
+      if (cmd === 'list_chat_conversations') return [];
+      return undefined;
+    });
+    chat.conversations = [];
+    const pending = openConversation('conv-slow');
+    // The tab exists synchronously-ish: before hydration resolves.
+    await Promise.resolve();
+    expect(chat.conversations.map((c) => c.id)).toContain('conv-slow');
+    expect(chat.activeConversationId).toBe('conv-slow');
+    const conv = await pending;
+    expect(conv?.id).toBe('conv-slow');
+    expect(conv?.runPhase).toBe('idle');
+  });
+});

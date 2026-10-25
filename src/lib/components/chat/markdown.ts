@@ -38,6 +38,8 @@ const FORBIDDEN_MARKDOWN_TAGS = [
   'form',
   'script',
   'iframe',
+  'frame',
+  'frameset',
   'object',
   'embed',
   'style',
@@ -76,9 +78,16 @@ markdownRenderer.code = (token: Tokens.Code) => {
   return `<pre><code class="language-${normalizedLanguage}">${highlightSqlHtml(text)}</code></pre>\n`;
 };
 
+/** Maximum allowed length for markdown input to prevent CPU DoS / ReDoS (500k chars). */
+const MAX_MARKDOWN_LENGTH = 500_000;
+
 export function renderMarkdown(text: string): string {
   try {
-    const result = marked.parse(String(text ?? ''), {
+    let input = String(text ?? '');
+    if (input.length > MAX_MARKDOWN_LENGTH) {
+      input = input.slice(0, MAX_MARKDOWN_LENGTH) + '\n\n*(output truncated)*';
+    }
+    const result = marked.parse(input, {
       async: false,
       renderer: markdownRenderer,
     });
@@ -86,10 +95,11 @@ export function renderMarkdown(text: string): string {
     return DOMPurify.sanitize(html, {
       FORBID_TAGS: FORBIDDEN_MARKDOWN_TAGS,
       FORBID_ATTR: ['autofocus', 'style'],
-      // Only safe link protocols and relative paths, so `data:`, `javascript:`,
-      // `blob:`, and protocol-relative `//host` URLs are dropped.
+      // Only safe link protocols (http, https, mailto, tel) and relative paths,
+      // so `data:`, `javascript:`, `vbscript:`, `blob:`, `file:`, `vscode:`, and
+      // protocol-relative `//host` URLs are dropped.
       ALLOWED_URI_REGEXP:
-        /^(?:(?:(?:f|ht)tps?|mailto|tel):|(?:(?!\/\/)[^:]*?(?:[/?#]|$)))/i,
+        /^(?:(?:https?|mailto|tel):|(?!\/\/)(?:[^\/#?:][^\/#:]*)?(?:[\/?#]|$))/i,
     });
   } catch {
     return String(text ?? '')
@@ -99,6 +109,31 @@ export function renderMarkdown(text: string): string {
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
   }
+}
+
+/**
+ * Splits streaming content into a stable markdown prefix + a plain-text tail.
+ * Only splits on safe boundaries — never inside a fenced code block
+ * (odd ``` count), otherwise at the last blank line (a complete block
+ * boundary) — so the prefix never ends with a dangling open tag. The tail
+ * renders as text, keeping the marked + DOMPurify pipeline off the per-token
+ * path; only apply while a turn is streaming (completed messages render
+ * whole).
+ */
+export function splitStablePrefix(content: string): {
+  stable: string;
+  tail: string;
+} {
+  const fences = (content.match(/```/g) ?? []).length;
+  if (fences % 2 === 1) {
+    const lastFence = content.lastIndexOf('```');
+    return { stable: content.slice(0, lastFence), tail: content.slice(lastFence) };
+  }
+  const blankLine = content.lastIndexOf('\n\n');
+  if (blankLine > 0) {
+    return { stable: content.slice(0, blankLine), tail: content.slice(blankLine) };
+  }
+  return { stable: content, tail: '' };
 }
 
 /**

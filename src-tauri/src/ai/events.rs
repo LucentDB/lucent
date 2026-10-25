@@ -97,6 +97,10 @@ pub struct TokenUsage {
     /// Prompt tokens served from the provider's prefix cache (0 = no cache hit).
     #[serde(default)]
     pub cached_prompt_tokens: u32,
+    /// Cache-creation (write) tokens for this turn (Anthropic `cache_creation`
+    /// / ACP `cached_write`). 0 when the provider reports none.
+    #[serde(default)]
+    pub cached_write_prompt_tokens: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

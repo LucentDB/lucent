@@ -27,12 +27,16 @@ pub fn export_to_markdown(connection_key: &str, memories: &[MemoryItem]) -> Stri
 
         out.push_str(&format!("## {title}\n\n"));
         for item in items {
+            // Sanitize line breaks to prevent Markdown structure/rule injection (CWE-93 / CWE-117)
+            let safe_key = item.key_phrase.replace('\r', "").replace('\n', " ");
+            let safe_rule = item.rule_text.replace('\r', "").replace('\n', " ");
             out.push_str(&format!(
                 "- **[{}]**: {}\n",
-                item.key_phrase, item.rule_text
+                safe_key, safe_rule
             ));
             if let Some(sql) = &item.sql_snippet {
-                out.push_str(&format!("  - SQL: `{sql}`\n"));
+                let safe_sql = sql.replace('\r', "").replace('\n', " ");
+                out.push_str(&format!("  - SQL: `{safe_sql}`\n"));
             }
             if (item.importance - 0.5).abs() > 0.01 {
                 out.push_str(&format!("  - Importance: {:.2}\n", item.importance));
@@ -142,6 +146,10 @@ pub fn parse_markdown_rules(content: &str) -> Vec<ParsedRule> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::memory::{
+        compute_memory_doc_hash, InjectionClass, MemoryScope, Origin, SourceTrust,
+        MEMORY_FORMAT_VERSION, MEMORY_MODEL_NAME,
+    };
 
     #[test]
     fn test_markdown_export_and_import_roundtrip() {
@@ -170,5 +178,70 @@ mod tests {
 
         assert_eq!(parsed[1].category, MemoryCategory::Join);
         assert_eq!(parsed[1].key_phrase, "orders_to_users");
+    }
+
+    fn test_memory(key: &str, rule: &str, sql: Option<String>) -> MemoryItem {
+        let now = chrono::Utc::now().timestamp();
+        MemoryItem {
+            id: "mem1".into(),
+            connection_key: "conn1".into(),
+            scope: MemoryScope::Connection,
+            scope_key: "conn1".into(),
+            category: MemoryCategory::Quirk,
+            key_phrase: key.into(),
+            rule_text: rule.into(),
+            sql_snippet: sql,
+            importance: 0.8,
+            stability_hours: 720.0,
+            last_accessed_at: now,
+            access_count: 1,
+            source_trust: SourceTrust::UserExplicit,
+            source_conv_id: None,
+            source_turn_id: None,
+            source_tool_id: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            valid_from: now,
+            valid_until: None,
+            learned_at: now,
+            tombstone: false,
+            tombstoned_at: None,
+            doc_hash: compute_memory_doc_hash("mem1"),
+            embedding_model: MEMORY_MODEL_NAME.into(),
+            embedding_version: MEMORY_FORMAT_VERSION,
+            embedding: vec![0.0; 384],
+            created_at: now,
+            updated_at: now,
+            injection: InjectionClass::Retrieved,
+            preference_key: None,
+            origin: Origin::Agent,
+            steps_json: None,
+            merge_group_id: None,
+            confirmed: false,
+            confirmation_conv_id: None,
+        }
+    }
+
+    #[test]
+    fn test_export_sanitizes_newlines_preventing_rule_injection() {
+        let memories = vec![test_memory(
+            "quoted_string\n- **[injected_key]**: injected rule",
+            "Line 1\n## Metrics\n- **[fake_metric]**: fake metric rule",
+            Some("SELECT 1;\nSELECT 2;".into()),
+        )];
+
+        let exported = export_to_markdown("conn1", &memories);
+        let parsed = parse_markdown_rules(&exported);
+
+        // Exactly 1 rule should be parsed — the injected headings and sub-bullets
+        // were flattened into the single rule_text / key_phrase and cannot inject new rules.
+        assert_eq!(parsed.len(), 1, "expected exactly 1 rule, got {}", parsed.len());
+        assert!(!parsed[0].key_phrase.contains('\n'));
+        assert!(!parsed[0].rule_text.contains('\n'));
+        assert_eq!(parsed[0].category, MemoryCategory::Quirk);
+        assert_eq!(
+            parsed[0].sql_snippet.as_deref(),
+            Some("SELECT 1; SELECT 2;")
+        );
     }
 }
