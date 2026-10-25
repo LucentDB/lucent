@@ -285,32 +285,36 @@ fn test_ssh_get_secret_not_found() {
 
 #[test]
 fn test_set_password_with_empty_id_fails() {
-    // The keychain backend rejects empty "user" attributes.
-    // This test ensures we return a proper error and don't silently fail
-    // or crash when an empty profile ID reaches the keychain.
+    // Empty or whitespace profile and tunnel IDs should fail validation gracefully
     let result = set_password("", "hunter2");
-    match &result {
-        Err(e) => {
-            let msg = format!("{e}");
-            assert!(
-                !msg.is_empty(),
-                "error message should be descriptive, got empty"
-            );
-        }
-        Ok(()) => {
-            // Some platforms (e.g. Linux with secret-service) may accept
-            // empty attributes — that's OK, but we still want the test
-            // to document the behavior.
-        }
-    }
+    assert!(matches!(result, Err(KeychainError::Other(_))));
+    let ws_result = set_password("   ", "hunter2");
+    assert!(matches!(ws_result, Err(KeychainError::Other(_))));
+
+    let get_res = get_password("");
+    assert_eq!(get_res, Err(KeychainError::NotFound));
+    let get_ws = get_password("   ");
+    assert_eq!(get_ws, Err(KeychainError::NotFound));
+
+    let del_res = delete_password("");
+    assert!(del_res.is_ok());
+
+    let ssh_set = set_ssh_secret("", "secret");
+    assert!(matches!(ssh_set, Err(KeychainError::Other(_))));
+    let ssh_ws_set = set_ssh_secret("  ", "secret");
+    assert!(matches!(ssh_ws_set, Err(KeychainError::Other(_))));
+
+    let ssh_get = get_ssh_secret("");
+    assert_eq!(ssh_get, Err(KeychainError::NotFound));
+    let ssh_del = delete_ssh_secret("");
+    assert!(ssh_del.is_ok());
 }
 
 #[test]
 fn test_set_password_with_empty_id_does_not_panic() {
     // The keychain call must never panic even with pathological inputs.
     let result = set_password("", "hunter2");
-    // Any error or success is acceptable — the important thing is no panic.
-    let _ = result;
+    assert!(result.is_err());
 }
 
 #[tokio::test]

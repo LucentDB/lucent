@@ -345,6 +345,9 @@ impl std::fmt::Display for KeychainError {
 impl std::error::Error for KeychainError {}
 
 pub fn get_password(profile_id: &str) -> Result<String, KeychainError> {
+    if profile_id.trim().is_empty() {
+        return Err(KeychainError::NotFound);
+    }
     let entry = Entry::new(KEYCHAIN_SERVICE, profile_id)
         .map_err(|e| KeychainError::Other(e.to_string()))?;
     match entry.get_password() {
@@ -356,6 +359,11 @@ pub fn get_password(profile_id: &str) -> Result<String, KeychainError> {
 }
 
 pub fn set_password(profile_id: &str, password: &str) -> Result<(), KeychainError> {
+    if profile_id.trim().is_empty() {
+        return Err(KeychainError::Other(
+            "account ID cannot be empty".to_string(),
+        ));
+    }
     let entry = Entry::new(KEYCHAIN_SERVICE, profile_id)
         .map_err(|e| KeychainError::Other(e.to_string()))?;
     entry
@@ -364,6 +372,9 @@ pub fn set_password(profile_id: &str, password: &str) -> Result<(), KeychainErro
 }
 
 pub fn delete_password(profile_id: &str) -> Result<(), KeychainError> {
+    if profile_id.trim().is_empty() {
+        return Ok(());
+    }
     let entry = Entry::new(KEYCHAIN_SERVICE, profile_id)
         .map_err(|e| KeychainError::Other(e.to_string()))?;
     match entry.delete_credential() {
@@ -375,6 +386,9 @@ pub fn delete_password(profile_id: &str) -> Result<(), KeychainError> {
 
 /// SSH secret helpers
 pub fn get_ssh_secret(tunnel_id: &str) -> Result<String, KeychainError> {
+    if tunnel_id.trim().is_empty() {
+        return Err(KeychainError::NotFound);
+    }
     let entry = Entry::new(KEYCHAIN_SSH_SERVICE, tunnel_id)
         .map_err(|e| KeychainError::Other(e.to_string()))?;
     match entry.get_password() {
@@ -386,6 +400,11 @@ pub fn get_ssh_secret(tunnel_id: &str) -> Result<String, KeychainError> {
 }
 
 pub fn set_ssh_secret(tunnel_id: &str, secret: &str) -> Result<(), KeychainError> {
+    if tunnel_id.trim().is_empty() {
+        return Err(KeychainError::Other(
+            "account ID cannot be empty".to_string(),
+        ));
+    }
     let entry = Entry::new(KEYCHAIN_SSH_SERVICE, tunnel_id)
         .map_err(|e| KeychainError::Other(e.to_string()))?;
     entry
@@ -394,6 +413,9 @@ pub fn set_ssh_secret(tunnel_id: &str, secret: &str) -> Result<(), KeychainError
 }
 
 pub fn delete_ssh_secret(tunnel_id: &str) -> Result<(), KeychainError> {
+    if tunnel_id.trim().is_empty() {
+        return Ok(());
+    }
     let entry = Entry::new(KEYCHAIN_SSH_SERVICE, tunnel_id)
         .map_err(|e| KeychainError::Other(e.to_string()))?;
     match entry.delete_credential() {
