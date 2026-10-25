@@ -4,9 +4,7 @@
 //! rule learned mid-conversation cannot silently change the prompt the agent
 //! is already operating under.
 
-use crate::ai::memory::{
-    InjectionClass, MemoryItem, MemoryManager, MemoryScope, MemoryStatus,
-};
+use crate::ai::memory::{InjectionClass, MemoryItem, MemoryManager, MemoryScope, MemoryStatus};
 
 /// Default token budget for the always-on profile block. Mirrors the memory
 /// subsystem's small-block ceiling; a dedicated config knob does not exist yet.
