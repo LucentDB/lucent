@@ -275,7 +275,10 @@ fn check_expr(expr: &Expr) -> Result<(), GuardError> {
             Ok(())
         }
         Expr::Between {
-            expr, low, high, ..
+            expr,
+            low,
+            high,
+            ..
         } => {
             check_expr(expr)?;
             check_expr(low)?;

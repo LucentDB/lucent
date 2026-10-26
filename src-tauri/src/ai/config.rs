@@ -391,10 +391,7 @@ mod tests {
     #[test]
     fn acp_config_debug_redacts_env_secrets() {
         let mut env = HashMap::new();
-        env.insert(
-            "OPENAI_API_KEY".to_string(),
-            "sk-secret-1234567890".to_string(),
-        );
+        env.insert("OPENAI_API_KEY".to_string(), "sk-secret-1234567890".to_string());
         let acp = AcpAgentConfig {
             agent_id: "test-agent".to_string(),
             command: None,
