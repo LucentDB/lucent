@@ -7,11 +7,35 @@ use std::path::{Path, PathBuf};
 /// full command line); the launcher (phase C) runs `cmd` with `args` and
 /// `env` — the manifest's npx/uvx entries are resolved here at install time
 /// into this shape so the launcher never has to re-parse a shell line.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct LaunchSpec {
     pub cmd: String,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
+}
+
+impl std::fmt::Debug for LaunchSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted_env: HashMap<String, String> = self
+            .env
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    if v.is_empty() {
+                        String::new()
+                    } else {
+                        "***".to_string()
+                    },
+                )
+            })
+            .collect();
+        f.debug_struct("LaunchSpec")
+            .field("cmd", &self.cmd)
+            .field("args", &self.args)
+            .field("env", &redacted_env)
+            .finish()
+    }
 }
 
 /// A successfully installed agent, persisted as `installed.json` next to its
@@ -723,5 +747,20 @@ mod tests {
             tar.append_data(&mut header, *name, *data).unwrap();
         }
         tar.into_inner().unwrap().finish().unwrap();
+    }
+
+    #[test]
+    fn launch_spec_debug_redacts_env_secrets() {
+        let mut env = HashMap::new();
+        env.insert("API_SECRET".to_string(), "supersecretkey".to_string());
+        let spec = LaunchSpec {
+            cmd: "node".to_string(),
+            args: vec!["index.js".to_string()],
+            env,
+        };
+        let debug_str = format!("{spec:?}");
+        assert!(!debug_str.contains("supersecretkey"));
+        assert!(debug_str.contains("***"));
+        assert!(debug_str.contains("API_SECRET"));
     }
 }

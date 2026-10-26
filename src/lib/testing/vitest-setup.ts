@@ -11,3 +11,15 @@ class ResizeObserverStub {
 }
 
 globalThis.ResizeObserver ??= ResizeObserverStub;
+
+if (typeof Element !== 'undefined' && !Element.prototype.animate) {
+  Element.prototype.animate = function () {
+    return {
+      finished: Promise.resolve(),
+      cancel: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      onfinish: null,
+    } as any;
+  };
+}
