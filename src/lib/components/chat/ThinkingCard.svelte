@@ -35,7 +35,12 @@
 </script>
 
 <div class="tc">
-  <button class="tc-hdr" onclick={() => (open = !open)} type="button">
+  <button
+    class="tc-hdr"
+    onclick={() => (open = !open)}
+    type="button"
+    aria-expanded={open}
+  >
     <span class="tc-label">{formatDuration(durationMs)}</span>
     <svg
       class="tc-chevron"
