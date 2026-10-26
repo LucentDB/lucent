@@ -40,7 +40,7 @@ impl std::fmt::Display for AiProvider {
 /// ACP provider selection: an installed registry agent driven over the
 /// Agent Client Protocol (spec §4.7/D8). The agent owns model choice, so
 /// `model` / `max_tokens` / `endpoint` are ignored on this path.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpAgentConfig {
     /// Registry id, e.g. "opencode" | "claude-acp".
@@ -55,6 +55,31 @@ pub struct AcpAgentConfig {
     /// When true, agent permission requests are auto-rejected without a dialog.
     #[serde(default)]
     pub auto_deny_permissions: bool,
+}
+
+impl std::fmt::Debug for AcpAgentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted_env: HashMap<String, String> = self
+            .env
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    if v.is_empty() {
+                        String::new()
+                    } else {
+                        "***".to_string()
+                    },
+                )
+            })
+            .collect();
+        f.debug_struct("AcpAgentConfig")
+            .field("agent_id", &self.agent_id)
+            .field("command", &self.command)
+            .field("env", &redacted_env)
+            .field("auto_deny_permissions", &self.auto_deny_permissions)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -200,10 +225,7 @@ pub fn load_config_from_disk() -> AiConfig {
         log::warn!("Failed to parse AI config: {e}, using defaults");
         AiConfig::default()
     });
-    log::debug!(
-        "AI config loaded from {path:?}: {}",
-        serde_json::to_string(&config).unwrap_or_default()
-    );
+    log::debug!("AI config loaded from {path:?}: {config:?}");
     config
 }
 
@@ -364,5 +386,21 @@ mod tests {
             parsed.provider_models.get(&AiProvider::Anthropic),
             Some(&"claude-sonnet-5".to_string())
         );
+    }
+
+    #[test]
+    fn acp_config_debug_redacts_env_secrets() {
+        let mut env = HashMap::new();
+        env.insert("OPENAI_API_KEY".to_string(), "sk-secret-1234567890".to_string());
+        let acp = AcpAgentConfig {
+            agent_id: "test-agent".to_string(),
+            command: None,
+            env,
+            auto_deny_permissions: false,
+        };
+        let debug_str = format!("{acp:?}");
+        assert!(!debug_str.contains("sk-secret-1234567890"));
+        assert!(debug_str.contains("***"));
+        assert!(debug_str.contains("OPENAI_API_KEY"));
     }
 }
