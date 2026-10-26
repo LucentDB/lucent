@@ -15,8 +15,11 @@
     onCopy?: (sql: string) => void;
   } = $props();
 
+  // Avoid sql.split('\n')[0] as split() allocates an array for all lines in multi-line SQL queries.
+  // Using indexOf('\n') + slice() extracts the first line without intermediate array allocations.
   function truncateSql(sql: string, maxLen = 80): string {
-    const line = sql.split('\n')[0];
+    const nl = sql.indexOf('\n');
+    const line = nl === -1 ? sql : sql.slice(0, nl);
     return line.length > maxLen ? line.slice(0, maxLen) + '…' : line;
   }
 
