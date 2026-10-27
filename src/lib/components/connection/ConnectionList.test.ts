@@ -41,4 +41,32 @@ describe('ConnectionList accessible elements', () => {
       screen.getByRole('button', { name: 'Toggle view mode' }),
     ).not.toBeNull();
   });
+
+  it('focuses search input when / is pressed and clears search on Escape', async () => {
+    const { fireEvent } = await import('@testing-library/svelte');
+    render(ConnectionList, {
+      props: {
+        profiles: [sampleProfile],
+        groupedProfiles: [{ name: 'Default', profiles: [sampleProfile] }],
+        loading: false,
+        activeProfileId: null,
+        testingIds: new Set<string>(),
+      },
+    });
+
+    const searchInput = screen.getByRole('textbox', {
+      name: 'Search connections',
+    }) as HTMLInputElement;
+
+    expect(document.activeElement).not.toBe(searchInput);
+
+    await fireEvent.keyDown(window, { key: '/' });
+    expect(document.activeElement).toBe(searchInput);
+
+    await fireEvent.input(searchInput, { target: { value: 'test' } });
+    expect(searchInput.value).toBe('test');
+
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    expect(searchInput.value).toBe('');
+  });
 });
