@@ -40,11 +40,15 @@ fn finalize_active_thinking(segs: &mut [serde_json::Value]) {
     let now_ms = chrono::Utc::now().timestamp_millis();
     if let Some(last) = segs.last_mut() {
         if last.get("type").and_then(|v| v.as_str()) == Some("thinking")
-            && last.get("streaming").and_then(|v| v.as_bool()).unwrap_or(false)
+            && last
+                .get("streaming")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
         {
             last["streaming"] = serde_json::Value::Bool(false);
             if let Some(started) = last.get("startedAt").and_then(|v| v.as_i64()) {
-                last["durationMs"] = serde_json::Value::Number(serde_json::Number::from((now_ms - started).max(0)));
+                last["durationMs"] =
+                    serde_json::Value::Number(serde_json::Number::from((now_ms - started).max(0)));
             }
         }
     }
@@ -58,7 +62,10 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
                 let now_ms = chrono::Utc::now().timestamp_millis();
                 if let Some(last) = segs.last_mut() {
                     if last.get("type").and_then(|v| v.as_str()) == Some("thinking")
-                        && last.get("streaming").and_then(|v| v.as_bool()).unwrap_or(false)
+                        && last
+                            .get("streaming")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
                     {
                         if let Some(c) = last.get_mut("content") {
                             if let Some(s) = c.as_str() {
@@ -112,7 +119,14 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
                     }));
                 }
             }
-            crate::ai::events::AiEvent::ToolResult { id, summary, output, input, status, .. } => {
+            crate::ai::events::AiEvent::ToolResult {
+                id,
+                summary,
+                output,
+                input,
+                status,
+                ..
+            } => {
                 let mut segs = self.turn_segments.lock().unwrap();
                 for seg in segs.iter_mut() {
                     if seg.get("type").and_then(|v| v.as_str()) == Some("tool_call") {
@@ -126,7 +140,9 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
                                     call["args"] = inp.clone();
                                 }
                                 call["status"] = serde_json::Value::String(match status {
-                                    crate::ai::events::ToolResultStatus::Completed => "completed".into(),
+                                    crate::ai::events::ToolResultStatus::Completed => {
+                                        "completed".into()
+                                    }
                                     crate::ai::events::ToolResultStatus::Failed => "failed".into(),
                                 });
                             }
@@ -155,7 +171,10 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
                 }
 
                 let state = self.app_handle.state::<AppState>();
-                let mut entry = state.llm_usage.entry(self.conversation_id.clone()).or_default();
+                let mut entry = state
+                    .llm_usage
+                    .entry(self.conversation_id.clone())
+                    .or_default();
                 let accumulated = accumulate_usage(&entry, usage);
                 *entry = accumulated;
 
@@ -168,12 +187,15 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
 
                 let session_json = if !segs.is_empty() {
                     let now_ms = chrono::Utc::now().timestamp_millis();
-                    Some(serde_json::json!({
-                        "segments": *segs,
-                        "startedAt": self.turn_start_ms,
-                        "durationMs": (now_ms - self.turn_start_ms).max(0),
-                        "active": false,
-                    }).to_string())
+                    Some(
+                        serde_json::json!({
+                            "segments": *segs,
+                            "startedAt": self.turn_start_ms,
+                            "durationMs": (now_ms - self.turn_start_ms).max(0),
+                            "active": false,
+                        })
+                        .to_string(),
+                    )
                 } else {
                     None
                 };
@@ -181,7 +203,9 @@ impl<R: tauri::Runtime> AgentSink for TauriSink<R> {
                 if !content.is_empty() || session_json.is_some() {
                     let mem_mgr = state.memory_manager.clone();
                     let conv_id = self.conversation_id.clone();
-                    let msg_id = self.assistant_message_id.clone()
+                    let msg_id = self
+                        .assistant_message_id
+                        .clone()
                         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                     let now = chrono::Utc::now().timestamp();
                     tauri::async_runtime::spawn(async move {
@@ -409,9 +433,12 @@ pub struct AppState {
     /// `Clone` is cheap — the chat driver takes a copy per turn.
     pub acp: crate::ai::acp::AcpState,
     /// External agent endpoint context providing isolated MCP access.
-    pub external_endpoint_context: Arc<crate::ai::external_endpoint::executor::ExternalEndpointContext>,
+    pub external_endpoint_context:
+        Arc<crate::ai::external_endpoint::executor::ExternalEndpointContext>,
     /// External agent endpoint manager hosting the Unix domain socket listener.
-    pub external_endpoint_manager: Arc<tokio::sync::Mutex<Option<crate::ai::external_endpoint::server::ExternalEndpointManager>>>,
+    pub external_endpoint_manager: Arc<
+        tokio::sync::Mutex<Option<crate::ai::external_endpoint::server::ExternalEndpointManager>>,
+    >,
 }
 
 impl Default for AppState {
@@ -453,17 +480,19 @@ impl AppState {
             }),
         );
 
-        let external_endpoint_context = Arc::new(crate::ai::external_endpoint::executor::ExternalEndpointContext {
-            client: client.clone(),
-            external_ai_connection_id: external_ai_connection_id.clone(),
-            schema_graph: schema_graph.clone(),
-            embedder: embedder.clone(),
-            capabilities: driver_capabilities.clone(),
-            active_profile: Arc::new(tokio::sync::Mutex::new(None)),
-            inode_tracker: Arc::new(tokio::sync::Mutex::new(None)),
-            reopen_lock: Arc::new(tokio::sync::Mutex::new(())),
-            memory_manager: memory_manager.clone(),
-        });
+        let external_endpoint_context = Arc::new(
+            crate::ai::external_endpoint::executor::ExternalEndpointContext {
+                client: client.clone(),
+                external_ai_connection_id: external_ai_connection_id.clone(),
+                schema_graph: schema_graph.clone(),
+                embedder: embedder.clone(),
+                capabilities: driver_capabilities.clone(),
+                active_profile: Arc::new(tokio::sync::Mutex::new(None)),
+                inode_tracker: Arc::new(tokio::sync::Mutex::new(None)),
+                reopen_lock: Arc::new(tokio::sync::Mutex::new(())),
+                memory_manager: memory_manager.clone(),
+            },
+        );
 
         let external_endpoint_manager = Arc::new(tokio::sync::Mutex::new(None));
 
@@ -471,9 +500,16 @@ impl AppState {
             let ctx = external_endpoint_context.clone();
             let mgr = external_endpoint_manager.clone();
             let start_endpoint = async move {
-                match crate::ai::external_endpoint::server::ExternalEndpointManager::start(ctx, None).await {
+                match crate::ai::external_endpoint::server::ExternalEndpointManager::start(
+                    ctx, None,
+                )
+                .await
+                {
                     Ok(started) => {
-                        log::info!("External MCP endpoint started at {}", started.socket_path.display());
+                        log::info!(
+                            "External MCP endpoint started at {}",
+                            started.socket_path.display()
+                        );
                         *mgr.lock().await = Some(started);
                     }
                     Err(e) => {
@@ -1773,17 +1809,33 @@ fn load_approved_paths() -> std::collections::HashSet<std::path::PathBuf> {
 /// Write the approved-path set back to disk. Best-effort: a persistence
 /// failure must not fail the dialog flow the user already completed.
 async fn persist_approved_paths(state: &AppState) -> Result<(), CommandError> {
-    let paths = state.approved_save_paths.lock().await.clone();
     let file = approved_paths_file()?;
+    persist_approved_paths_to_file(state, &file).await
+}
+
+pub(crate) async fn persist_approved_paths_to_file(
+    state: &AppState,
+    file: &std::path::Path,
+) -> Result<(), CommandError> {
+    let paths = state.approved_save_paths.lock().await.clone();
     let list: Vec<String> = paths
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
     std::fs::write(
-        &file,
+        file,
         serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()),
     )
-    .map_err(|e| CommandError::new("PathError", format!("cannot persist approved paths: {e}")))
+    .map_err(|e| CommandError::new("PathError", format!("cannot persist approved paths: {e}")))?;
+
+    // Restrict permissions to user-only read/write (0o600) on Unix to prevent unauthorized access
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600));
+    }
+
+    Ok(())
 }
 
 /// Shared body for `choose_save_path` / `choose_export_path`: show a native
@@ -3102,7 +3154,10 @@ pub(crate) async fn run_agent_turn<R: tauri::Runtime>(
                 "ai:error",
                 AiErrorPayload {
                     conversation_id: conversation_id.clone(),
-                    message: format!("Agent timed out after 300 seconds. Try simplifying the question.{}", stderr_note)
+                    message: format!(
+                        "Agent timed out after 300 seconds. Try simplifying the question.{}",
+                        stderr_note
+                    ),
                 },
             );
             let mut s = conv_err.lock().await;
@@ -4955,6 +5010,36 @@ mod path_security_tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[tokio::test]
+    async fn test_persist_approved_paths_sets_restricted_permissions() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let test_file = temp_dir.path().join("approved_save_paths.json");
+
+        let state = super::AppState::new();
+        state
+            .approved_save_paths
+            .lock()
+            .await
+            .insert(std::path::PathBuf::from("/tmp/test_approved.sql"));
+
+        super::persist_approved_paths_to_file(&state, &test_file)
+            .await
+            .expect("persist approved paths should succeed");
+
+        assert!(test_file.exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = std::fs::metadata(&test_file).unwrap();
+            let mode = metadata.permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "approved paths file permissions should be 0o600"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -5278,7 +5363,8 @@ mod manual_memory_injection_tests {
     /// these tests never touch the real `memory.db` or load an ONNX model.
     fn state() -> AppState {
         let mut state = AppState::new();
-        state.memory_manager = Arc::new(crate::ai::memory::MemoryManager::open_in_memory().unwrap());
+        state.memory_manager =
+            Arc::new(crate::ai::memory::MemoryManager::open_in_memory().unwrap());
         state.memory_embedder_test_gate = Some(Arc::new(MemoryEmbedderTestGate::unavailable()));
         state
     }
@@ -5536,10 +5622,7 @@ mod manual_memory_injection_tests {
         assert_eq!(segments[1]["call"]["name"], "run_readonly_query");
         assert_eq!(segments[1]["call"]["status"], "completed");
         assert_eq!(segments[1]["call"]["summary"], "1 row");
-        assert_eq!(
-            segments[1]["call"]["output"]["rows"][0][0],
-            "42"
-        );
+        assert_eq!(segments[1]["call"]["output"]["rows"][0][0], "42");
 
         // Verify usage was keyed by conv_id
         let usage = super::get_ai_usage(app_state, conv_id).await.unwrap();
