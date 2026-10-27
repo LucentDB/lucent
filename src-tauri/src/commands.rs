@@ -1773,17 +1773,33 @@ fn load_approved_paths() -> std::collections::HashSet<std::path::PathBuf> {
 /// Write the approved-path set back to disk. Best-effort: a persistence
 /// failure must not fail the dialog flow the user already completed.
 async fn persist_approved_paths(state: &AppState) -> Result<(), CommandError> {
-    let paths = state.approved_save_paths.lock().await.clone();
     let file = approved_paths_file()?;
+    persist_approved_paths_to_file(state, &file).await
+}
+
+pub(crate) async fn persist_approved_paths_to_file(
+    state: &AppState,
+    file: &std::path::Path,
+) -> Result<(), CommandError> {
+    let paths = state.approved_save_paths.lock().await.clone();
     let list: Vec<String> = paths
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
     std::fs::write(
-        &file,
+        file,
         serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()),
     )
-    .map_err(|e| CommandError::new("PathError", format!("cannot persist approved paths: {e}")))
+    .map_err(|e| CommandError::new("PathError", format!("cannot persist approved paths: {e}")))?;
+
+    // Restrict permissions to user-only read/write (0o600) on Unix to prevent unauthorized access
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600));
+    }
+
+    Ok(())
 }
 
 /// Shared body for `choose_save_path` / `choose_export_path`: show a native
@@ -4954,6 +4970,33 @@ mod path_security_tests {
         assert!(super::validate_approved(&dir.join("ok.csv"), &approved).is_ok());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_persist_approved_paths_sets_restricted_permissions() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let test_file = temp_dir.path().join("approved_save_paths.json");
+
+        let state = super::AppState::new();
+        state
+            .approved_save_paths
+            .lock()
+            .await
+            .insert(std::path::PathBuf::from("/tmp/test_approved.sql"));
+
+        super::persist_approved_paths_to_file(&state, &test_file)
+            .await
+            .expect("persist approved paths should succeed");
+
+        assert!(test_file.exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = std::fs::metadata(&test_file).unwrap();
+            let mode = metadata.permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "approved paths file permissions should be 0o600");
+        }
     }
 }
 
