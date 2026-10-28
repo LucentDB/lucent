@@ -70,4 +70,11 @@ describe('toCsv', () => {
   it('neutralizes formula triggers before RFC 4180 quoting', () => {
     expect(toCsv([['=1,2']])).toBe('"\'=1,2"');
   });
+
+  it('neutralizes formula triggers preceded by leading whitespace, newlines, or pipes', () => {
+    expect(toCsv([['  =SUM(1)']])).toBe("'  =SUM(1)");
+    expect(toCsv([['\n=CMD']])).toBe('"\'\n=CMD"');
+    expect(toCsv([['|cmd']])).toBe("'|cmd");
+    expect(toCsv([[' \t +10']])).toBe("' \t +10");
+  });
 });
