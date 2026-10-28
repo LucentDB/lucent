@@ -8,12 +8,9 @@ const mockLoadChatConversation = vi.fn();
 const mockDeleteChatConversation = vi.fn();
 
 vi.mock('../../ipc/ai.ts', () => ({
-  listChatConversations: (...args: unknown[]) =>
-    mockListChatConversations(...args),
-  loadChatConversation: (...args: unknown[]) =>
-    mockLoadChatConversation(...args),
-  deleteChatConversation: (...args: unknown[]) =>
-    mockDeleteChatConversation(...args),
+  listChatConversations: (...args: unknown[]) => mockListChatConversations(...args),
+  loadChatConversation: (...args: unknown[]) => mockLoadChatConversation(...args),
+  deleteChatConversation: (...args: unknown[]) => mockDeleteChatConversation(...args),
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({
