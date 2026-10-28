@@ -69,7 +69,15 @@
   function handleScroll() {
     followTail = nearBottom();
   }
+
+  function handleKeydown(e) {
+    if (e.key === 'Escape') {
+      onClose?.();
+    }
+  }
 </script>
+
+<svelte:window onkeydown={handleKeydown} />
 
 <div class="logs-drawer" role="region" aria-label="Worker stderr logs">
   <header class="drawer-header">
