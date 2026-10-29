@@ -78,14 +78,19 @@ fn csv_format_value(v: &serde_json::Value, null_str: &str, delimiter: char) -> S
 /// Excel/Sheets evaluates exported cells as formulas — CWE-1236 CSV injection (S2).
 /// Applied BEFORE quoting so the prefix also protects cells that need RFC-4180 quoting.
 fn neutralize_formula(s: &str) -> Cow<'_, str> {
-    match s.trim_start().chars().next() {
-        Some('=' | '+' | '-' | '@' | '\t' | '\r' | '\n' | '|') => {
-            let mut out = String::with_capacity(s.len() + 1);
-            out.push('\'');
-            out.push_str(s);
-            Cow::Owned(out)
-        }
-        _ => Cow::Borrowed(s),
+    let raw_first = s.chars().next();
+    let trimmed_first = s.trim_start().chars().next();
+
+    let is_trigger = matches!(raw_first, Some('\t' | '\r' | '\n'))
+        || matches!(trimmed_first, Some('=' | '+' | '-' | '@' | '|' | '%'));
+
+    if is_trigger {
+        let mut out = String::with_capacity(s.len() + 1);
+        out.push('\'');
+        out.push_str(s);
+        Cow::Owned(out)
+    } else {
+        Cow::Borrowed(s)
     }
 }
 
