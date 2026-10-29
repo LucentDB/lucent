@@ -381,13 +381,13 @@ fn csv_neutralizes_triggers_with_whitespace_newlines_and_pipes() {
         serde_json::json!("  =SUM(1)"),
         serde_json::json!("\n=CMD"),
         serde_json::json!("|cmd"),
-        serde_json::json!(" \t +10"),
+        serde_json::json!("%10"),
     ]];
     let csv = format_csv(&columns, &rows, &ExportOptions::default());
     assert!(csv.contains("'  =SUM(1)"), "got: {csv}");
     assert!(csv.contains("\"'\n=CMD\""), "got: {csv}");
     assert!(csv.contains("'|cmd"), "got: {csv}");
-    assert!(csv.contains("' \t +10"), "got: {csv}");
+    assert!(csv.contains("'%10"), "got: {csv}");
 }
 
 #[test]
