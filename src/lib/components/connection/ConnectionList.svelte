@@ -90,7 +90,9 @@
   }
 </script>
 
-<div class="connection-list" onkeydown={handleGlobalKeydown}>
+<svelte:window onkeydown={handleGlobalKeydown} />
+
+<div class="connection-list">
   <!-- Toolbar -->
   <div class="list-toolbar">
     <div class="search-wrapper">
