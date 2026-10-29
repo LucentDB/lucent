@@ -942,4 +942,3 @@ describe('sendMessage', () => {
     expect(chat.isStreaming).toBe(true);
   });
 });
-
