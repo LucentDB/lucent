@@ -43,11 +43,7 @@ impl DuckHandle {
         Self::open_ext(path, read_only, true)
     }
 
-    pub fn open_ext(
-        path: &str,
-        read_only: bool,
-        external_access: bool,
-    ) -> Result<Self, LucentError> {
+    pub fn open_ext(path: &str, read_only: bool, external_access: bool) -> Result<Self, LucentError> {
         let mut config = Config::default();
         config = config
             .access_mode(if read_only {
