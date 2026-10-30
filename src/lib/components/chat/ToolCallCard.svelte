@@ -33,8 +33,13 @@
   // preview: an agent that reports a tool's stdout would otherwise fill the
   // header with the Markdown row preview that the body already renders.
   const STATUS_MAX = 80;
+  // Bolt optimization: Extract first line using indexOf + slice rather than
+  // split('\n', 1)[0] to avoid allocating intermediate string arrays for multi-line summaries.
   function statusText(summary: string): string {
-    const line = summary.split('\n', 1)[0].trim();
+    const newlineIdx = summary.indexOf('\n');
+    const line = (
+      newlineIdx === -1 ? summary : summary.slice(0, newlineIdx)
+    ).trim();
     return line.length > STATUS_MAX
       ? `${line.slice(0, STATUS_MAX - 1)}…`
       : line;
