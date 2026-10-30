@@ -306,18 +306,38 @@ pub async fn install(
     Ok(installed)
 }
 
-/// Reads the persisted install for an agent id. `Ok(None)` when nothing is
-/// installed; `Err` for an unsafe id or an unreadable/parse-broken
-/// `installed.json`.
-pub fn read_installed(id: &str) -> Result<Option<InstalledAgent>, String> {
+/// Reads the persisted install for an agent id from a given agents directory.
+pub fn read_installed_at(agents_dir: &Path, id: &str) -> Result<Option<InstalledAgent>, String> {
     validate_agent_id(id)?;
-    let path = agents_dir()?.join(id).join("installed.json");
+    let path = agents_dir.join(id).join("installed.json");
     match std::fs::read_to_string(&path) {
         Ok(json) => serde_json::from_str(&json)
             .map(Some)
             .map_err(|e| format!("parse installed.json: {e}")),
         Err(_) => Ok(None),
     }
+}
+
+/// Reads the persisted install for an agent id in default agents_dir. `Ok(None)` when nothing is
+/// installed; `Err` for an unsafe id or an unreadable/parse-broken
+/// `installed.json`.
+pub fn read_installed(id: &str) -> Result<Option<InstalledAgent>, String> {
+    let dir = agents_dir()?;
+    read_installed_at(&dir, id)
+}
+
+/// Lists every installed agent from a specific agents directory.
+pub fn list_installed_at(agents_dir: &Path) -> Vec<InstalledAgent> {
+    let Ok(entries) = std::fs::read_dir(agents_dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let id = e.file_name().to_string_lossy().into_owned();
+            read_installed_at(agents_dir, &id).ok().flatten()
+        })
+        .collect()
 }
 
 /// Lists every installed agent (one entry per `~/.lucent/agents/<id>/installed.json`).
@@ -327,16 +347,7 @@ pub fn list_installed() -> Vec<InstalledAgent> {
     let Ok(dir) = agents_dir() else {
         return Vec::new();
     };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let id = e.file_name().to_string_lossy().into_owned();
-            read_installed(&id).ok().flatten()
-        })
-        .collect()
+    list_installed_at(&dir)
 }
 
 /// Removes an installed agent (its whole directory). No-op when not installed.
@@ -484,13 +495,7 @@ mod tests {
         // install) must be skipped, not returned as a bogus entry.
         std::fs::create_dir_all(agents.join("no-metadata")).unwrap();
 
-        let prev_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", tmp.path());
-        let listed = list_installed();
-        match prev_home {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
-        }
+        let listed = list_installed_at(&agents);
 
         let mut ids: Vec<_> = listed.iter().map(|a| a.id.as_str()).collect();
         ids.sort();

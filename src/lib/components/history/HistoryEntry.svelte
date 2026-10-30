@@ -15,10 +15,16 @@
     onCopy?: (sql: string) => void;
   } = $props();
 
+  // Bolt optimization: Extract first line using indexOf + slice rather than
+  // split('\n')[0] to avoid allocating intermediate string arrays for multi-line SQL.
   function truncateSql(sql: string, maxLen = 80): string {
-    const line = sql.split('\n')[0];
+    const newlineIdx = sql.indexOf('\n');
+    const line = newlineIdx === -1 ? sql : sql.slice(0, newlineIdx);
     return line.length > maxLen ? line.slice(0, maxLen) + '…' : line;
   }
+
+  // Derived to avoid evaluating truncateSql twice per render pass for aria-label and UI.
+  let truncatedSql = $derived(truncateSql(entry.sql));
 
   function formatDuration(ms: number): string {
     if (ms < 1) return '<1ms';
@@ -54,10 +60,10 @@
   <button
     type="button"
     class="entry-main"
-    aria-label="Rerun query: {truncateSql(entry.sql)}"
+    aria-label="Rerun query: {truncatedSql}"
     onclick={() => onRerun?.(entry.sql)}
   >
-    <div class="entry-sql">{truncateSql(entry.sql)}</div>
+    <div class="entry-sql">{truncatedSql}</div>
     <div class="entry-meta">
       <span class="meta-duration" class:slow={entry.durationMs > 1000}>
         {formatDuration(entry.durationMs)}
