@@ -56,8 +56,8 @@ impl GetPreflightContext {
         )
         .await;
 
-        let content =
-            preflight.unwrap_or_else(|| "No preflight hints found for the given prompt.".to_string());
+        let content = preflight
+            .unwrap_or_else(|| "No preflight hints found for the given prompt.".to_string());
 
         Ok(ToolOutput::Text { content })
     }
