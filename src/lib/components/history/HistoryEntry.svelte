@@ -15,8 +15,12 @@
     onCopy?: (sql: string) => void;
   } = $props();
 
+  // Optimization: use indexOf('\n') and slice to extract first line without allocating
+  // intermediate arrays for all lines via split('\n'), avoiding heavy memory allocations
+  // across large query history lists.
   function truncateSql(sql: string, maxLen = 80): string {
-    const line = sql.split('\n')[0];
+    const nl = sql.indexOf('\n');
+    const line = nl === -1 ? sql : sql.slice(0, nl);
     return line.length > maxLen ? line.slice(0, maxLen) + '…' : line;
   }
 

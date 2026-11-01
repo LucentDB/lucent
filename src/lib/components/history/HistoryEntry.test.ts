@@ -51,4 +51,17 @@ describe('HistoryEntry accessibility', () => {
       screen.getByRole('button', { name: 'Unfavorite query' }),
     ).toBeDefined();
   });
+
+  it('correctly extracts and truncates the first line of multi-line SQL queries', () => {
+    const multiLineEntry: HistoryEntryType = {
+      ...sampleEntry,
+      sql: 'SELECT id, name, created_at FROM users\nWHERE active = true\nORDER BY id DESC;',
+    };
+    render(HistoryEntry, { entry: multiLineEntry });
+
+    const mainBtn = screen.getByRole('button', {
+      name: /rerun query: select id, name, created_at from users/i,
+    });
+    expect(mainBtn).toBeDefined();
+  });
 });
