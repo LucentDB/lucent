@@ -6,12 +6,12 @@
     loading = false,
     onInstall,
     onUninstall,
-  } = $props<{
+  }: {
     agents: RegistryAgentSummary[];
     loading: boolean;
     onInstall: (id: string) => void;
     onUninstall: (id: string) => void;
-  }>();
+  } = $props();
 </script>
 
 {#if loading}
