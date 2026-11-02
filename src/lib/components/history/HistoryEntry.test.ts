@@ -51,4 +51,32 @@ describe('HistoryEntry accessibility', () => {
       screen.getByRole('button', { name: 'Unfavorite query' }),
     ).toBeDefined();
   });
+
+  it('correctly handles multi-line SQL queries without allocating unnecessary lines', () => {
+    const multiLineEntry: HistoryEntryType = {
+      ...sampleEntry,
+      sql: 'SELECT id, name\nFROM users\nWHERE active = true;',
+    };
+    render(HistoryEntry, { entry: multiLineEntry });
+
+    const mainBtn = screen.getByRole('button', {
+      name: /rerun query: select id, name/i,
+    });
+    expect(mainBtn).toBeDefined();
+  });
+
+  it('correctly truncates SQL queries longer than 80 chars on the first line', () => {
+    const longEntry: HistoryEntryType = {
+      ...sampleEntry,
+      sql: 'SELECT ' + 'a'.repeat(90) + ' FROM tbl;\nSELECT 2;',
+    };
+    render(HistoryEntry, { entry: longEntry });
+
+    const expectedTruncated =
+      ('SELECT ' + 'a'.repeat(90) + ' FROM tbl;').slice(0, 80) + '…';
+    const mainBtn = screen.getByRole('button', {
+      name: new RegExp(`rerun query: ${expectedTruncated}`, 'i'),
+    });
+    expect(mainBtn).toBeDefined();
+  });
 });
