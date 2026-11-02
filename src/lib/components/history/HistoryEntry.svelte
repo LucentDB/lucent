@@ -15,8 +15,14 @@
     onCopy?: (sql: string) => void;
   } = $props();
 
+  // Performance optimization (Bolt): Avoid allocating intermediate string arrays with sql.split('\n')[0].
+  // Using indexOf('\n') + slice() avoids allocating an array of strings for all lines in multi-line queries.
   function truncateSql(sql: string, maxLen = 80): string {
-    const line = sql.split('\n')[0];
+    const newlineIndex = sql.indexOf('\n');
+    let line = newlineIndex === -1 ? sql : sql.slice(0, newlineIndex);
+    if (line.endsWith('\r')) {
+      line = line.slice(0, -1);
+    }
     return line.length > maxLen ? line.slice(0, maxLen) + '…' : line;
   }
 

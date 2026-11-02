@@ -580,11 +580,7 @@ impl MemoryManager {
     /// merge is a traversable DAG edge rather than a destructive overwrite.
     /// The keeper is never superseded even if it appears in `fold_ids`, and a
     /// fold id with no matching row is skipped without error (defensive).
-    pub async fn merge_memories(
-        &self,
-        keep_id: &str,
-        fold_ids: &[String],
-    ) -> Result<(), String> {
+    pub async fn merge_memories(&self, keep_id: &str, fold_ids: &[String]) -> Result<(), String> {
         let mut guard = self.conn.lock().await;
         let now = chrono::Utc::now().timestamp();
         let merge_group_id = uuid::Uuid::new_v4().to_string();
@@ -838,10 +834,7 @@ impl MemoryManager {
     }
 
     // ── Observations ──────────────────────────────────────────────────────────
-    pub async fn record_observation(
-        &self,
-        obs: Observation,
-    ) -> Result<ObservationOutcome, String> {
+    pub async fn record_observation(&self, obs: Observation) -> Result<ObservationOutcome, String> {
         let guard = self.conn.lock().await;
         let now = chrono::Utc::now().timestamp();
 
@@ -1128,10 +1121,12 @@ impl MemoryManager {
             params![msg.conversation_id, msg.created_at],
         ).map_err(|e| format!("failed to ensure parent conversation: {e}"))?;
 
-        guard.execute(
-            "UPDATE chat_conversations SET updated_at = ?1 WHERE id = ?2",
-            params![msg.created_at, msg.conversation_id],
-        ).map_err(|e| format!("failed to update conversation updated_at: {e}"))?;
+        guard
+            .execute(
+                "UPDATE chat_conversations SET updated_at = ?1 WHERE id = ?2",
+                params![msg.created_at, msg.conversation_id],
+            )
+            .map_err(|e| format!("failed to update conversation updated_at: {e}"))?;
 
         guard.execute(
             "INSERT INTO chat_messages (id, conversation_id, role, content, session_json, created_at)
@@ -1548,7 +1543,9 @@ mod tests {
 
         let outcome2 = mgr.record_observation(obs2).await.unwrap();
         match outcome2 {
-            ObservationOutcome::RolledUp { occurrence_count, .. } => {
+            ObservationOutcome::RolledUp {
+                occurrence_count, ..
+            } => {
                 assert_eq!(occurrence_count, 2);
             }
             _ => panic!("second identical observation should roll up"),
@@ -1653,7 +1650,11 @@ mod tests {
         mgr.save_message(updated_asst).await.unwrap();
 
         let listed_after = mgr.list_messages("conv-1").await.unwrap();
-        assert_eq!(listed_after.len(), 2, "conflict update must not duplicate row");
+        assert_eq!(
+            listed_after.len(),
+            2,
+            "conflict update must not duplicate row"
+        );
         assert_eq!(listed_after[1].content, "Updated content.");
     }
 }

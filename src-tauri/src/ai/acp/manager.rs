@@ -126,7 +126,10 @@ impl AcpManager {
         #[cfg(unix)]
         {
             let user_specified_path = acp.env.contains_key("PATH");
-            let mut paths = env.get("PATH").cloned().unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
+            let mut paths = env
+                .get("PATH")
+                .cloned()
+                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
             let mut standard_paths: Vec<String> = vec![
                 "/opt/homebrew/bin".into(),
                 "/opt/homebrew/sbin".into(),
@@ -372,7 +375,12 @@ mod tests {
         let mgr = AcpManager::new();
         let cfg = acp_cfg("opencode", Some("opencode acp --print-logs"));
         let proc = mgr.ensure_process("opencode", &cfg).await.unwrap();
-        let count = proc.launch.args.iter().filter(|&a| a == "--print-logs").count();
+        let count = proc
+            .launch
+            .args
+            .iter()
+            .filter(|&a| a == "--print-logs")
+            .count();
         assert_eq!(count, 1);
     }
 
@@ -423,7 +431,10 @@ mod tests {
         assert_eq!(mgr.agent_stderr_snippet("stub"), None);
 
         AgentProcess::tail_push(proc.stderr_tail.clone(), "  fatal error \n  ", 1000);
-        assert_eq!(mgr.agent_stderr_snippet("stub").as_deref(), Some("fatal error"));
+        assert_eq!(
+            mgr.agent_stderr_snippet("stub").as_deref(),
+            Some("fatal error")
+        );
     }
 
     #[test]
