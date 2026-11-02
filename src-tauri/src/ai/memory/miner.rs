@@ -83,10 +83,7 @@ fn collect_query_joins(query: &Query, counts: &mut HashMap<(String, String, Stri
 }
 
 /// Walks the query body: a SELECT, a parenthesized query, or a set operation.
-fn collect_set_expr_joins(
-    body: &SetExpr,
-    counts: &mut HashMap<(String, String, String), usize>,
-) {
+fn collect_set_expr_joins(body: &SetExpr, counts: &mut HashMap<(String, String, String), usize>) {
     match body {
         SetExpr::Select(select) => {
             for twj in &select.from {
