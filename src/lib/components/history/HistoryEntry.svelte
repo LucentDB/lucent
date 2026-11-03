@@ -16,7 +16,9 @@
   } = $props();
 
   function truncateSql(sql: string, maxLen = 80): string {
-    const line = sql.split('\n')[0];
+    // Avoid allocating an intermediate array of strings via split('\n')
+    const newlineIdx = sql.indexOf('\n');
+    const line = newlineIdx === -1 ? sql : sql.slice(0, newlineIdx);
     return line.length > maxLen ? line.slice(0, maxLen) + '…' : line;
   }
 
