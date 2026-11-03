@@ -256,7 +256,8 @@ export function adaptPersistedMessage(p: PersistedChatMessage): ChatMessage {
           } else if (seg.type === 'tool_call' && seg.call) {
             if (!seg.call.status || seg.call.status === 'running') {
               seg.call.status =
-                seg.call.summary === 'error' || seg.call.summary?.startsWith('error')
+                seg.call.summary === 'error' ||
+                seg.call.summary?.startsWith('error')
                   ? 'failed'
                   : seg.call.summary
                     ? 'completed'

@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, fireEvent, cleanup, waitFor, screen } from '@testing-library/svelte';
+import {
+  render,
+  fireEvent,
+  cleanup,
+  waitFor,
+  screen,
+} from '@testing-library/svelte';
 
 if (!HTMLElement.prototype.animate) {
   HTMLElement.prototype.animate = (() => ({
@@ -210,15 +216,21 @@ describe('ChatPanel — action buttons (Memory, Previous chats, New chat, Close)
     await waitFor(() => {
       const portal = document.querySelector('[data-previous-chats-portal]');
       expect(portal).toBeTruthy();
-      expect(document.querySelector('[aria-label="Previous Chats"]')).toBeTruthy();
+      expect(
+        document.querySelector('[aria-label="Previous Chats"]'),
+      ).toBeTruthy();
     });
   });
 });
 
 describe('ChatPanel — restoring and rendering complete previous conversation history', () => {
   it('opens a previous conversation from drawer and renders user message, thoughts, tool calls, and assistant response', async () => {
-    const mockList = listChatConversations as unknown as ReturnType<typeof vi.fn>;
-    const mockLoad = loadChatConversation as unknown as ReturnType<typeof vi.fn>;
+    const mockList = listChatConversations as unknown as ReturnType<
+      typeof vi.fn
+    >;
+    const mockLoad = loadChatConversation as unknown as ReturnType<
+      typeof vi.fn
+    >;
 
     mockList.mockResolvedValue([
       {
@@ -249,7 +261,8 @@ describe('ChatPanel — restoring and rendering complete previous conversation h
           segments: [
             {
               type: 'thinking',
-              content: 'Inspecting customers table and filtering on active=true',
+              content:
+                'Inspecting customers table and filtering on active=true',
               streaming: false,
               startedAt: 1000,
               durationMs: 2500,
@@ -307,4 +320,3 @@ describe('ChatPanel — restoring and rendering complete previous conversation h
     expect(await screen.findByText(/Inspecting customers table/i)).toBeTruthy();
   });
 });
-
