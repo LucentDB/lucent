@@ -54,20 +54,11 @@
   }
 </script>
 
-<div
-  class="connection-profile-drawer"
-  role="dialog"
-  aria-label="Connection Profile Settings"
->
+<div class="connection-profile-drawer" role="dialog" aria-label="Connection Profile Settings">
   <div class="drawer-header">
     <h3>Connection Settings</h3>
     {#if onClose}
-      <button
-        type="button"
-        class="close-btn"
-        onclick={onClose}
-        aria-label="Close">✕</button
-      >
+      <button type="button" class="close-btn" onclick={onClose} aria-label="Close">✕</button>
     {/if}
   </div>
 
@@ -88,8 +79,7 @@
       {#if enableExternalAgents}
         <div class="notice-box">
           <p class="warning-text">
-            Enabling external AI access sets this profile to strictly read-only
-            with local file system access disabled.
+            Enabling external AI access sets this profile to strictly read-only with local file system access disabled.
           </p>
         </div>
 
@@ -104,10 +94,12 @@
         </label>
 
         <div class="snippet-section">
-          <button type="button" class="copy-btn" onclick={copyMcpSnippet}>
-            {copied
-              ? '✓ Copied!'
-              : 'Copy MCP Config for Cursor / Claude Desktop'}
+          <button
+            type="button"
+            class="copy-btn"
+            onclick={copyMcpSnippet}
+          >
+            {copied ? '✓ Copied!' : 'Copy MCP Config for Cursor / Claude Desktop'}
           </button>
         </div>
       {/if}

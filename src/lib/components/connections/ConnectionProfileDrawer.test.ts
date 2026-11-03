@@ -9,9 +9,7 @@ afterEach(cleanup);
 describe('ConnectionProfileDrawer', () => {
   it('renders external agents toggle, warning notice, and copy snippet button when enabled', async () => {
     const { getByLabelText, getByText } = render(ConnectionProfileDrawer, {
-      props: {
-        profile: { id: 'p1', name: 'Analytics', enableExternalAgents: true },
-      },
+      props: { profile: { id: 'p1', name: 'Analytics', enableExternalAgents: true } },
     });
 
     const checkbox = getByLabelText(/Allow external AI assistants/i);
@@ -25,9 +23,7 @@ describe('ConnectionProfileDrawer', () => {
 
   it('hides notice and copy button when external agents is disabled', async () => {
     const { getByLabelText, queryByText } = render(ConnectionProfileDrawer, {
-      props: {
-        profile: { id: 'p2', name: 'Dev', enableExternalAgents: false },
-      },
+      props: { profile: { id: 'p2', name: 'Dev', enableExternalAgents: false } },
     });
 
     const checkbox = getByLabelText(/Allow external AI assistants/i);
@@ -48,9 +44,7 @@ describe('ConnectionProfileDrawer', () => {
     });
 
     const { getByText } = render(ConnectionProfileDrawer, {
-      props: {
-        profile: { id: 'p1', name: 'Analytics', enableExternalAgents: true },
-      },
+      props: { profile: { id: 'p1', name: 'Analytics', enableExternalAgents: true } },
     });
 
     const copyBtn = getByText(/Copy MCP Config/i);
@@ -74,9 +68,7 @@ describe('ConnectionProfileDrawer', () => {
     const agentCheckbox = getByLabelText(/Allow external AI assistants/i);
     await fireEvent.click(agentCheckbox);
 
-    const historyCheckbox = getByLabelText(
-      /Allow query history search in MCP/i,
-    );
+    const historyCheckbox = getByLabelText(/Allow query history search in MCP/i);
     await fireEvent.click(historyCheckbox);
 
     const saveBtn = getByText('Save');

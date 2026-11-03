@@ -37,8 +37,7 @@ fn duckdb_sandbox_rejects_external_file_access_when_disabled() {
         let conn = duckdb::Connection::open(&regular_db).unwrap();
         conn.execute_batch("CREATE TABLE init (x INT);").unwrap();
     }
-    let regular = DuckHandle::open_ext(regular_db.to_str().unwrap(), true, true)
-        .expect("open regular handle");
+    let regular = DuckHandle::open_ext(regular_db.to_str().unwrap(), true, true).expect("open regular handle");
 
     let count = regular
         .with_conn(|conn| {
@@ -56,8 +55,7 @@ fn duckdb_sandbox_rejects_external_file_access_in_memory() {
     let csv_path = temp_dir.path().join("canary.csv");
     std::fs::write(&csv_path, b"id,val\n1,foo\n2,bar\n").unwrap();
 
-    let sandboxed =
-        DuckHandle::open_ext(":memory:", false, false).expect("open in-memory sandboxed handle");
+    let sandboxed = DuckHandle::open_ext(":memory:", false, false).expect("open in-memory sandboxed handle");
 
     let query = format!("SELECT count(*) FROM '{}'", csv_path.display());
     let err = sandboxed

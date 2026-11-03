@@ -1,6 +1,6 @@
-use lucent_protocol::{ConnectionId, DriverCapabilities};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use lucent_protocol::{ConnectionId, DriverCapabilities};
 
 use crate::ai::acp::bridge::ToolExecutor;
 use crate::ai::embed::Embedder;
@@ -36,8 +36,7 @@ pub async fn run_connector_canary(
     client: &ConnectorClient,
     conn_id: ConnectionId,
 ) -> Result<(), String> {
-    let temp_canary =
-        std::env::temp_dir().join(format!("lucent-canary-{}.csv", std::process::id()));
+    let temp_canary = std::env::temp_dir().join(format!("lucent-canary-{}.csv", std::process::id()));
     std::fs::write(&temp_canary, b"id,val\n1,canary\n")
         .map_err(|e| format!("Failed to create canary file: {e}"))?;
 
@@ -163,11 +162,7 @@ impl ToolExecutor for DynamicContextToolExecutor {
                 .get("port")
                 .and_then(|s| s.parse::<u16>().ok())
                 .unwrap_or(0);
-            let database = profile
-                .params
-                .get("database")
-                .map(|s| s.as_str())
-                .unwrap_or("");
+            let database = profile.params.get("database").map(|s| s.as_str()).unwrap_or("");
             Some(format!("{host}:{port}/{database}"))
         };
         let mut config = crate::ai::config::AiConfig::default();
@@ -253,7 +248,9 @@ mod tests {
             active_profile: Arc::new(Mutex::new(profile)),
             inode_tracker: Arc::new(Mutex::new(None)),
             reopen_lock: Arc::new(Mutex::new(())),
-            memory_manager: Arc::new(crate::ai::memory::MemoryManager::open_in_memory().unwrap()),
+            memory_manager: Arc::new(
+                crate::ai::memory::MemoryManager::open_in_memory().unwrap(),
+            ),
         })
     }
 
@@ -262,22 +259,14 @@ mod tests {
         let context = create_mock_external_context(false);
         let executor = DynamicContextToolExecutor::new(context);
 
-        let err = executor
-            .call("run_readonly_query", serde_json::json!({"sql": "SELECT 1"}))
-            .await
-            .unwrap_err();
+        let err = executor.call("run_readonly_query", serde_json::json!({"sql": "SELECT 1"})).await.unwrap_err();
         assert!(err.to_string().contains("disabled"));
 
         let context_enabled = create_mock_external_context(true);
         let executor_enabled = DynamicContextToolExecutor::new(context_enabled);
 
-        let err = executor_enabled
-            .call("preview_dml", serde_json::json!({"sql": "DELETE FROM t"}))
-            .await
-            .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("not allowed in external agent mode"));
+        let err = executor_enabled.call("preview_dml", serde_json::json!({"sql": "DELETE FROM t"})).await.unwrap_err();
+        assert!(err.to_string().contains("not allowed in external agent mode"));
     }
 
     #[tokio::test]
@@ -286,10 +275,7 @@ mod tests {
         let executor = DynamicContextToolExecutor::new(context);
 
         let err = executor
-            .call(
-                "search_query_history",
-                serde_json::json!({"query": "SELECT"}),
-            )
+            .call("search_query_history", serde_json::json!({"query": "SELECT"}))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Query history search is disabled"));
@@ -379,36 +365,24 @@ mod tests {
 
         // Search for golden query
         let golden_res = executor
-            .call(
-                "search_query_history",
-                serde_json::json!({"query": "monthly active users"}),
-            )
+            .call("search_query_history", serde_json::json!({"query": "monthly active users"}))
             .await
             .unwrap();
         let golden_text = match golden_res {
             ToolOutput::Text { content } => content,
             _ => panic!("expected Text output"),
         };
-        assert!(
-            golden_text.contains("monthly_users"),
-            "golden query not found: {golden_text}"
-        );
+        assert!(golden_text.contains("monthly_users"), "golden query not found: {golden_text}");
 
         // Search for human history
         let history_res = executor
-            .call(
-                "search_query_history",
-                serde_json::json!({"query": "orders_archive"}),
-            )
+            .call("search_query_history", serde_json::json!({"query": "orders_archive"}))
             .await
             .unwrap();
         let history_text = match history_res {
             ToolOutput::Text { content } => content,
             _ => panic!("expected Text output"),
         };
-        assert!(
-            history_text.contains("orders_archive"),
-            "history entry not found: {history_text}"
-        );
+        assert!(history_text.contains("orders_archive"), "history entry not found: {history_text}");
     }
 }

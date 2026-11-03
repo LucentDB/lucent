@@ -286,10 +286,7 @@ mod tests {
 
     #[test]
     fn filter_external_tools_filters_by_descriptor_names() {
-        let allowed = vec![
-            "run_readonly_query".to_string(),
-            "get_preflight_context".to_string(),
-        ];
+        let allowed = vec!["run_readonly_query".to_string(), "get_preflight_context".to_string()];
         let filtered = filter_external_tools(&allowed);
         assert_eq!(filtered.len(), 2);
         assert!(filtered.iter().any(|t| t.name == "run_readonly_query"));
