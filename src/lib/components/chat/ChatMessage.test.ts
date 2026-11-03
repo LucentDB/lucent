@@ -263,4 +263,3 @@ describe('ChatMessage — work sessions (thoughts and tool calls)', () => {
     expect(await screen.findByText('Secret thoughts...')).toBeTruthy();
   });
 });
-

@@ -996,5 +996,3 @@ describe('persistConversationMessage', () => {
     expect(invokeMock).not.toHaveBeenCalled();
   });
 });
-
-

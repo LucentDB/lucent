@@ -307,4 +307,3 @@ describe('ChatPanel — restoring and rendering complete previous conversation h
     expect(await screen.findByText(/Inspecting customers table/i)).toBeTruthy();
   });
 });
-
