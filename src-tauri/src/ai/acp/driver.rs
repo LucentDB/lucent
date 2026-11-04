@@ -739,7 +739,7 @@ async fn wait_until(deadline: Option<tokio::time::Instant>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::ai::acp::correlator::BufferedToolResult;
     use crate::ai::agent::CollectorSink;
@@ -788,7 +788,7 @@ mod tests {
     pub(crate) struct EnvVarGuard<'a>(
         &'a str,
         Option<String>,
-        Option<std::sync::MutexGuard<'static, ()>>,
+        #[allow(dead_code)] Option<std::sync::MutexGuard<'static, ()>>,
     );
     impl Drop for EnvVarGuard<'_> {
         fn drop(&mut self) {
