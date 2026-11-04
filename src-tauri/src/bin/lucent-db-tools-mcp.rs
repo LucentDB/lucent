@@ -115,20 +115,19 @@ fn usage() -> String {
     out
 }
 
+type ResolvedEndpoint = (
+    String,
+    String,
+    Vec<lucent_lib::ai::acp::mcp_server::ToolSchema>,
+    Option<std::path::PathBuf>,
+    lucent_lib::ai::external_endpoint::discovery::EndpointStatus,
+);
+
 fn resolve_endpoint_with_custom_discovery(
     arg_socket: Option<String>,
     arg_token: Option<String>,
     custom_disc: Option<std::path::PathBuf>,
-) -> Result<
-    (
-        String,
-        String,
-        Vec<lucent_lib::ai::acp::mcp_server::ToolSchema>,
-        Option<std::path::PathBuf>,
-        lucent_lib::ai::external_endpoint::discovery::EndpointStatus,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> Result<ResolvedEndpoint, Box<dyn std::error::Error>> {
     let env_socket = std::env::var("LUCENT_ACP_SOCKET").ok();
     let env_token = std::env::var("LUCENT_ACP_TOKEN").ok();
 
@@ -176,16 +175,7 @@ fn resolve_endpoint_with_custom_discovery(
 fn resolve_endpoint(
     arg_socket: Option<String>,
     arg_token: Option<String>,
-) -> Result<
-    (
-        String,
-        String,
-        Vec<lucent_lib::ai::acp::mcp_server::ToolSchema>,
-        Option<std::path::PathBuf>,
-        lucent_lib::ai::external_endpoint::discovery::EndpointStatus,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> Result<ResolvedEndpoint, Box<dyn std::error::Error>> {
     resolve_endpoint_with_custom_discovery(arg_socket, arg_token, None)
 }
 
