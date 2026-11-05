@@ -88,7 +88,7 @@
       onkeydown={handleKeydown}
       oninput={autoResize}
       {placeholder}
-      disabled={disabled}
+      {disabled}
       rows={1}></textarea>
     <button
       class="send-btn"
