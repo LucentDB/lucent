@@ -157,6 +157,22 @@ describe('dedupeBySql', () => {
   it('passes an empty list through', () => {
     expect(dedupeBySql([])).toEqual([]);
   });
+
+  it('stops collecting once the specified limit is reached', () => {
+    const entries = [
+      entry({ id: '1', sql: 'SELECT 1' }),
+      entry({ id: '2', sql: 'SELECT 2' }),
+      entry({ id: '3', sql: 'SELECT 3' }),
+      entry({ id: '4', sql: 'SELECT 4' }),
+    ];
+    expect(dedupeBySql(entries, 2).map((e) => e.id)).toEqual(['1', '2']);
+  });
+
+  it('handles non-positive limits gracefully', () => {
+    const entries = [entry({ id: '1', sql: 'SELECT 1' })];
+    expect(dedupeBySql(entries, 0)).toEqual([]);
+    expect(dedupeBySql(entries, -1)).toEqual([]);
+  });
 });
 
 describe('describeEntry', () => {

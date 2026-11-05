@@ -103,15 +103,26 @@ export function formatDuration(ms: unknown): string | null {
  * identical query on every page, so raw history is often the same SQL three
  * times over — three identical rows read as a rendering bug, not as history.
  * The newest occurrence wins, since history arrives newest-first.
+ *
+ * Performance optimization: takes an optional `limit` to break early once the
+ * required unique entries are found. In lists of hundreds of history items,
+ * this avoids running regex whitespace replacement and string lowercasing over
+ * the entire array when only the top few entries are needed.
  */
-export function dedupeBySql(entries: HistoryEntry[]): HistoryEntry[] {
+export function dedupeBySql(
+  entries: HistoryEntry[],
+  limit: number = Infinity,
+): HistoryEntry[] {
+  if (limit <= 0) return [];
   const seen = new Set<string>();
   const out: HistoryEntry[] = [];
-  for (const e of entries) {
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
     const key = e.sql.replace(/\s+/g, ' ').trim().toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(e);
+    if (out.length >= limit) break;
   }
   return out;
 }

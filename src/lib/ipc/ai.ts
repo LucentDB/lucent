@@ -378,9 +378,7 @@ export async function cancelRun(conversationId: string) {
  *  `unregisterCallback`s it, and the Rust index counter is minted fresh per
  *  `invoke` while the JS-side counter is not reset either. Never cache one
  *  of these across `invoke('ai_chat')` calls. */
-export function newAiChannel(
-  conversationId: string,
-): Channel<AiChannelEvent> {
+export function newAiChannel(conversationId: string): Channel<AiChannelEvent> {
   const channel = new Channel<AiChannelEvent>();
   channel.onmessage = (e: AiChannelEvent) => handleAiEvent(conversationId, e);
   return channel;
