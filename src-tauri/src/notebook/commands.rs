@@ -866,7 +866,7 @@ async fn run_ai_cell(
         None
     } else {
         log::info!("AI cell '{cell_id}': loading API key");
-        let api_key = cached_api_key_for(&state, &config)
+        let api_key = cached_api_key_for(state, &config)
             .await
             .map_err(|e| CommandError::new("ai_config", e))?;
         log::info!("AI cell '{cell_id}': creating LLM provider");
