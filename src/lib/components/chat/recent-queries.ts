@@ -103,8 +103,17 @@ export function formatDuration(ms: unknown): string | null {
  * identical query on every page, so raw history is often the same SQL three
  * times over — three identical rows read as a rendering bug, not as history.
  * The newest occurrence wins, since history arrives newest-first.
+ *
+ * Performance optimization: Supports an optional `limit` parameter to terminate
+ * the loop early. When displaying the top N recent queries, this skips regex
+ * normalization and string allocations on the hundreds/thousands of discarded
+ * remaining entries (O(limit) operations vs O(total_entries)).
  */
-export function dedupeBySql(entries: HistoryEntry[]): HistoryEntry[] {
+export function dedupeBySql(
+  entries: HistoryEntry[],
+  limit?: number,
+): HistoryEntry[] {
+  if (limit !== undefined && limit <= 0) return [];
   const seen = new Set<string>();
   const out: HistoryEntry[] = [];
   for (const e of entries) {
@@ -112,6 +121,9 @@ export function dedupeBySql(entries: HistoryEntry[]): HistoryEntry[] {
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(e);
+    if (limit !== undefined && out.length >= limit) {
+      break;
+    }
   }
   return out;
 }
