@@ -157,7 +157,11 @@
     for (let i = 0; i < GROUP_ORDER.length; i++) {
       const k = GROUP_ORDER[i];
       if (groups[k]) {
-        result.push({ kind: k, label: OBJECT_LABELS[k] ?? k, items: groups[k] });
+        result.push({
+          kind: k,
+          label: OBJECT_LABELS[k] ?? k,
+          items: groups[k],
+        });
       }
     }
     groupCache.set(objects, result);
