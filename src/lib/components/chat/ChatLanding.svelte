@@ -57,10 +57,11 @@
 
   // Browsing a table re-runs the same statement per page, so raw history is
   // often one query repeated — deduped before slicing, or the list would be
-  // three identical rows.
+  // three identical rows. Pass RECENT_LIMIT to exit deduplication early and
+  // avoid processing the rest of the history entries.
   const recents = $derived(
     connected && !entries.error
-      ? dedupeBySql(entries.data ?? []).slice(0, RECENT_LIMIT)
+      ? dedupeBySql(entries.data ?? [], RECENT_LIMIT)
       : [],
   );
 

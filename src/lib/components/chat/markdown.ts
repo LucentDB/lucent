@@ -127,11 +127,17 @@ export function splitStablePrefix(content: string): {
   const fences = (content.match(/```/g) ?? []).length;
   if (fences % 2 === 1) {
     const lastFence = content.lastIndexOf('```');
-    return { stable: content.slice(0, lastFence), tail: content.slice(lastFence) };
+    return {
+      stable: content.slice(0, lastFence),
+      tail: content.slice(lastFence),
+    };
   }
   const blankLine = content.lastIndexOf('\n\n');
   if (blankLine > 0) {
-    return { stable: content.slice(0, blankLine), tail: content.slice(blankLine) };
+    return {
+      stable: content.slice(0, blankLine),
+      tail: content.slice(blankLine),
+    };
   }
   return { stable: content, tail: '' };
 }

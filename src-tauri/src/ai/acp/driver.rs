@@ -1996,10 +1996,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn idle_watchdog_cancels_a_silent_turn() {
         let _ws = hermetic_workspace();
-        let _guards = env_var_guards(&[
-            "LUCENT_ACP_TURN_IDLE_MS",
-            "LUCENT_ACP_CANCEL_KILL_MS",
-        ]);
+        let _guards = env_var_guards(&["LUCENT_ACP_TURN_IDLE_MS", "LUCENT_ACP_CANCEL_KILL_MS"]);
         std::env::set_var("LUCENT_ACP_TURN_IDLE_MS", "300");
         std::env::set_var("LUCENT_ACP_CANCEL_KILL_MS", "300");
 
@@ -2048,10 +2045,7 @@ pub(crate) mod tests {
         // A turn that keeps streaming must NOT trip the watchdog: the stub
         // emits a chunk every 100ms while the idle window is 250ms.
         let _ws = hermetic_workspace();
-        let _guards = env_var_guards(&[
-            "LUCENT_ACP_TURN_IDLE_MS",
-            "LUCENT_ACP_TOOLS_GATE_MS",
-        ]);
+        let _guards = env_var_guards(&["LUCENT_ACP_TURN_IDLE_MS", "LUCENT_ACP_TOOLS_GATE_MS"]);
         std::env::set_var("LUCENT_ACP_TURN_IDLE_MS", "250");
         std::env::set_var("LUCENT_ACP_TOOLS_GATE_MS", "50");
         let script = script_file(json!({

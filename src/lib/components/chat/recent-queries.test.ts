@@ -157,6 +157,24 @@ describe('dedupeBySql', () => {
   it('passes an empty list through', () => {
     expect(dedupeBySql([])).toEqual([]);
   });
+
+  it('stops processing once limit unique entries are found', () => {
+    const list = [
+      entry({ id: '1', sql: 'SELECT 1' }),
+      entry({ id: '2', sql: 'SELECT 1' }),
+      entry({ id: '3', sql: 'SELECT 2' }),
+      entry({ id: '4', sql: 'SELECT 3' }),
+      entry({ id: '5', sql: 'SELECT 4' }),
+    ];
+    const out = dedupeBySql(list, 2);
+    expect(out.map((e) => e.id)).toEqual(['1', '3']);
+  });
+
+  it('returns empty array when limit is 0 or negative', () => {
+    const list = [entry({ id: '1', sql: 'SELECT 1' })];
+    expect(dedupeBySql(list, 0)).toEqual([]);
+    expect(dedupeBySql(list, -1)).toEqual([]);
+  });
 });
 
 describe('describeEntry', () => {
