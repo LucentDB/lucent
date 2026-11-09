@@ -9,11 +9,13 @@ export function toTsv(rows) {
 }
 
 const NEEDS_QUOTING = /[",\r\n]/;
-const FORMULA_TRIGGERS = /^[=+\-@\t\r]/;
+// Spreadsheet formula triggers (=, +, -, @, \t, \r, \n, |) including when preceded
+// by leading whitespace. Spreadsheets strip leading whitespace before formula evaluation.
+const FORMULA_TRIGGERS = /^\s*[=+\-@\t\r\n|]/;
 
 /** RFC 4180: quote when the field contains a comma, quote, CR or LF.
- * Neutralize formula trigger characters (=, +, -, @, \t, \r) to prevent CWE-1236 CSV injection,
- * excluding valid numbers.
+ * Neutralize formula trigger characters (=, +, -, @, \t, \r, \n, |) to prevent CWE-1236 CSV injection,
+ * including when preceded by leading whitespace, excluding valid numbers.
  */
 function csvField(value) {
   let text = formatCell(value);
