@@ -60,6 +60,10 @@ describe('toCsv', () => {
     expect(toCsv([['-5']])).toBe("'-5");
     expect(toCsv([['@SUM(A1)']])).toBe("'@SUM(A1)");
     expect(toCsv([['\tcmd']])).toBe("'\tcmd");
+    expect(toCsv([['  =SUM(1)']])).toBe("'  =SUM(1)");
+    expect(toCsv([['\n=CMD']])).toBe('"\'\n=CMD"');
+    expect(toCsv([['|cmd']])).toBe("'|cmd");
+    expect(toCsv([[' \t +10']])).toBe("' \t +10");
   });
 
   it('preserves negative and positive numeric values without single-quote neutralization', () => {
