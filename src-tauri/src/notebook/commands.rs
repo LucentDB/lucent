@@ -1105,14 +1105,20 @@ async fn run_ai_cell(
                 String::new()
             };
             let error = CellError::QueryError {
-                message: format!("Agent timed out after {turn_timeout_secs} seconds.{}", stderr_note),
+                message: format!(
+                    "Agent timed out after {turn_timeout_secs} seconds.{}",
+                    stderr_note
+                ),
                 sql_error: String::new(),
             };
             let _ = channel.send(NotebookEvent::CellError {
                 cell_id: cell_id.clone(),
                 error,
             });
-            return Err(CommandError::new("agent_timeout", format!("timed out after {turn_timeout_secs}s")));
+            return Err(CommandError::new(
+                "agent_timeout",
+                format!("timed out after {turn_timeout_secs}s"),
+            ));
         }
     }
 
