@@ -25,7 +25,7 @@ async fn e2e_simple_completion() {
     eprintln!("Using model: {model}");
     eprintln!("Using endpoint: {endpoint}");
 
-    let provider = RigProvider::new(AiProvider::OpenAI, api_key, Some(endpoint));
+    let provider = RigProvider::new(AiProvider::OpenAI, api_key, Some(endpoint), None);
 
     let agent = provider
         .build_agent(

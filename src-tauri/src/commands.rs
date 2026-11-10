@@ -1913,7 +1913,8 @@ pub fn validate_approved(
 fn approved_paths_file() -> Result<std::path::PathBuf, CommandError> {
     if let Ok(dir) = std::env::var("LUCENT_CONFIG_DIR") {
         let path = std::path::PathBuf::from(dir).join("lucent");
-        std::fs::create_dir_all(&path).map_err(|e| CommandError::new("PathError", e.to_string()))?;
+        std::fs::create_dir_all(&path)
+            .map_err(|e| CommandError::new("PathError", e.to_string()))?;
         return Ok(path.join("approved_save_paths.json"));
     }
     let mut dir =
@@ -2900,7 +2901,12 @@ async fn build_system_prompt_with_query(
     connection_id: &str,
     query: Option<&str>,
     conversation_id: Option<&str>,
-) -> (String, crate::ai::mschema::ContextTier, usize, Option<String>) {
+) -> (
+    String,
+    crate::ai::mschema::ContextTier,
+    usize,
+    Option<String>,
+) {
     // Static prompt + tier selection happen under the schema_graph lock. The
     // guard is scoped to this block and dropped before any memory work:
     // embedding can download/run a 130 MB ONNX model, retrieval reads SQLite,
@@ -3055,8 +3061,7 @@ async fn build_system_prompt_with_query(
                 // Returned separately so the caller can attach it to the USER
                 // turn: per-turn content must trail the message, never sit
                 // inside the cacheable system prefix.
-                memory_block =
-                    crate::ai::context::format_memory_block(&retrieved, &golden);
+                memory_block = crate::ai::context::format_memory_block(&retrieved, &golden);
             }
         }
     }
@@ -3515,8 +3520,7 @@ async fn ai_chat_impl(
         })
         .await;
 
-    let (system_prompt, _context_tier, applied_memory_count, memory_block) =
-        prompt_fut.await;
+    let (system_prompt, _context_tier, applied_memory_count, memory_block) = prompt_fut.await;
     log::info!("System prompt complete ({} bytes)", system_prompt.len());
 
     // The per-turn retrieved block rides on the USER turn, trailing the
@@ -3984,7 +3988,12 @@ fn validate_custom_endpoint(config: &AiConfig) -> Result<(), String> {
         }
     }
 
-    if let Some(ep) = config.endpoint.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(ep) = config
+        .endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let parsed = reqwest::Url::parse(ep).map_err(|e| format!("Invalid endpoint URL: {e}"))?;
         if parsed.scheme() != "http" && parsed.scheme() != "https" {
             return Err("Endpoint URL scheme must be http or https".to_string());
@@ -5116,7 +5125,11 @@ mod custom_endpoint_validation_tests {
 
     #[test]
     fn rejects_non_http_https_endpoint_schemes() {
-        for scheme in ["file:///etc/passwd", "javascript:alert(1)", "ftp://example.com"] {
+        for scheme in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "ftp://example.com",
+        ] {
             let cfg = config_with(AiProvider::Custom, Some(scheme));
             let err = validate_custom_endpoint(&cfg).unwrap_err();
             assert!(
@@ -5356,7 +5369,9 @@ mod password_cache_tests {
             reads.fetch_add(1, Ordering::SeqCst);
             Ok::<_, crate::connections::KeychainError>("pw".to_string())
         };
-        let first = cached_password_with(&state, "prof-seq", load).await.unwrap();
+        let first = cached_password_with(&state, "prof-seq", load)
+            .await
+            .unwrap();
         let reads2 = reads.clone();
         let second = cached_password_with(&state, "prof-seq", || {
             reads2.fetch_add(1, Ordering::SeqCst);
@@ -5580,13 +5595,11 @@ mod api_key_single_flight_tests {
     #[tokio::test]
     async fn a_cached_key_is_returned_without_loading() {
         let state = AppState::new();
-        *state.api_key_cache.write().await =
-            Some((AiProvider::OpenAI, "sentinel-key".to_string()));
-        let out = cached_api_key_for_with(&state, &config(), || {
-            panic!("a cache hit must never load")
-        })
-        .await
-        .unwrap();
+        *state.api_key_cache.write().await = Some((AiProvider::OpenAI, "sentinel-key".to_string()));
+        let out =
+            cached_api_key_for_with(&state, &config(), || panic!("a cache hit must never load"))
+                .await
+                .unwrap();
         assert_eq!(out, "sentinel-key");
     }
 
@@ -5648,8 +5661,7 @@ mod api_key_single_flight_tests {
     #[tokio::test]
     async fn list_models_uses_the_cached_key() {
         let state = AppState::new();
-        *state.api_key_cache.write().await =
-            Some((AiProvider::OpenAI, "sentinel-key".to_string()));
+        *state.api_key_cache.write().await = Some((AiProvider::OpenAI, "sentinel-key".to_string()));
         let out = resolve_list_models_key(&state, &AiProvider::OpenAI, None).await;
         assert_eq!(out, "sentinel-key");
     }
@@ -5657,8 +5669,7 @@ mod api_key_single_flight_tests {
     #[tokio::test]
     async fn list_models_prefers_an_explicitly_passed_key() {
         let state = AppState::new();
-        *state.api_key_cache.write().await =
-            Some((AiProvider::OpenAI, "sentinel-key".to_string()));
+        *state.api_key_cache.write().await = Some((AiProvider::OpenAI, "sentinel-key".to_string()));
         let out = resolve_list_models_key(
             &state,
             &AiProvider::OpenAI,
