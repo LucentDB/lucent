@@ -104,10 +104,17 @@ export function formatDuration(ms: unknown): string | null {
  * times over — three identical rows read as a rendering bug, not as history.
  * The newest occurrence wins, since history arrives newest-first.
  */
-export function dedupeBySql(entries: HistoryEntry[]): HistoryEntry[] {
+export function dedupeBySql(
+  entries: HistoryEntry[],
+  limit?: number,
+): HistoryEntry[] {
+  if (limit !== undefined && limit <= 0) return [];
   const seen = new Set<string>();
   const out: HistoryEntry[] = [];
   for (const e of entries) {
+    // Early-exit when limit is reached to avoid regex and string allocations
+    // on remaining discarded history entries.
+    if (limit !== undefined && out.length >= limit) break;
     const key = e.sql.replace(/\s+/g, ' ').trim().toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);

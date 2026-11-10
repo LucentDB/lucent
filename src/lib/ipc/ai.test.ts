@@ -362,12 +362,15 @@ describe('handleAiEvent', () => {
     expect(invokeMock).toHaveBeenCalledWith('get_ai_usage', {
       conversationId: conv.id,
     });
-    expect(invokeMock).toHaveBeenCalledWith('save_chat_message', expect.objectContaining({
-      message: expect.objectContaining({
-        id: 'm1',
-        conversation_id: conv.id,
+    expect(invokeMock).toHaveBeenCalledWith(
+      'save_chat_message',
+      expect.objectContaining({
+        message: expect.objectContaining({
+          id: 'm1',
+          conversation_id: conv.id,
+        }),
       }),
-    }));
+    );
   });
 
   it('keeps the previous usage when the get_ai_usage fetch fails', async () => {
@@ -409,13 +412,16 @@ describe('handleAiEvent', () => {
       },
     });
     await vi.waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith('save_chat_message', expect.objectContaining({
-        message: expect.objectContaining({
-          id: 'm1',
-          conversation_id: conv.id,
-          role: 'assistant',
+      expect(invokeMock).toHaveBeenCalledWith(
+        'save_chat_message',
+        expect.objectContaining({
+          message: expect.objectContaining({
+            id: 'm1',
+            conversation_id: conv.id,
+            role: 'assistant',
+          }),
         }),
-      }));
+      );
     });
   });
 
@@ -1175,7 +1181,9 @@ describe('aiSessionFor registry', () => {
     // Tauri Channels are single-use — each send gets its own channel.
     expect(second.createChannel()).not.toBe(first.createChannel());
     // Listeners registered exactly once despite two sends.
-    expect(listenMock.mock.calls.filter(([e]) => e === 'ai:error')).toHaveLength(1);
+    expect(
+      listenMock.mock.calls.filter(([e]) => e === 'ai:error'),
+    ).toHaveLength(1);
     releaseAiSession('conv-a');
   });
 
@@ -1188,12 +1196,16 @@ describe('aiSessionFor registry', () => {
     // Still cached: its Done event must arrive to clear the phase, so
     // re-entry does not re-register listeners.
     await aiSessionFor('conv-a').ensureListeners(handlers);
-    expect(listenMock.mock.calls.filter(([e]) => e === 'ai:error')).toHaveLength(1);
+    expect(
+      listenMock.mock.calls.filter(([e]) => e === 'ai:error'),
+    ).toHaveLength(1);
     setRunPhase('conv-a', 'idle');
     releaseAiSession('conv-a');
     // Released while idle: the next session registers listeners again.
     await aiSessionFor('conv-a').ensureListeners(handlers);
-    expect(listenMock.mock.calls.filter(([e]) => e === 'ai:error')).toHaveLength(2);
+    expect(
+      listenMock.mock.calls.filter(([e]) => e === 'ai:error'),
+    ).toHaveLength(2);
     releaseAiSession('conv-a');
   });
 
@@ -1265,13 +1277,13 @@ describe('aiSessionFor registry', () => {
 
       // ── assertions ──────────────────────────────────────────────
       expect(chanHarness.chanDropped).toEqual([]);
-      expect(getConv('conv-turn2').messages[3].content).toBe(
-        'glad it helped',
-      );
+      expect(getConv('conv-turn2').messages[3].content).toBe('glad it helped');
       expect(getConv('conv-turn2').runPhase).toBe('idle');
       expect(chat.isStreaming).toBe(false);
       // Listeners still registered exactly once across both turns.
-      expect(listenMock.mock.calls.filter(([e]) => e === 'ai:error')).toHaveLength(1);
+      expect(
+        listenMock.mock.calls.filter(([e]) => e === 'ai:error'),
+      ).toHaveLength(1);
     } finally {
       restoreRaf();
       flushStreamPending();
@@ -1397,4 +1409,3 @@ describe('stream coalescing', () => {
     }
   });
 });
-
