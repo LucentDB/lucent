@@ -22,6 +22,19 @@ describe('toTsv', () => {
   it('returns an empty string for no rows', () => {
     expect(toTsv([])).toBe('');
   });
+
+  it('neutralizes spreadsheet formula triggers (CWE-1236)', () => {
+    expect(toTsv([['=1+2', '+cmd', '-5', '@SUM(A1)']])).toBe(
+      "'=1+2\t'+cmd\t'-5\t'@SUM(A1)",
+    );
+    expect(toTsv([['  =SUM(1)', '\n=CMD', '|cmd', ' \t +10']])).toBe(
+      "'  =SUM(1)\t'\n=CMD\t'|cmd\t' \t +10",
+    );
+  });
+
+  it('preserves negative and positive numeric values without single-quote neutralization in TSV', () => {
+    expect(toTsv([[-5, +123]])).toBe('-5\t123');
+  });
 });
 
 describe('toCsv', () => {
@@ -60,6 +73,10 @@ describe('toCsv', () => {
     expect(toCsv([['-5']])).toBe("'-5");
     expect(toCsv([['@SUM(A1)']])).toBe("'@SUM(A1)");
     expect(toCsv([['\tcmd']])).toBe("'\tcmd");
+    expect(toCsv([['  =SUM(1)']])).toBe("'  =SUM(1)");
+    expect(toCsv([['\n=CMD']])).toBe('"\'\n=CMD"');
+    expect(toCsv([['|cmd']])).toBe("'|cmd");
+    expect(toCsv([[' \t +10']])).toBe("' \t +10");
   });
 
   it('preserves negative and positive numeric values without single-quote neutralization', () => {
