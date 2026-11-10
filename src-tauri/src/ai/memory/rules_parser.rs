@@ -30,10 +30,7 @@ pub fn export_to_markdown(connection_key: &str, memories: &[MemoryItem]) -> Stri
             // Sanitize line breaks to prevent Markdown structure/rule injection (CWE-93 / CWE-117)
             let safe_key = item.key_phrase.replace('\r', "").replace('\n', " ");
             let safe_rule = item.rule_text.replace('\r', "").replace('\n', " ");
-            out.push_str(&format!(
-                "- **[{}]**: {}\n",
-                safe_key, safe_rule
-            ));
+            out.push_str(&format!("- **[{}]**: {}\n", safe_key, safe_rule));
             if let Some(sql) = &item.sql_snippet {
                 let safe_sql = sql.replace('\r', "").replace('\n', " ");
                 out.push_str(&format!("  - SQL: `{safe_sql}`\n"));
@@ -235,7 +232,12 @@ mod tests {
 
         // Exactly 1 rule should be parsed — the injected headings and sub-bullets
         // were flattened into the single rule_text / key_phrase and cannot inject new rules.
-        assert_eq!(parsed.len(), 1, "expected exactly 1 rule, got {}", parsed.len());
+        assert_eq!(
+            parsed.len(),
+            1,
+            "expected exactly 1 rule, got {}",
+            parsed.len()
+        );
         assert!(!parsed[0].key_phrase.contains('\n'));
         assert!(!parsed[0].rule_text.contains('\n'));
         assert_eq!(parsed[0].category, MemoryCategory::Quirk);

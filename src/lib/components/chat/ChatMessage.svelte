@@ -76,8 +76,8 @@
     {#if message.content}
       <div class="text selectable">
         {@html rendered.html}{#if rendered.tail}<span class="stream-tail"
-          >{rendered.tail}</span
-        >{/if}
+            >{rendered.tail}</span
+          >{/if}
       </div>
     {/if}
 

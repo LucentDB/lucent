@@ -8,7 +8,6 @@ use crate::ai::providers::dispatch;
 use crate::ai::tools::LucentToolEnum;
 use async_trait::async_trait;
 use futures::StreamExt;
-use std::future::Future;
 use rig_core::client::CompletionClient;
 use rig_core::completion::message::{AssistantContent, ReasoningContent};
 use rig_core::completion::{self, Completion, CompletionModel, GetTokenUsage, ToolDefinition};
@@ -17,6 +16,7 @@ use rig_core::providers::{anthropic, deepseek, gemini, mistral, openai, openrout
 use rig_core::streaming::StreamedAssistantContent;
 use rig_core::tool::{ToolDyn, ToolError as RigToolError};
 use rig_core::wasm_compat::WasmBoxedFuture;
+use std::future::Future;
 
 pub struct RigProvider {
     kind: AiProvider,
@@ -247,15 +247,18 @@ fn normalise_reasoning_field(mut delta: serde_json::Value) -> serde_json::Value 
             .or_else(|| {
                 // MiniMax-style array of parts; only `reasoning.text` entries
                 // carry plain text — encrypted/redacted entries are skipped.
-                delta.get("reasoning_details").and_then(|v| v.as_array()).map(|a| {
-                    a.iter()
-                        .filter(|e| {
-                            e.get("type").and_then(|t| t.as_str()) == Some("reasoning.text")
-                        })
-                        .filter_map(|e| e.get("text").and_then(|t| t.as_str()))
-                        .collect::<Vec<_>>()
-                        .join("")
-                })
+                delta
+                    .get("reasoning_details")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter(|e| {
+                                e.get("type").and_then(|t| t.as_str()) == Some("reasoning.text")
+                            })
+                            .filter_map(|e| e.get("text").and_then(|t| t.as_str()))
+                            .collect::<Vec<_>>()
+                            .join("")
+                    })
             });
 
         if let Some(text) = text.filter(|s| !s.is_empty()) {
@@ -318,9 +321,7 @@ fn rewrite_complete_lines(buf: &[u8]) -> bytes::Bytes {
                     changed = true;
                     out.extend_from_slice(b"data: ");
                     // Serialisation is infallible for a Value built from parsed JSON.
-                    out.extend_from_slice(
-                        serde_json::to_string(&v).unwrap_or_default().as_bytes(),
-                    );
+                    out.extend_from_slice(serde_json::to_string(&v).unwrap_or_default().as_bytes());
                     out.push(b'\n');
                 } else {
                     // Nothing to mirror (already normalised, or no reasoning
@@ -349,6 +350,7 @@ fn rewrite_complete_lines(buf: &[u8]) -> bytes::Bytes {
 /// intact. NOTE: this single-chunk entry cannot normalize a `data:` line
 /// split across chunks — production streaming uses `rewrite_sse_stream`,
 /// which buffers the partial line across chunk calls instead.
+#[cfg(test)]
 fn rewrite_sse_reasoning(chunk: bytes::Bytes) -> bytes::Bytes {
     // Cheap fast path: chunks without `data:` lines (keep-alives, comments)
     // never need rewriting — return them untouched, allocation-free.
@@ -425,8 +427,11 @@ where
     fn send<T, U>(
         &self,
         req: rig_core::http_client::Request<T>,
-    ) -> impl Future<Output = rig_core::http_client::Result<rig_core::http_client::Response<rig_core::http_client::LazyBody<U>>>>
-           + rig_core::wasm_compat::WasmCompatSend
+    ) -> impl Future<
+        Output = rig_core::http_client::Result<
+            rig_core::http_client::Response<rig_core::http_client::LazyBody<U>>,
+        >,
+    > + rig_core::wasm_compat::WasmCompatSend
            + 'static
     where
         T: Into<bytes::Bytes> + rig_core::wasm_compat::WasmCompatSend,
@@ -444,8 +449,11 @@ where
     fn send_multipart<U>(
         &self,
         req: rig_core::http_client::Request<rig_core::http_client::MultipartForm>,
-    ) -> impl Future<Output = rig_core::http_client::Result<rig_core::http_client::Response<rig_core::http_client::LazyBody<U>>>>
-           + rig_core::wasm_compat::WasmCompatSend
+    ) -> impl Future<
+        Output = rig_core::http_client::Result<
+            rig_core::http_client::Response<rig_core::http_client::LazyBody<U>>,
+        >,
+    > + rig_core::wasm_compat::WasmCompatSend
            + 'static
     where
         U: From<bytes::Bytes> + rig_core::wasm_compat::WasmCompatSend + 'static,
@@ -1018,9 +1026,7 @@ mod tests {
         let (mut think, mut text) = (vec![], vec![]);
         while let Some(item) = stream.next().await {
             match item.expect("stream item ok") {
-                StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
-                    think.push(reasoning)
-                }
+                StreamedAssistantContent::ReasoningDelta { reasoning, .. } => think.push(reasoning),
                 StreamedAssistantContent::Text(t) => text.push(t.text),
                 _ => {}
             }
@@ -1057,7 +1063,10 @@ mod tests {
     fn normalise_fills_reasoning_content_from_reasoning_string() {
         let delta = serde_json::json!({"role": "assistant", "reasoning": "plan…"});
         let out = normalise_reasoning_field(delta);
-        assert_eq!(out.get("reasoning_content").and_then(|v| v.as_str()), Some("plan…"));
+        assert_eq!(
+            out.get("reasoning_content").and_then(|v| v.as_str()),
+            Some("plan…")
+        );
     }
 
     #[test]
@@ -1135,9 +1144,9 @@ mod tests {
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
         use std::sync::Mutex;
 
-        let model = MockCompletionModel::from_stream_turns([vec![
-            MockStreamEvent::reasoning("full block"),
-        ]]);
+        let model = MockCompletionModel::from_stream_turns([vec![MockStreamEvent::reasoning(
+            "full block",
+        )]]);
         let agent = rig_core::agent::AgentBuilder::new(model)
             .preamble("p")
             .build();
@@ -1145,15 +1154,11 @@ mod tests {
         let thinking = Mutex::new(vec![]);
         let prompt = make_msg(MessageRole::User, "hi", None);
         let resp = rig_agent
-            .complete(
-                prompt,
-                vec![],
-                &|d| {
-                    if let AgentDelta::Thinking(t) = d {
-                        thinking.lock().unwrap().push(t);
-                    }
-                },
-            )
+            .complete(prompt, vec![], &|d| {
+                if let AgentDelta::Thinking(t) = d {
+                    thinking.lock().unwrap().push(t);
+                }
+            })
             .await
             .expect("mocked agent turn completes");
         assert_eq!(*thinking.lock().unwrap(), vec!["full block".to_string()]);
@@ -1228,9 +1233,7 @@ mod tests {
         let (mut think, mut text) = (vec![], vec![]);
         while let Some(item) = stream.next().await {
             match item.expect("stream item ok") {
-                StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
-                    think.push(reasoning)
-                }
+                StreamedAssistantContent::ReasoningDelta { reasoning, .. } => think.push(reasoning),
                 StreamedAssistantContent::Text(t) => text.push(t.text),
                 _ => {}
             }
@@ -1261,10 +1264,13 @@ mod tests {
         assert!(!expected.is_empty());
         // Baseline sanity: the unsplit run must surface every delta.
         let (think, _) = drain_chunked(vec![body.clone()]).await;
-        assert_eq!(think.join(""), expected, "unsplit baseline must be lossless");
+        assert_eq!(
+            think.join(""),
+            expected,
+            "unsplit baseline must be lossless"
+        );
         for off in 0..=body.len() {
-            let (think, _) =
-                drain_chunked(vec![body.slice(0..off), body.slice(off..)]).await;
+            let (think, _) = drain_chunked(vec![body.slice(0..off), body.slice(off..)]).await;
             let joined = think.join("");
             assert!(
                 !joined.contains('\u{FFFD}'),
@@ -1292,8 +1298,7 @@ mod tests {
                 .position(|&b| b == b'\n')
                 .expect("fixture has lines");
         let off = data_start + (first_nl - data_start) / 2;
-        let (think, _) =
-            drain_chunked(vec![body.slice(0..off), body.slice(off..)]).await;
+        let (think, _) = drain_chunked(vec![body.slice(0..off), body.slice(off..)]).await;
         assert_eq!(
             think.join(""),
             expected,
@@ -1323,8 +1328,7 @@ mod tests {
         let bytes = bytes::Bytes::copy_from_slice(s.as_bytes());
         // Every two-way split (including inside the multi-byte —) must round-trip.
         for off in 0..=bytes.len() {
-            let out =
-                collect_rewritten(vec![bytes.slice(0..off), bytes.slice(off..)]).await;
+            let out = collect_rewritten(vec![bytes.slice(0..off), bytes.slice(off..)]).await;
             assert_eq!(
                 &out[..],
                 &bytes[..],
