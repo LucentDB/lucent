@@ -157,6 +157,24 @@ describe('dedupeBySql', () => {
   it('passes an empty list through', () => {
     expect(dedupeBySql([])).toEqual([]);
   });
+
+  it('stops processing once limit is reached', () => {
+    const out = dedupeBySql(
+      [
+        entry({ id: '1', sql: 'SELECT 1' }),
+        entry({ id: '2', sql: 'SELECT 2' }),
+        entry({ id: '3', sql: 'SELECT 3' }),
+        entry({ id: '4', sql: 'SELECT 4' }),
+      ],
+      2,
+    );
+    expect(out.map((e) => e.id)).toEqual(['1', '2']);
+  });
+
+  it('returns empty array when limit is 0 or negative', () => {
+    expect(dedupeBySql([entry({ id: '1', sql: 'SELECT 1' })], 0)).toEqual([]);
+    expect(dedupeBySql([entry({ id: '1', sql: 'SELECT 1' })], -1)).toEqual([]);
+  });
 });
 
 describe('describeEntry', () => {

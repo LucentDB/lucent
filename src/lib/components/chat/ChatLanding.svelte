@@ -56,11 +56,11 @@
   const entries = historyQuery(() => history.filter);
 
   // Browsing a table re-runs the same statement per page, so raw history is
-  // often one query repeated — deduped before slicing, or the list would be
-  // three identical rows.
+  // often one query repeated — pass RECENT_LIMIT to dedupeBySql so it early-exits
+  // instead of scanning and normalizing all history entries.
   const recents = $derived(
     connected && !entries.error
-      ? dedupeBySql(entries.data ?? []).slice(0, RECENT_LIMIT)
+      ? dedupeBySql(entries.data ?? [], RECENT_LIMIT)
       : [],
   );
 
