@@ -350,6 +350,7 @@ fn rewrite_complete_lines(buf: &[u8]) -> bytes::Bytes {
 /// intact. NOTE: this single-chunk entry cannot normalize a `data:` line
 /// split across chunks — production streaming uses `rewrite_sse_stream`,
 /// which buffers the partial line across chunk calls instead.
+#[cfg(test)]
 fn rewrite_sse_reasoning(chunk: bytes::Bytes) -> bytes::Bytes {
     // Cheap fast path: chunks without `data:` lines (keep-alives, comments)
     // never need rewriting — return them untouched, allocation-free.
@@ -461,6 +462,7 @@ where
         async move { inner.send_multipart(req).await }
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn send_streaming<T>(
         &self,
         req: rig_core::http_client::Request<T>,
@@ -1212,10 +1214,7 @@ mod tests {
     async fn drain_chunked(chunks: Vec<bytes::Bytes>) -> (Vec<String>, Vec<String>) {
         use futures::StreamExt;
         let inner = rig_core::test_utils::SequencedStreamingHttpClient::new(
-            chunks
-                .into_iter()
-                .map(|c| Ok::<bytes::Bytes, rig_core::http_client::Error>(c))
-                .collect(),
+            chunks.into_iter().map(Ok).collect(),
         );
         let client = ReasoningRewritingClient { inner };
         let req = rig_core::http_client::Request::builder()
@@ -1244,11 +1243,8 @@ mod tests {
     /// chunks (byte-level assertions, no SSE parsing).
     async fn collect_rewritten(chunks: Vec<bytes::Bytes>) -> bytes::Bytes {
         use futures::StreamExt;
-        let inner: rig_core::http_client::sse::BoxedStream = Box::pin(futures::stream::iter(
-            chunks
-                .into_iter()
-                .map(|c| Ok::<bytes::Bytes, rig_core::http_client::Error>(c)),
-        ));
+        let inner: rig_core::http_client::sse::BoxedStream =
+            Box::pin(futures::stream::iter(chunks.into_iter().map(Ok)));
         let mut out = Vec::new();
         let mut stream = rewrite_sse_stream(inner);
         while let Some(item) = stream.next().await {
@@ -1310,8 +1306,8 @@ mod tests {
         let raw = "data: [DONE]\n\ndata: {\"partial\": tru";
         let mid = 10;
         let out = collect_rewritten(vec![
-            bytes::Bytes::copy_from_slice(raw[..mid].as_bytes()),
-            bytes::Bytes::copy_from_slice(raw[mid..].as_bytes()),
+            bytes::Bytes::copy_from_slice(&raw.as_bytes()[..mid]),
+            bytes::Bytes::copy_from_slice(&raw.as_bytes()[mid..]),
         ])
         .await;
         assert_eq!(
