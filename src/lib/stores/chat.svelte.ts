@@ -299,7 +299,8 @@ export function adaptPersistedMessage(p: PersistedChatMessage): ChatMessage {
           } else if (seg.type === 'tool_call' && seg.call) {
             if (!seg.call.status || seg.call.status === 'running') {
               seg.call.status =
-                seg.call.summary === 'error' || seg.call.summary?.startsWith('error')
+                seg.call.summary === 'error' ||
+                seg.call.summary?.startsWith('error')
                   ? 'failed'
                   : seg.call.summary
                     ? 'completed'
@@ -495,7 +496,8 @@ export async function openConversation(
       if (target) {
         if (meta?.connection_id) target.connectionId = meta.connection_id;
         if (meta?.created_at) target.createdAt = meta.created_at * 1000;
-        if (persisted.length) target.messages = persisted.map(adaptPersistedMessage);
+        if (persisted.length)
+          target.messages = persisted.map(adaptPersistedMessage);
       }
     } catch (e) {
       console.error('Failed to hydrate conversation:', e);
