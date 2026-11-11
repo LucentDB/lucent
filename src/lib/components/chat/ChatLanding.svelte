@@ -57,10 +57,11 @@
 
   // Browsing a table re-runs the same statement per page, so raw history is
   // often one query repeated — deduped before slicing, or the list would be
-  // three identical rows.
+  // three identical rows. Early-exit limit prevents regex/string operations on
+  // the remaining history list once RECENT_LIMIT entries are found.
   const recents = $derived(
     connected && !entries.error
-      ? dedupeBySql(entries.data ?? []).slice(0, RECENT_LIMIT)
+      ? dedupeBySql(entries.data ?? [], RECENT_LIMIT)
       : [],
   );
 

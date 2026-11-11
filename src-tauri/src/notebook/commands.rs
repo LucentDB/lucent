@@ -866,7 +866,7 @@ async fn run_ai_cell(
         None
     } else {
         log::info!("AI cell '{cell_id}': loading API key");
-        let api_key = cached_api_key_for(&state, &config)
+        let api_key = cached_api_key_for(state, &config)
             .await
             .map_err(|e| CommandError::new("ai_config", e))?;
         log::info!("AI cell '{cell_id}': creating LLM provider");
@@ -1105,14 +1105,20 @@ async fn run_ai_cell(
                 String::new()
             };
             let error = CellError::QueryError {
-                message: format!("Agent timed out after {turn_timeout_secs} seconds.{}", stderr_note),
+                message: format!(
+                    "Agent timed out after {turn_timeout_secs} seconds.{}",
+                    stderr_note
+                ),
                 sql_error: String::new(),
             };
             let _ = channel.send(NotebookEvent::CellError {
                 cell_id: cell_id.clone(),
                 error,
             });
-            return Err(CommandError::new("agent_timeout", format!("timed out after {turn_timeout_secs}s")));
+            return Err(CommandError::new(
+                "agent_timeout",
+                format!("timed out after {turn_timeout_secs}s"),
+            ));
         }
     }
 
